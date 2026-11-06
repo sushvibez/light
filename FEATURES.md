@@ -214,7 +214,7 @@ _Last updated: 2026-10-27 (post GoLight port; see `docs/PORTING-FROM-GOLIGHT.md`
 - [x] Autograd for the above: `Exp`, `Log`, `Abs`, `Sqr`, `ELU`, `LeakyReLU`, `Mish`, `HardSwish`, `HardSigmoid`, `Clamp`, `Maximum`, `Minimum`, `PReLU`, `Narrow`, `Concat`; losses `MSELoss`, `NLLLoss`, `BCEWithLogitsLoss`, `HuberLoss` (all grad-checked)
 - [x] `nn`: ELU, LeakyReLU, Mish, HardSwish, HardSigmoid, GELU, ReLU6, PReLU, SwiGLU modules; `nn.LSTM` / `nn.GRU` (torch layout, match torch to 1e-5, trainable); `nn.ConvTranspose2d`
 - [x] Gemma 3 text decoder (`models.Gemma3`): (1+w) RMSNorm, QK-norm, GELU-tanh MLP, local/global layer pattern, logit softcap; `models.CausalLM` interface shared with `models.Llama`
-- [x] Chat engine (`engine/`): catalog of HF-cache + GGUF models, chat templates (ChatML, Llama-3, Phi-3, Mistral, Gemma), streaming generation, OpenAI-compatible `/v1/chat/completions`, `/v1/audio/transcriptions`, `/v1/embeddings`, speech-to-speech `/v1/audio/conversations` (`cmd/light-serve`), Wails v3 + React desktop app (`studio/`)
+- [x] Chat engine (`engine/`): catalog of HF-cache + GGUF models, chat templates (the model's own Jinja `chat_template`, else built-in ChatML, Llama-3, Phi-3, Mistral, Gemma), streaming generation, OpenAI-compatible `/v1/chat/completions`, `/v1/audio/transcriptions`, `/v1/embeddings`, speech-to-speech `/v1/audio/conversations` (`cmd/light-serve`), Wails v3 + React desktop app (`studio/`)
 - [ ] MoE gate / experts
 
 ## Autograd
@@ -256,7 +256,7 @@ _Last updated: 2026-10-27 (post GoLight port; see `docs/PORTING-FROM-GOLIGHT.md`
 - [x] `tokenizer.Load` / `tokenizer.Parse` dispatch on `tokenizer.json` model type
 - [x] **GGUF-metadata tokenizer** (`tokenizer.LoadGGUF` / `FromGGUFMeta`): `llama` (SentencePiece: score-ranked merges, `▁` prefix, byte fallback) and `gpt2` (byte-level BPE with llama.cpp's per-family pre-tokenizer regex chains for `tokenizer.ggml.pre` = default / llama-bpe / qwen2 / gpt-2 / deepseek-llm / deepseek-coder / falcon / starcoder-family / chatglm / poro …, `ignore_merges`), control + user-defined tokens as specials, BOS/EOS/add_bos; identical ids to llama.cpp on all 46 cases of its 10 vocab fixtures — 2026-10-29
 - [x] `models.BOSTokenID` from `tokenizer.json` post_processor; `models.EOSTokenIDs` from generation_config / config
-- [ ] Chat templates (Jinja2 subset) — Qwen / Llama-3 templates are hand-coded in the examples
+- [x] **Chat templates (Jinja2 subset)**: pure-Go Jinja engine (`internal/jinja`: whitespace control incl. trim_blocks/lstrip_blocks, if/for/set/namespace/macro/filter/with, loop.*, break/continue, Python-semantics values, str/dict/list methods, builtin filters/tests, transformers' `tojson`) + `chattemplate` (HF `chat_template.jinja` / `tokenizer_config.json` / GGUF `tokenizer.chat_template`, `raise_exception`, `strftime_now`, special tokens). The engine renders prompts with the model's own template and falls back to the hand-ported family template. Byte-identical to transformers 5.21 `apply_chat_template` on 242 renders of 11 templates (Qwen2.5, Qwen3, Llama-3.2, Phi-3.5, Phi-4-mini, Gemma 2/3, Mistral v0.3, SmolLM2/3, DeepSeek-R1-Distill) and to jinja2 3.1.6 on 98 engine cases (`scripts/verify/ref_chat_templates.py`, `ref_jinja_cases.py`) — 2026-11-06
 
 ## Quantization
 
