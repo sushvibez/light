@@ -1,0 +1,546 @@
+{
+ "repo": "HuggingFaceTB/SmolLM2-360M-Instruct",
+ "revision": "a10cc1512eabd3dde888204e902eca88bddb4951",
+ "special_tokens": {
+  "bos_token": "<|im_start|>",
+  "eos_token": "<|im_end|>",
+  "unk_token": "<|endoftext|>",
+  "pad_token": "<|im_end|>"
+ },
+ "cases": [
+  {
+   "name": "user/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nHello! What is 2+2?<|im_end|>\n"
+  },
+  {
+   "name": "user/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nHello! What is 2+2?<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "name": "system_user/agp=0",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello! What is 2+2?<|im_end|>\n"
+  },
+  {
+   "name": "system_user/agp=1",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello! What is 2+2?<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "name": "multi/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nHello! What is 2+2?<|im_end|>\n<|im_start|>assistant\n2+2 is 4.<|im_end|>\n<|im_start|>user\nAnd times 3?<|im_end|>\n"
+  },
+  {
+   "name": "multi/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nHello! What is 2+2?<|im_end|>\n<|im_start|>assistant\n2+2 is 4.<|im_end|>\n<|im_start|>user\nAnd times 3?<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "name": "system_multi/agp=0",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello! What is 2+2?<|im_end|>\n<|im_start|>assistant\n2+2 is 4.<|im_end|>\n<|im_start|>user\nAnd times 3?<|im_end|>\n"
+  },
+  {
+   "name": "system_multi/agp=1",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello! What is 2+2?<|im_end|>\n<|im_start|>assistant\n2+2 is 4.<|im_end|>\n<|im_start|>user\nAnd times 3?<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "name": "ends_assistant/agp=0",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello! What is 2+2?<|im_end|>\n<|im_start|>assistant\n2+2 is 4.<|im_end|>\n"
+  },
+  {
+   "name": "ends_assistant/agp=1",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello! What is 2+2?<|im_end|>\n<|im_start|>assistant\n2+2 is 4.<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "name": "whitespace_unicode/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "  Spaces, \"quotes\", 'apostrophes',\ttabs\nand unicode: héllo — 你好 🙂 <b>&amp;</b>\n\n"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\n  Spaces, \"quotes\", 'apostrophes',\ttabs\nand unicode: héllo — 你好 🙂 <b>&amp;</b>\n\n<|im_end|>\n"
+  },
+  {
+   "name": "whitespace_unicode/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "  Spaces, \"quotes\", 'apostrophes',\ttabs\nand unicode: héllo — 你好 🙂 <b>&amp;</b>\n\n"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\n  Spaces, \"quotes\", 'apostrophes',\ttabs\nand unicode: héllo — 你好 🙂 <b>&amp;</b>\n\n<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "name": "think_history/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "<think>\nSimple sum.\n</think>\n\n2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nHello! What is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\nSimple sum.\n</think>\n\n2+2 is 4.<|im_end|>\n<|im_start|>user\nAnd times 3?<|im_end|>\n"
+  },
+  {
+   "name": "think_history/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "<think>\nSimple sum.\n</think>\n\n2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nHello! What is 2+2?<|im_end|>\n<|im_start|>assistant\n<think>\nSimple sum.\n</think>\n\n2+2 is 4.<|im_end|>\n<|im_start|>user\nAnd times 3?<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "name": "no_thinking/agp=0",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {
+    "enable_thinking": false
+   },
+   "expected": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello! What is 2+2?<|im_end|>\n"
+  },
+  {
+   "name": "no_thinking/agp=1",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {
+    "enable_thinking": false
+   },
+   "expected": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello! What is 2+2?<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "name": "tools/agp=0",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. Paris"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "expected": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello! What is 2+2?<|im_end|>\n"
+  },
+  {
+   "name": "tools/agp=1",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. Paris"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "expected": "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHello! What is 2+2?<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "name": "tool_call/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's the weather in Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call12345",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Paris",
+         "unit": "celsius"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call12345",
+     "name": "get_weather",
+     "content": "{\"temperature\": 22, \"sky\": \"clear\"}"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. Paris"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "expected": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nWhat's the weather in Paris?<|im_end|>\n<|im_start|>assistant\n<|im_end|>\n<|im_start|>tool\n{\"temperature\": 22, \"sky\": \"clear\"}<|im_end|>\n"
+  },
+  {
+   "name": "tool_call/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's the weather in Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call12345",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Paris",
+         "unit": "celsius"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call12345",
+     "name": "get_weather",
+     "content": "{\"temperature\": 22, \"sky\": \"clear\"}"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. Paris"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "expected": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nWhat's the weather in Paris?<|im_end|>\n<|im_start|>assistant\n<|im_end|>\n<|im_start|>tool\n{\"temperature\": 22, \"sky\": \"clear\"}<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "name": "alternation_error/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nHello! What is 2+2?<|im_end|>\n<|im_start|>user\nAnd times 3?<|im_end|>\n"
+  },
+  {
+   "name": "alternation_error/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<|im_start|>system\nYou are a helpful AI assistant named SmolLM, trained by Hugging Face<|im_end|>\n<|im_start|>user\nHello! What is 2+2?<|im_end|>\n<|im_start|>user\nAnd times 3?<|im_end|>\n<|im_start|>assistant\n"
+  }
+ ]
+}
