@@ -1,4 +1,4 @@
-//go:build !nocuda
+//go:build !nocuda && cgo
 
 package quant_test
 
