@@ -37,3 +37,13 @@ func CUDA(ordinal int) (Device, error) {
 	}
 	return cudaDevice{ordinal: ordinal}, nil
 }
+
+// CUDAComputeCapability returns the compute capability (major, minor) of the
+// GPU at ordinal, e.g. 8, 0 for an A100 or 8, 9 for an L4 / RTX 40-series.
+func CUDAComputeCapability(ordinal int) (major, minor int, err error) {
+	p, err := cudart.GetDeviceProperties(ordinal)
+	if err != nil {
+		return 0, 0, fmt.Errorf("device: %w", err)
+	}
+	return p.ComputeMajor, p.ComputeMinor, nil
+}

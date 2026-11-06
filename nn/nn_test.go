@@ -269,6 +269,10 @@ func TestLinearF8Weight(t *testing.T) {
 	}
 	check(device.CPU())
 	if gpu, err := device.CUDA(0); err == nil {
-		check(gpu)
+		if major, minor, err := device.CUDAComputeCapability(gpu.Ordinal()); err == nil && major*10+minor >= 89 {
+			check(gpu)
+		} else {
+			t.Logf("skipping CUDA: FP8 GEMM needs compute capability 8.9+; GPU is %d.%d (%v)", major, minor, err)
+		}
 	}
 }

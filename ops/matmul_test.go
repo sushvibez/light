@@ -310,6 +310,9 @@ func TestMatMulF8(t *testing.T) {
 	}
 
 	gpu := cudaOrSkip(t)
+	if major, minor, err := device.CUDAComputeCapability(gpu.Ordinal()); err != nil || major*10+minor < 89 {
+		t.Skipf("CUDA FP8 GEMM needs compute capability 8.9+; GPU is %d.%d (%v)", major, minor, err)
+	}
 	aqg, _ := aq.To(gpu)
 	wqg, _ := wq.To(gpu)
 	wqgT, _ := wqg.Transpose(0, 1)

@@ -4,6 +4,7 @@ package cuda
 
 import (
 	"fmt"
+	"sync"
 
 	"light/device"
 	"light/dtype"
@@ -210,7 +211,28 @@ func batchedGemmExLauncher(dt cudart.DataType) registry.Kernel {
 	}
 }
 
-// matmulF8Launcher: Inputs = [a F8 (M, K), b F8 (K, N) view, scales F32 (2,)
+// fp8Support caches fp8GEMMSupported's answer per device ordinal.
+var fp8Support sync.Map // int -> fp8SupportResult
+
+type fp8SupportResult struct{ err error }
+
+// fp8GEMMSupported reports (as a nil error) whether cuBLASLt's FP8 GEMM can
+// run on the GPU at ord: it needs compute capability 8.9+ (Ada, Hopper and
+// newer). On older GPUs such as the A100 (8.0) cuBLASLt only returns an
+// opaque "not supported" status, so this names the actual requirement.
+func fp8GEMMSupported(ord int) error {
+	if v, ok := fp8Support.Load(ord); ok {
+		return v.(fp8SupportResult).err
+	}
+	major, minor, err := device.CUDAComputeCapability(ord)
+	if err == nil && major*10+minor < 89 {
+		err = fmt.Errorf("cuda: FP8 matmul needs compute capability 8.9+ (Ada / Hopper); CUDA(%d) is %d.%d", ord, major, minor)
+	}
+	fp8Support.Store(ord, fp8SupportResult{err})
+	return err
+}
+
+// matmulF8Launcher: Inputs =[a F8 (M, K), b F8 (K, N) view, scales F32 (2,)
 // = {aScale, bScale} on device]; out at the registry dtype. cuBLASLt's FP8
 // GEMM wants the weight as a row-major (N, K) block, which is what
 // nn.Linear's transpose view already is; any other b layout is transposed
@@ -238,6 +260,9 @@ func matmulF8Launcher(ctx *registry.Context) error {
 		}
 	}
 	ord := out.Device().Ordinal()
+	if err := fp8GEMMSupported(ord); err != nil {
+		return err
+	}
 	if err := cudart.SetDevice(ord); err != nil {
 		return err
 	}
