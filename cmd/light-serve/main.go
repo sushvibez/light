@@ -57,7 +57,7 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		log.Printf("loaded %s (%s template) in %v", m.Spec.ID, m.Spec.Family, m.LoadTime)
+		log.Printf("loaded %s (%s family, %s chat template) in %v", m.Spec.ID, m.Spec.Family, m.Template.Source, m.LoadTime)
 	}
 	log.Printf("listening on http://%s/v1", *addr)
 	log.Fatal(http.ListenAndServe(*addr, engine.OpenAIHandler(rt)))

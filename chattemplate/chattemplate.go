@@ -110,14 +110,59 @@ func tokenString(raw json.RawMessage) (string, bool) {
 // tokens come from tokenizer_config.json, then special_tokens_map.json for
 // any it lacks. It returns ErrNoTemplate when neither file has a template.
 func LoadDir(dir string) (*Template, error) {
-	var cfg map[string]json.RawMessage
-	if raw, err := os.ReadFile(filepath.Join(dir, "tokenizer_config.json")); err == nil {
-		if err := json.Unmarshal(raw, &cfg); err != nil {
-			return nil, fmt.Errorf("chattemplate: tokenizer_config.json: %w", err)
-		}
-	} else if !os.IsNotExist(err) {
+	cfg, err := readConfig(dir)
+	if err != nil {
 		return nil, err
 	}
+	special := specialTokens(dir, cfg)
+	if raw, err := os.ReadFile(filepath.Join(dir, "chat_template.jinja")); err == nil {
+		return New(string(raw), special)
+	}
+	field, ok := cfg["chat_template"]
+	if !ok || string(field) == "null" {
+		return nil, ErrNoTemplate
+	}
+	return fromConfigField(field, special)
+}
+
+// HasTemplate reports whether dir holds a chat template (a
+// chat_template.jinja file or a tokenizer_config.json chat_template).
+func HasTemplate(dir string) bool {
+	if _, err := os.Stat(filepath.Join(dir, "chat_template.jinja")); err == nil {
+		return true
+	}
+	cfg, err := readConfig(dir)
+	if err != nil {
+		return false
+	}
+	field, ok := cfg["chat_template"]
+	return ok && string(field) != "null"
+}
+
+// SpecialTokens returns the special tokens transformers would pass to the
+// template for the tokenizer in dir (tokenizer_config.json, then
+// special_tokens_map.json for the ones it lacks).
+func SpecialTokens(dir string) map[string]string {
+	cfg, _ := readConfig(dir)
+	return specialTokens(dir, cfg)
+}
+
+func readConfig(dir string) (map[string]json.RawMessage, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, "tokenizer_config.json"))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var cfg map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil, fmt.Errorf("chattemplate: tokenizer_config.json: %w", err)
+	}
+	return cfg, nil
+}
+
+func specialTokens(dir string, cfg map[string]json.RawMessage) map[string]string {
 	special := map[string]string{}
 	addSpecial := func(m map[string]json.RawMessage, onlyMissing bool) {
 		keys := append([]string{}, specialTokenAttrs...)
@@ -150,14 +195,13 @@ func LoadDir(dir string) (*Template, error) {
 			addSpecial(stm, true)
 		}
 	}
+	return special
+}
 
-	if raw, err := os.ReadFile(filepath.Join(dir, "chat_template.jinja")); err == nil {
-		return New(string(raw), special)
-	}
-	field, ok := cfg["chat_template"]
-	if !ok || string(field) == "null" {
-		return nil, ErrNoTemplate
-	}
+// fromConfigField compiles tokenizer_config.json's chat_template: a string,
+// or a list of {name, template} with "default" (and optionally "tool_use",
+// picked when tools are passed).
+func fromConfigField(field json.RawMessage, special map[string]string) (*Template, error) {
 	var src string
 	if json.Unmarshal(field, &src) == nil {
 		return New(src, special)
