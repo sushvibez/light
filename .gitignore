@@ -42,8 +42,8 @@ go.work.sum
 *.safetensors
 *.gguf
 # Preserve any reference fixtures kept as test data.
-!/testdata/**/*.safetensors
-!/testdata/**/*.gguf
+!**/testdata/**/*.safetensors
+!**/testdata/**/*.gguf
 
 # ─── IDE / OS ────────────────────────────────────────────────────────────────
 # JetBrains (GoLand) config — keep local, even shared parts can leak personal info.
