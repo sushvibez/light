@@ -34,7 +34,8 @@ Progress and design notes: [`FEATURES.md`](FEATURES.md), [`CHECKPOINTS.md`](CHEC
   `/usr/local/cuda` or `CUDA_PATH`. Kernels are shipped as PTX
   (`kernels/cuda/ptx/`, compiled for `compute_80`) and JIT-compiled by the
   driver on first use, so `nvcc` is only needed to rebuild them
-  (`scripts/build_ptx.sh`). Everything builds without CUDA with `-tags nocuda`.
+  (`scripts/build_ptx.sh`). Everything builds without CUDA with `-tags nocuda`,
+  and with cgo disabled (`CGO_ENABLED=0`) the CPU-only build is picked automatically.
 - Python with `transformers`/`torch` only for regenerating reference numbers
   (`scripts/verify/`), never at runtime.
 
