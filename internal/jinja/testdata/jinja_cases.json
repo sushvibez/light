@@ -1,0 +1,745 @@
+{
+ "jinja2_version": "3.1.6",
+ "context": {
+  "messages": [
+   {
+    "role": "system",
+    "content": "  Be brief.  "
+   },
+   {
+    "role": "user",
+    "content": "Hi\nthere"
+   },
+   {
+    "role": "assistant",
+    "content": "Hello!"
+   },
+   {
+    "role": "user",
+    "content": "Bye"
+   }
+  ],
+  "d": {
+   "b": 1,
+   "a": [
+    1,
+    2
+   ],
+   "c": {
+    "x": "y"
+   }
+  },
+  "tool": {
+   "name": "f",
+   "description": "café — \"q\" 'a'",
+   "params": {
+    "n": 1.5,
+    "ok": true,
+    "none": null
+   }
+  },
+  "words": [
+   "banana",
+   "Apple",
+   "cherry",
+   "apple"
+  ],
+  "nums": [
+   3,
+   1,
+   2,
+   5,
+   4
+  ],
+  "text": "  Hello, World!  ",
+  "emoji": "hi 🙂 <b>&</b>"
+ },
+ "cases": [
+  {
+   "name": "lstrip_trim",
+   "template": "  {% if true %}\n    x\n  {% endif %}\nend\n",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "    x\nend"
+  },
+  {
+   "name": "for_lines",
+   "template": "{% for i in [1,2,3] %}\n  {{ i }}\n{% endfor %}\n",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "  1\n  2\n  3\n"
+  },
+  {
+   "name": "dash_both",
+   "template": "a  {%- if true -%}  b  {%- endif -%}  c",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "abc"
+  },
+  {
+   "name": "dash_var",
+   "template": "a \n {{- 'b' -}} \n c",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "abc"
+  },
+  {
+   "name": "plus_disables",
+   "template": "x\n  {%+ if true %}y{% endif +%}\nz",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "x\n  y\nz"
+  },
+  {
+   "name": "comment",
+   "template": "a {# c #}\n b\n  {# c2 #}\nx {#- c3 -#}  y",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "a  b\nxy"
+  },
+  {
+   "name": "var_not_trimmed",
+   "template": "{{ 'a' }}\n{{ 'b' }}\n",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "a\nb"
+  },
+  {
+   "name": "var_not_lstripped",
+   "template": "  {{ 'v' }}\n",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "  v"
+  },
+  {
+   "name": "not_line_start",
+   "template": "a {% if true %}b{% endif %}\n",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "a b"
+  },
+  {
+   "name": "crlf",
+   "template": "l1\r\n{% if true %}\r\nl2\r\n{% endif %}\r\n",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "l1\nl2\n"
+  },
+  {
+   "name": "two_trailing_newlines",
+   "template": "x\n\n",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "x\n"
+  },
+  {
+   "name": "raw",
+   "template": "{% raw %}{{ x }} {% if %}{% endraw %}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "{{ x }} {% if %}"
+  },
+  {
+   "name": "trim_off",
+   "template": "  {% if true %}\n    x\n  {% endif %}\n",
+   "trim_blocks": false,
+   "lstrip_blocks": false,
+   "expected": "  \n    x\n  "
+  },
+  {
+   "name": "trim_only",
+   "template": "  {% if true %}\n    x\n  {% endif %}\n",
+   "trim_blocks": true,
+   "lstrip_blocks": false,
+   "expected": "      x\n  "
+  },
+  {
+   "name": "lstrip_only",
+   "template": "  {% if true %}\n    x\n  {% endif %}\n",
+   "trim_blocks": false,
+   "lstrip_blocks": true,
+   "expected": "\n    x\n"
+  },
+  {
+   "name": "loop_vars",
+   "template": "{% for x in 'abc' %}{{ loop.index }}{{ loop.index0 }}{{ loop.first }}{{ loop.last }}{{ loop.length }}{{ loop.revindex }}{{ loop.revindex0 }}|{% endfor %}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "10TrueFalse332|21FalseFalse321|32FalseTrue310|"
+  },
+  {
+   "name": "loop_prev_next",
+   "template": "{% for x in nums %}{{ loop.previtem }}<{{ x }}>{{ loop.nextitem }},{% endfor %}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "<3>1,3<1>2,1<2>5,2<5>4,5<4>,"
+  },
+  {
+   "name": "loop_cycle",
+   "template": "{% for x in nums %}{{ loop.cycle('a', 'b') }}{% endfor %}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "ababa"
+  },
+  {
+   "name": "for_else",
+   "template": "{% for x in [] %}x{% else %}empty{% endfor %}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "empty"
+  },
+  {
+   "name": "for_if",
+   "template": "{% for x in range(10) if x is even %}{{ x }}/{{ loop.length }},{% endfor %}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "0/5,2/5,4/5,6/5,8/5,"
+  },
+  {
+   "name": "break_continue",
+   "template": "{% for x in range(10) %}{% if x == 2 %}{% continue %}{% endif %}{% if x == 5 %}{% break %}{% endif %}{{ x }}{% endfor %}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "0134"
+  },
+  {
+   "name": "nested_loop",
+   "template": "{% for a in [1,2] %}{% for b in [3,4] %}{{ loop.index }}{% endfor %}{{ loop.index }};{% endfor %}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "121;122;"
+  },
+  {
+   "name": "dict_iter",
+   "template": "{% for k in d %}{{ k }}{% endfor %}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "bac"
+  },
+  {
+   "name": "unpack_items",
+   "template": "{% for k, v in d.items() %}{{ k }}={{ v }};{% endfor %}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "b=1;a=[1, 2];c={'x': 'y'};"
+  },
+  {
+   "name": "items_filter",
+   "template": "{% for k, v in d | items %}{{ k }}{% endfor %}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "bac"
+  },
+  {
+   "name": "reverse_slice_loop",
+   "template": "{% for m in messages[::-1] %}{{ m.role }},{% endfor %}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "user,assistant,user,system,"
+  },
+  {
+   "name": "loop_scope",
+   "template": "{% set x = 1 %}{% for i in [1,2] %}{{ x }}{% set x = x + 1 %}{{ x }}{% endfor %}{{ x }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "12121"
+  },
+  {
+   "name": "namespace",
+   "template": "{% set ns = namespace(n=0, s='') %}{% for i in range(4) %}{% set ns.n = ns.n + i %}{% set ns.s = ns.s ~ i %}{% endfor %}{{ ns.n }} {{ ns.s }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "6 0123"
+  },
+  {
+   "name": "namespace_empty",
+   "template": "{% set ns = namespace() %}{% set ns.i = 3 %}{{ ns.i }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "3"
+  },
+  {
+   "name": "if_scope",
+   "template": "{% if true %}{% set y = 5 %}{% endif %}{{ y }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "5"
+  },
+  {
+   "name": "toplevel_reassign",
+   "template": "{% set messages = messages[1:] %}{{ messages | length }}{% for m in messages %}{{ m.role[0] }}{% endfor %}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "3uau"
+  },
+  {
+   "name": "tuple_set",
+   "template": "{% set a, b = 1, 2 %}{{ a }}{{ b }}{% set t = 1, 2 %}{{ t }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "12(1, 2)"
+  },
+  {
+   "name": "with",
+   "template": "{% with a = 1, b = 2 %}{{ a + b }}{% endwith %}[{{ a }}]",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "3[]"
+  },
+  {
+   "name": "set_block",
+   "template": "{% set x %}  hi {{ 1 + 1 }} {% endset %}[{{ x }}]",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "[  hi 2 ]"
+  },
+  {
+   "name": "set_block_filter",
+   "template": "{% set x | upper | trim %}  hi  {% endset %}[{{ x }}]",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "[HI]"
+  },
+  {
+   "name": "macro",
+   "template": "{% macro greet(name, greeting='Hi') %}{{ greeting }}, {{ name }}!{% endmacro %}{{ greet('Bob') }} {{ greet('Al', greeting='Yo') }} {{ greet() }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "Hi, Bob! Yo, Al! Hi, !"
+  },
+  {
+   "name": "filter_block",
+   "template": "{% filter upper %}abc{{ 'd' }}{% endfilter %}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "ABCD"
+  },
+  {
+   "name": "print_values",
+   "template": "{{ none }}|{{ true }}|{{ False }}|{{ 1.0 }}|{{ 1e20 }}|{{ 1e16 }}|{{ 1e15 }}|{{ 0.1 + 0.2 }}|{{ 1/3 }}|{{ 1e-5 }}|{{ 0.0001 }}|{{ -0.0 }}|{{ 2.5e-7 }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "None|True|False|1.0|1e+20|1e+16|1000000000000000.0|0.30000000000000004|0.3333333333333333|1e-05|0.0001|-0.0|2.5e-07"
+  },
+  {
+   "name": "print_containers",
+   "template": "{{ [1, 'a', none, true, 2.5] }}|{{ {'a': [1, {'b': 'c'}]} }}|{{ ('x',) }}|{{ (1, 2) }}|{{ [] }}|{{ {} }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "[1, 'a', None, True, 2.5]|{'a': [1, {'b': 'c'}]}|('x',)|(1, 2)|[]|{}"
+  },
+  {
+   "name": "print_quotes",
+   "template": "{{ [\"it's\", 'q\"', 'both\\'\"', 'nl\\n', 'tab\\t', 'bs\\\\'] }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "[\"it's\", 'q\"', 'both\\'\"', 'nl\\n', 'tab\\t', 'bs\\\\']"
+  },
+  {
+   "name": "repr_unicode",
+   "template": "{{ [tool.description, emoji, '\\x00\\x7f\\xa0\\u200b'] }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "['café — \"q\" \\'a\\'', 'hi 🙂 <b>&</b>', '\\x00\\x7f\\xa0\\u200b']"
+  },
+  {
+   "name": "tool_string",
+   "template": "{{ tool | string }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "{'name': 'f', 'description': 'café — \"q\" \\'a\\'', 'params': {'n': 1.5, 'ok': True, 'none': None}}"
+  },
+  {
+   "name": "string_escapes",
+   "template": "{{ 'a\\nb\\t\\u00e9\\x41\\101\\'\\\\ \\q' }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "a\nb\téAA'\\ \\q"
+  },
+  {
+   "name": "string_concat_literals",
+   "template": "{{ 'a' \"b\" 'c' }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "abc"
+  },
+  {
+   "name": "dict_trailing_comma",
+   "template": "{{ {'a': 1,}['a'] }}{{ [1,2,][1] }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "12"
+  },
+  {
+   "name": "int_float_literals",
+   "template": "{{ 1_000 }} {{ 1.5e3 }} {{ 12.0 }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "1000 1500.0 12.0"
+  },
+  {
+   "name": "arith",
+   "template": "{{ 7 // 2 }} {{ -7 // 2 }} {{ 7 % 3 }} {{ -7 % 3 }} {{ 7 / 2 }} {{ 2 ** 10 }} {{ 1 + 2 * 3 }} {{ (1 + 2) * 3 }} {{ 'ab' * 3 }} {{ 4 / 2 }} {{ 7.5 // 2 }} {{ -2 ** 2 }} {{ true + 1 }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "3 -4 1 2 3.5 1024 7 9 ababab 2.0 3.0 4 2"
+  },
+  {
+   "name": "concat",
+   "template": "{{ 1 ~ 'a' ~ none ~ missing ~ [1] }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "1aNone[1]"
+  },
+  {
+   "name": "compare",
+   "template": "{{ 1 < 2 < 3 }} {{ 3 > 2 > 2 }} {{ 'a' in 'abc' }} {{ 'x' not in ['a'] }} {{ 1 == 1.0 }} {{ [1,2] == [1,2] }} {{ 'b' > 'a' }} {{ none == none }} {{ {'a':1} == {'a':1} }} {{ 1 == true }} {{ 'a' in d }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "True False True True True True True True True True True"
+  },
+  {
+   "name": "and_or",
+   "template": "{{ '' or 'def' }} {{ 'a' and 'b' }} {{ none or 0 }} {{ not none }} {{ 0 and 1 }} {{ not 1 == 2 }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "def b 0 True 0 True"
+  },
+  {
+   "name": "not_precedence",
+   "template": "{{ not messages is string }} {{ not 'a' in 'b' }} {{ - 2 | abs }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "True True 2"
+  },
+  {
+   "name": "condexpr",
+   "template": "{{ 'y' if 1 else 'n' }}{{ 'y' if 0 }}|{{ 'a' if false else 'b' if true else 'c' }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "y|b"
+  },
+  {
+   "name": "filter_precedence",
+   "template": "{{ 'x' + text | trim + 'y' }}|{{ nums | length - 1 }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "xHello, World!y|4"
+  },
+  {
+   "name": "neg_binds_before_filter",
+   "template": "{{ -nums | length }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "error": "TypeError: bad operand type for unary -: 'list'"
+  },
+  {
+   "name": "percent_format",
+   "template": "{{ '%s-%d %%' % ('a', 3) }}|{{ '%s' % 'one' }}|{{ '%.2f' % 3.14159 }}|{{ 'n=%r' % 'x' }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "a-3 %|one|3.14|n='x'"
+  },
+  {
+   "name": "slices",
+   "template": "{{ nums[1:] }}{{ nums[::-1] }}{{ 'hello'[1:3] }}{{ nums[-1] }}{{ 'héllo'[1] }}{{ nums[-2:] }}{{ nums[:-2:2] }}{{ nums[10:] }}{{ nums[1:100] }}{{ 'abc'[::-1] }}{{ nums[-100:2] }}{{ nums[3:1:-1] }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "[1, 2, 5, 4][4, 5, 2, 1, 3]el4é[5, 4][3, 2][][1, 2, 5, 4]cba[3, 1][5, 2]"
+  },
+  {
+   "name": "index_attr",
+   "template": "{{ messages[0]['content'] }}|{{ messages[0].role }}|{{ d.c.x }}|{{ d['a'][1] }}|{{ nums.0 }}|{{ messages[-1].content }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "  Be brief.  |system|y|2|3|Bye"
+  },
+  {
+   "name": "missing",
+   "template": "[{{ messages[0].nope }}][{{ nums[10] }}][{{ d['zz'] }}][{{ missing }}]",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "[][][][]"
+  },
+  {
+   "name": "undefined_ops",
+   "template": "{{ x }}|{{ x | length }}|{{ x is defined }}|{% for i in x %}no{% endfor %}|{{ x == x }}|{{ x is none }}|{{ not x }}|{{ x | default('d') }}|{{ 'a' in x }}|{{ x is iterable }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "|0|False||True|False|True|d|False|True"
+  },
+  {
+   "name": "undefined_attr_error",
+   "template": "{{ x.y }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "error": "UndefinedError: 'x' is undefined"
+  },
+  {
+   "name": "undefined_add_error",
+   "template": "{{ x + 'a' }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "error": "UndefinedError: 'x' is undefined"
+  },
+  {
+   "name": "undefined_call_error",
+   "template": "{{ x() }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "error": "UndefinedError: 'x' is undefined"
+  },
+  {
+   "name": "f_strings",
+   "template": "{{ text | trim }}|{{ 'xxhixx' | trim('x') }}|{{ 'aBc' | upper }}|{{ 'aBc' | lower }}|{{ 'hello wORLD-foo bar(baz' | title }}|{{ 'hELLO world' | capitalize }}|{{ 'aaa' | replace('a', 'b', 2) }}|{{ 'abc' | replace('b', '') }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "Hello, World!|hi|ABC|abc|Hello World-Foo Bar(Baz|Hello world|bba|ac"
+  },
+  {
+   "name": "f_length",
+   "template": "{{ 'héllo🙂' | length }} {{ nums | count }} {{ d | length }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "6 5 3"
+  },
+  {
+   "name": "f_default",
+   "template": "{{ x | default('d') }}|{{ '' | default('d', true) }}|{{ none | default('d') }}|{{ x | d }}|{{ 0 | d(5, boolean=true) }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "d|d|None||5"
+  },
+  {
+   "name": "f_join",
+   "template": "{{ nums | join(', ') }}|{{ messages | join('/', attribute='role') }}|{{ 'abc' | join('-') }}|{{ [1, none, 'a'] | join }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "3, 1, 2, 5, 4|system/user/assistant/user|a-b-c|1Nonea"
+  },
+  {
+   "name": "f_first_last",
+   "template": "{{ nums | first }} {{ nums | last }} {{ 'abc' | first }} {{ [] | first }}|",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "3 4 a |"
+  },
+  {
+   "name": "f_list",
+   "template": "{{ 'abc' | list }} {{ d | list }} {{ range(3) | list }} {{ range(1, 10, 3) | list }} {{ range(5, 0, -2) | list }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "['a', 'b', 'c'] ['b', 'a', 'c'] [0, 1, 2] [1, 4, 7] [5, 3, 1]"
+  },
+  {
+   "name": "f_reverse",
+   "template": "{{ nums | reverse | list }} {{ 'abc' | reverse }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "[4, 5, 2, 1, 3] cba"
+  },
+  {
+   "name": "f_sort",
+   "template": "{{ nums | sort }} {{ nums | sort(reverse=true) }} {{ words | sort }} {{ words | sort(case_sensitive=true) }} {{ messages | sort(attribute='role') | map(attribute='content') | list }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "[1, 2, 3, 4, 5] [5, 4, 3, 2, 1] ['Apple', 'apple', 'banana', 'cherry'] ['Apple', 'apple', 'banana', 'cherry'] ['Hello!', '  Be brief.  ', 'Hi\\nthere', 'Bye']"
+  },
+  {
+   "name": "f_unique",
+   "template": "{{ words | unique | list }} {{ [1, 2, 1, 3] | unique | list }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "['banana', 'Apple', 'cherry'] [1, 2, 3]"
+  },
+  {
+   "name": "f_map",
+   "template": "{{ messages | map(attribute='role') | list }} {{ words | map('upper') | list }} {{ messages | map(attribute='nope', default='z') | list }} {{ ['1', '2'] | map('int') | sum }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "['system', 'user', 'assistant', 'user'] ['BANANA', 'APPLE', 'CHERRY', 'APPLE'] ['z', 'z', 'z', 'z'] 3"
+  },
+  {
+   "name": "f_select",
+   "template": "{{ messages | selectattr('role', 'equalto', 'user') | map(attribute='content') | list }}|{{ messages | rejectattr('role', 'eq', 'user') | list | length }}|{{ nums | select('odd') | list }}|{{ nums | reject('lt', 3) | list }}|{{ [0, 1, '', 'a'] | select | list }}|{{ messages | selectattr('content') | list | length }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "['Hi\\nthere', 'Bye']|2|[3, 1, 5]|[3, 5, 4]|[1, 'a']|4"
+  },
+  {
+   "name": "f_numbers",
+   "template": "{{ nums | sum }} {{ nums | min }} {{ nums | max }} {{ words | max }} {{ '42' | int }} {{ '4.7' | int }} {{ 'x' | int(7) }} {{ '2.5' | float }} {{ 3 | float }} {{ -3 | abs }} {{ 2.567 | round(2) }} {{ 2.5 | round }} {{ 3.5 | round }} {{ 2.1 | round(method='ceil') }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "15 1 5 cherry 42 4 7 2.5 3.0 3 2.57 2.0 4.0 3.0"
+  },
+  {
+   "name": "f_misc",
+   "template": "{{ 5 | string }}{{ none | string }}|{{ 'a b  c' | wordcount }}|{{ '<a href=\"x\">&\\'</a>' | e }}|{{ '%s=%s' | format('a', 1) }}|{{ d | dictsort }}|{{ {'b': 2, 'a': 3} | dictsort(by='value', reverse=true) }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "5None|3|&lt;a href=&#34;x&#34;&gt;&amp;&#39;&lt;/a&gt;|a=1|[('a', [1, 2]), ('b', 1), ('c', {'x': 'y'})]|[('a', 3), ('b', 2)]"
+  },
+  {
+   "name": "f_indent",
+   "template": "[{{ 'a\nb\n\nc' | indent(2) }}][{{ 'a\nb' | indent(first=true) }}][{{ 'a\n\nb' | indent('>', blank=true) }}]",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "[a\n  b\n\n  c][    a\n    b][a\n>\n>b]"
+  },
+  {
+   "name": "f_tojson",
+   "template": "{{ tool | tojson }}|{{ d | tojson(indent=2) }}|{{ messages[:1] | tojson(sort_keys=true) }}|{{ emoji | tojson }}|{{ emoji | tojson(ensure_ascii=true) }}|{{ [1.0, 2, true, none, 'a\\n\"b\\x01'] | tojson }}|{{ {} | tojson(indent=4) }}|{{ [[]] | tojson(indent=1) }}|{{ d | tojson(separators=(',', ':')) }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "{\"name\": \"f\", \"description\": \"café — \\\"q\\\" 'a'\", \"params\": {\"n\": 1.5, \"ok\": true, \"none\": null}}|{\n  \"b\": 1,\n  \"a\": [\n    1,\n    2\n  ],\n  \"c\": {\n    \"x\": \"y\"\n  }\n}|[{\"content\": \"  Be brief.  \", \"role\": \"system\"}]|\"hi 🙂 <b>&</b>\"|\"hi \\ud83d\\ude42 <b>&</b>\"|[1.0, 2, true, null, \"a\\n\\\"b\\u0001\"]|{}|[\n []\n]|{\"b\":1,\"a\":[1,2],\"c\":{\"x\":\"y\"}}"
+  },
+  {
+   "name": "f_attr",
+   "template": "{{ messages[0] | attr('role') }}|",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "|"
+  },
+  {
+   "name": "tests_types",
+   "template": "{{ x is defined }}{{ x is undefined }}{{ none is none }}{{ 'a' is string }}{{ 1 is number }}{{ 1.5 is number }}{{ true is number }}{{ 1 is integer }}{{ true is integer }}{{ 1.0 is float }}{{ d is mapping }}{{ nums is mapping }}{{ nums is iterable }}{{ 'a' is iterable }}{{ 1 is iterable }}{{ nums is sequence }}{{ true is boolean }}{{ 1 is boolean }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "FalseTrueTrueTrueTrueTrueTrueTrueFalseTrueTrueFalseTrueTrueFalseTrueTrueFalse"
+  },
+  {
+   "name": "tests_values",
+   "template": "{{ true is true }}{{ 1 is true }}{{ false is false }}{{ 0 is false }}{{ 4 is even }}{{ 3 is odd }}{{ 9 is divisibleby 3 }}{{ 9 is divisibleby(4) }}{{ 'a' is eq 'a' }}{{ 'a' is equalto('b') }}{{ none is sameas none }}{{ false is sameas false }}{{ 'a' is in 'abc' }}{{ 'abc' is lower }}{{ 'ABC' is upper }}{{ 1 is not none }}{{ 2 is gt 1 }}{{ 2 is le 1 }}{{ 'upper' is filter }}{{ 'odd' is test }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "TrueFalseTrueFalseTrueTrueTrueFalseTrueFalseTrueTrueTrueTrueTrueTrueTrueFalseTrueTrue"
+  },
+  {
+   "name": "tests_and_else",
+   "template": "{{ 'y' if x is defined else 'n' }}{{ 'y' if nums is iterable and nums is not string else 'n' }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "ny"
+  },
+  {
+   "name": "str_methods",
+   "template": "[{{ text.strip() }}][{{ 'xxhix'.lstrip('x') }}][{{ text.rstrip() }}][{{ 'a,b,,c'.split(',') }}][{{ '  a  b \\n c '.split() }}][{{ ' a b c '.split(none, 1) }}][{{ 'a,b,c'.rsplit(',', 1) }}][{{ 'a b c'.rsplit(maxsplit=1) }}][{{ 'abc'.startswith(('x', 'a')) }}][{{ 'abc'.endswith('bc') }}][{{ 'aaa'.replace('a', 'b', 1) }}][{{ 'héllo'.find('l') }}][{{ 'abc'.find('z') }}][{{ 'banana'.count('an') }}][{{ ', '.join(['a', 'b']) }}][{{ 'a\\nb\\r\\nc'.splitlines() }}][{{ 'hello world 1st'.title() }}][{{ 'hELLO'.capitalize() }}][{{ '{} and {name}'.format(1, name='x') }}][{{ 'abc'.upper() }}{{ 'ABC'.lower() }}][{{ '12'.isdigit() }}{{ 'a1'.isalpha() }}{{ ' '.isspace() }}][{{ 'prefix-x'.removeprefix('prefix-') }}]",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "[Hello, World!][hix][  Hello, World!][['a', 'b', '', 'c']][['a', 'b', 'c']][['a', 'b c ']][['a,b', 'c']][['a b', 'c']][True][True][baa][2][-1][2][a, b][['a', 'b', 'c']][Hello World 1St][Hello][1 and x][ABCabc][TrueFalseTrue][x]"
+  },
+  {
+   "name": "dict_methods",
+   "template": "{{ d.get('b') }} {{ d.get('zz') }} {{ d.get('zz', 'dflt') }} {{ d.keys() | list }} {{ d.values() | list | length }} {{ 'b' in d.keys() }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "1 None dflt ['b', 'a', 'c'] 3 True"
+  },
+  {
+   "name": "list_methods",
+   "template": "{{ nums.index(5) }} {{ nums.count(1) }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "3 1"
+  },
+  {
+   "name": "qwen3_think_split",
+   "template": "{% set content = '<think>\\nreason\\n</think>\\n\\nanswer' %}{{ content.split('</think>')[0].rstrip('\\n').split('<think>')[-1].lstrip('\\n') }}|{{ content.split('</think>')[-1].lstrip('\\n') }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "reason|answer"
+  },
+  {
+   "name": "raise",
+   "template": "{% if true %}{{ raise_exception('Roles must alternate') }}{% endif %}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "error": "TemplateError: Roles must alternate"
+  },
+  {
+   "name": "dict_global",
+   "template": "{{ dict(a=1, b='x') }} {{ namespace(a=1).a }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "expected": "{'a': 1, 'b': 'x'} 1"
+  },
+  {
+   "name": "list_append_unsafe",
+   "template": "{{ nums.append(1) }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "error": "SecurityError: access to attribute 'append' of 'list' object is unsafe."
+  },
+  {
+   "name": "dict_update_unsafe",
+   "template": "{{ d.update({'a': 1}) }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "error": "SecurityError: access to attribute 'update' of 'dict' object is unsafe."
+  },
+  {
+   "name": "type_error_add",
+   "template": "{{ 1 + 'a' }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "error": "TypeError: unsupported operand type(s) for +: 'int' and 'str'"
+  },
+  {
+   "name": "type_error_iter",
+   "template": "{% for x in 5 %}{% endfor %}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "error": "TypeError: 'int' object is not iterable"
+  },
+  {
+   "name": "str_plus_int_error",
+   "template": "{{ 'a' + 1 }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "error": "TypeError: can only concatenate str (not \"int\") to str"
+  },
+  {
+   "name": "syntax_unclosed",
+   "template": "{% if true %}x",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "error": "TemplateSyntaxError: Unexpected end of template. Jinja was looking for the following tags: 'elif' or 'else' or 'endif'. The innermost block that needs to be closed is 'if'."
+  },
+  {
+   "name": "syntax_bad_expr",
+   "template": "{{ 1 + }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "error": "TemplateSyntaxError: unexpected 'end of print statement'"
+  },
+  {
+   "name": "syntax_unknown_tag",
+   "template": "{% frobnicate %}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "error": "TemplateSyntaxError: Encountered unknown tag 'frobnicate'."
+  },
+  {
+   "name": "syntax_endfor_mismatch",
+   "template": "{% for x in nums %}{% endif %}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "error": "TemplateSyntaxError: Encountered unknown tag 'endif'. Jinja was looking for the following tags: 'endfor' or 'else'. The innermost block that needs to be closed is 'for'."
+  },
+  {
+   "name": "unknown_filter",
+   "template": "{{ 1 | nosuchfilter }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "error": "TemplateAssertionError: No filter named 'nosuchfilter'."
+  },
+  {
+   "name": "unknown_test",
+   "template": "{{ 1 is nosuchtest }}",
+   "trim_blocks": true,
+   "lstrip_blocks": true,
+   "error": "TemplateAssertionError: No test named 'nosuchtest'."
+  }
+ ]
+}

@@ -1,3 +1,7 @@
 # Go source always uses LF, also in Windows checkouts (core.autocrlf=true),
 # so gofmt sees the same bytes that are committed.
 *.go text eol=lf
+
+# Golden fixtures are compared byte-for-byte; never convert their line endings.
+chattemplate/testdata/** -text
+internal/jinja/testdata/** -text
