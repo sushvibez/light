@@ -293,26 +293,38 @@ func (m *Llama) resetRoPETables() {
 // Len is the absolute number of tokens seen (drives RoPE positions). With
 // sliding-window attention a layer keeps only its last `window` entries, so
 // K[i].Dim(2) may be smaller than Len (Candle's RotatingKvCache).
+//
+// Linear-attention layers (Gated DeltaNet, Qwen3.5) keep fixed-size state
+// instead of K/V: Conv[i] is the short-conv state (B, C, kernel−1) and
+// Rec[i] the delta-rule state (B, H, dk, dv), both F32.
 type KVCache struct {
-	K   []*tensor.Tensor
-	V   []*tensor.Tensor
-	Len int
+	K    []*tensor.Tensor
+	V    []*tensor.Tensor
+	Conv []*tensor.Tensor
+	Rec  []*tensor.Tensor
+	Len  int
 }
 
 // NewKVCache allocates a fresh cache for a model with `numLayers` blocks.
 func NewKVCache(numLayers int) *KVCache {
 	return &KVCache{
-		K: make([]*tensor.Tensor, numLayers),
-		V: make([]*tensor.Tensor, numLayers),
+		K:    make([]*tensor.Tensor, numLayers),
+		V:    make([]*tensor.Tensor, numLayers),
+		Conv: make([]*tensor.Tensor, numLayers),
+		Rec:  make([]*tensor.Tensor, numLayers),
 	}
 }
 
-// Reset empties the cache (frees stored K/V). Call between independent
-// prompts to reuse the same cache struct.
+// Reset empties the cache (frees stored K/V and linear-attention state).
+// Call between independent prompts to reuse the same cache struct.
 func (c *KVCache) Reset() {
 	for i := range c.K {
 		c.K[i] = nil
 		c.V[i] = nil
+	}
+	for i := range c.Conv {
+		c.Conv[i] = nil
+		c.Rec[i] = nil
 	}
 	c.Len = 0
 }

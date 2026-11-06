@@ -240,6 +240,8 @@ func LoadChatModelFromHF(repo string, dev device.Device, weightDT dtype.DType) (
 		return LoadGemma3FromHF(repo, dev, weightDT)
 	case "gemma4", "gemma4_text":
 		return LoadGemma4FromHF(repo, dev, weightDT)
+	case "qwen3_5", "qwen3_5_text":
+		return LoadQwen35FromHF(repo, dev, weightDT)
 	case "falcon", "RefinedWebModel", "RefinedWeb":
 		return LoadFalconFromHF(repo, dev, weightDT)
 	default:

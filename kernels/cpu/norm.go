@@ -14,6 +14,7 @@ func init() {
 	}
 	reg("rmsnorm", dtype.F32, rmsnormF32)
 	reg("rmsnorm", dtype.F64, rmsnormF64)
+	reg("rmsnorm", dtype.BF16, rmsnormBF16)
 	reg("layernorm", dtype.F32, layernormF32)
 	reg("layernorm", dtype.F64, layernormF64)
 }
@@ -41,6 +42,40 @@ func rmsnormF32(ctx *registry.Context) error {
 		inv := float32(1.0 / math.Sqrt(float64(sumSq/float32(cols))+eps))
 		for i, v := range rowX {
 			rowO[i] = v * inv * wS[i]
+		}
+	}
+	return nil
+}
+
+// rmsnormBF16 is rmsnormF32 for BF16 x and weight: the statistics and the
+// product are computed in F32 and each output is rounded to BF16 once, as
+// transformers' RMSNorm does (x.float() … .to(input_dtype)).
+func rmsnormBF16(ctx *registry.Context) error {
+	x, out := ctx.Inputs[0], ctx.Output
+	weight := ctx.Inputs[1]
+	eps, _ := ctx.Attrs["eps"].(float64)
+
+	xS := asSlice[uint16](x)
+	wS := asSlice[uint16](weight)
+	oS := asSlice[uint16](out)
+
+	cols := x.Dim(-1)
+	rows := x.NumElements() / cols
+	w := make([]float32, cols)
+	for i := range w {
+		w[i] = dtype.BFloat16(wS[i]).ToF32()
+	}
+	row := make([]float32, cols)
+	for r := range rows {
+		var sumSq float64
+		for i, v := range xS[r*cols : (r+1)*cols] {
+			row[i] = dtype.BFloat16(v).ToF32()
+			sumSq += float64(row[i]) * float64(row[i])
+		}
+		inv := float32(1.0 / math.Sqrt(sumSq/float64(cols)+eps))
+		rowO := oS[r*cols : (r+1)*cols]
+		for i, v := range row {
+			rowO[i] = uint16(dtype.BF16FromF32(v * inv * w[i]))
 		}
 	}
 	return nil

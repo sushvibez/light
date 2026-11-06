@@ -12,6 +12,7 @@ import (
 func init() {
 	registry.Register(registry.Key{Op: "rope", Dev: device.KindCPU, DType: dtype.F32}, ropeF32CPU)
 	registry.Register(registry.Key{Op: "rope", Dev: device.KindCPU, DType: dtype.F64}, ropeF64CPU)
+	registry.Register(registry.Key{Op: "rope", Dev: device.KindCPU, DType: dtype.BF16}, ropeBF16CPU)
 	registry.Register(registry.Key{Op: "rope_i", Dev: device.KindCPU, DType: dtype.F32}, ropeIF32CPU)
 	registry.Register(registry.Key{Op: "rope_i", Dev: device.KindCPU, DType: dtype.F64}, ropeIF64CPU)
 	registry.Register(registry.Key{Op: "rope_i", Dev: device.KindCPU, DType: dtype.BF16}, ropeIBF16CPU)
@@ -52,6 +53,38 @@ func ropeF32CPU(ctx *registry.Context) error {
 				x1 := xS[rowBase+i+half]
 				outS[rowBase+i] = x0*c - x1*sn
 				outS[rowBase+i+half] = x0*sn + x1*c
+			}
+		}
+	}
+	return nil
+}
+
+// ropeBF16CPU is ropeF32CPU on BF16 data: the rotation is computed in F32
+// and each output rounded to BF16 once.
+func ropeBF16CPU(ctx *registry.Context) error {
+	x := ctx.Inputs[0]
+	positions := ctx.Inputs[1]
+	out := ctx.Output
+	base := ctx.Attrs["base"].(float64)
+	xS := asSlice[uint16](x)
+	posS := asSlice[int64](positions)
+	outS := asSlice[uint16](out)
+	headDim := x.Dim(-1)
+	seqLen := x.Dim(-2)
+	batch := x.NumElements() / (seqLen * headDim)
+	half := headDim / 2
+	for b := range batch {
+		for s := range seqLen {
+			pos := float64(posS[s])
+			rowBase := (b*seqLen + s) * headDim
+			for i := 0; i < half; i++ {
+				theta := pos * math.Pow(base, -float64(2*i)/float64(headDim))
+				c := float32(math.Cos(theta))
+				sn := float32(math.Sin(theta))
+				x0 := dtype.BFloat16(xS[rowBase+i]).ToF32()
+				x1 := dtype.BFloat16(xS[rowBase+i+half]).ToF32()
+				outS[rowBase+i] = uint16(dtype.BF16FromF32(x0*c - x1*sn))
+				outS[rowBase+i+half] = uint16(dtype.BF16FromF32(x0*sn + x1*c))
 			}
 		}
 	}
