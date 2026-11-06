@@ -1,0 +1,400 @@
+// Package engine turns the models/tokenizer packages into a chat runtime:
+// load a checkpoint (HF safetensors or GGUF) once, then stream replies for
+// OpenAI-style message lists. It is the backend of the Light Studio desktop
+// app and of the OpenAI-compatible HTTP server.
+package engine
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math/rand/v2"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
+
+	"light/device"
+	"light/dtype"
+	"light/hub"
+	"light/models"
+	"light/tensor"
+	"light/tokenizer"
+)
+
+// Spec identifies a loadable chat model.
+type Spec struct {
+	ID     string `json:"id"`     // catalog id shown to users
+	Repo   string `json:"repo"`   // HF repo: config + tokenizer (+ weights unless GGUF)
+	GGUF   string `json:"gguf"`   // optional GGUF file providing the weights
+	DType  string `json:"dtype"`  // "f32" or "bf16" for safetensors weights
+	Device string `json:"device"` // "gpu" or "cpu"
+	Family string `json:"family"` // chat template family (filled on load)
+	// TokenizerPath overrides Repo's tokenizer.json (sidecar next to a GGUF).
+	TokenizerPath string `json:"tokenizer_path,omitempty"`
+}
+
+// Model is a loaded checkpoint plus everything needed to chat with it.
+type Model struct {
+	Spec     Spec
+	LM       models.CausalLM
+	Tok      *tokenizer.BPE
+	Template Template
+	Dev      device.Device
+	eos      map[int64]bool
+	bos      int64
+	hasBOS   bool
+	mu       sync.Mutex // one generation at a time
+	LoadTime time.Duration
+	// Diffusion is set for block-diffusion LMs (model_type "sdar"): Generate
+	// then decodes with models.Llama.GenerateDiffusion instead of the
+	// autoregressive loop. SDAR holds its decoding settings.
+	Diffusion bool
+	SDAR      models.SDAROpts
+}
+
+// GenOpts controls sampling. Temperature 0 is greedy.
+type GenOpts struct {
+	MaxTokens   int     `json:"max_tokens"`
+	Temperature float32 `json:"temperature"`
+	TopP        float32 `json:"top_p"`
+	TopK        int     `json:"top_k"`
+	Seed        uint64  `json:"seed"`
+}
+
+// Stats describes one generation.
+type Stats struct {
+	PromptTokens int     `json:"prompt_tokens"`
+	Tokens       int     `json:"tokens"`
+	PrefillMS    float64 `json:"prefill_ms"`
+	DecodeMS     float64 `json:"decode_ms"`
+	TokPerSec    float64 `json:"tok_per_sec"`
+	Stop         string  `json:"stop"` // "eos", "length" or "cancel"
+}
+
+// ErrBusy is returned when a generation is already running on the model.
+var ErrBusy = errors.New("engine: model is busy")
+
+func pickDevice(name string) (device.Device, error) {
+	switch strings.ToLower(name) {
+	case "", "gpu", "cuda":
+		if device.CUDAAvailable() {
+			return device.CUDA(0)
+		}
+		if name == "" {
+			return device.CPU(), nil
+		}
+		return nil, errors.New("engine: CUDA not available in this build")
+	case "cpu":
+		return device.CPU(), nil
+	}
+	return nil, fmt.Errorf("engine: unknown device %q", name)
+}
+
+// Load reads the tokenizer and weights for spec. GGUF weights take
+// precedence over safetensors when both are given.
+func Load(spec Spec) (*Model, error) {
+	t0 := time.Now()
+	dev, err := pickDevice(spec.Device)
+	if err != nil {
+		return nil, err
+	}
+	var tok *tokenizer.BPE
+	var ggufVocab *tokenizer.GGUFVocab
+	tokPath := spec.TokenizerPath
+	switch {
+	case tokPath == "" && spec.Repo == "" && spec.GGUF != "":
+		// No sidecar and no HF repo: the GGUF's own tokenizer.ggml.* metadata.
+		tok, ggufVocab, err = tokenizer.LoadGGUF(spec.GGUF)
+		if err != nil {
+			return nil, fmt.Errorf("engine: GGUF tokenizer: %w", err)
+		}
+	case tokPath == "" && spec.Repo == "":
+		return nil, errors.New("engine: spec needs Repo, TokenizerPath or GGUF for the tokenizer")
+	default:
+		if tokPath == "" {
+			tokPath, err = hub.Download(spec.Repo, "main", "tokenizer.json")
+			if err != nil {
+				return nil, fmt.Errorf("engine: tokenizer: %w", err)
+			}
+		}
+		f, err := os.Open(tokPath)
+		if err != nil {
+			return nil, err
+		}
+		tok, err = tokenizer.LoadBPE(f)
+		f.Close()
+		if err != nil {
+			return nil, fmt.Errorf("engine: tokenizer: %w", err)
+		}
+	}
+
+	var lm models.CausalLM
+	switch {
+	case spec.GGUF != "":
+		lm, err = models.LoadLlamaGGUF(spec.GGUF, dev)
+	default:
+		wdt := dtype.F32
+		if strings.EqualFold(spec.DType, "bf16") {
+			wdt = dtype.BF16
+		}
+		lm, err = models.LoadChatModelFromHF(spec.Repo, dev, wdt)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	m := &Model{Spec: spec, LM: lm, Tok: tok, Dev: dev, eos: map[int64]bool{}}
+	m.Template = TemplateFor(tok)
+	m.Spec.Family = m.Template.Family
+	if spec.Repo != "" {
+		if ids, err := models.EOSTokenIDs(spec.Repo); err == nil {
+			for _, id := range ids {
+				m.eos[id] = true
+			}
+		}
+		if bos, ok := models.BOSTokenID(spec.Repo); ok {
+			m.bos, m.hasBOS = bos, true
+		}
+	}
+	if ggufVocab != nil {
+		if ggufVocab.EOS >= 0 {
+			m.eos[int64(ggufVocab.EOS)] = true
+		}
+		if ggufVocab.AddBOS && ggufVocab.BOS >= 0 {
+			m.bos, m.hasBOS = int64(ggufVocab.BOS), true
+		}
+	}
+	for _, s := range m.Template.Stop {
+		if id := tok.TokenToID(s); id >= 0 {
+			m.eos[int64(id)] = true
+		}
+	}
+	// Templates that write the BOS token themselves must not get a second.
+	if m.Template.Family == "llama3" || m.Template.Family == "mistral" || m.Template.Family == "gemma" {
+		m.hasBOS = false
+	}
+	if spec.GGUF == "" && spec.Repo != "" {
+		if mt, err := models.HFModelType(spec.Repo); err == nil && mt == "sdar" {
+			m.Diffusion = true
+			m.SDAR = models.DefaultSDAROpts()
+			m.SDAR.EOS = m.SDAR.EOS[:0]
+			for id := range m.eos {
+				m.SDAR.EOS = append(m.SDAR.EOS, id)
+			}
+		}
+	}
+	m.LoadTime = time.Since(t0)
+	return m, nil
+}
+
+// generateDiffusion is Generate for block-diffusion models: whole blocks
+// arrive at once, so streaming happens per finished block.
+func (m *Model) generateDiffusion(ctx context.Context, ids []int32, opts GenOpts, onToken func(string), st Stats) (string, Stats, error) {
+	llm, ok := m.LM.(*models.Llama)
+	if !ok {
+		return "", st, errors.New("engine: diffusion decoding needs a models.Llama")
+	}
+	sd := m.SDAR
+	sd.MaxTokens = opts.MaxTokens
+	sd.Temperature, sd.TopK, sd.TopP, sd.Seed = opts.Temperature, opts.TopK, opts.TopP, opts.Seed
+	if sd.Seed == 0 {
+		sd.Seed = rand.Uint64()
+	}
+	var gen []int32
+	var out strings.Builder
+	emitted := 0
+	flush := func(final bool) {
+		text := m.Tok.Decode(gen)
+		if !final && strings.HasSuffix(text, "�") {
+			text = strings.TrimSuffix(text, "�")
+		}
+		if len(text) > emitted {
+			delta := text[emitted:]
+			emitted = len(text)
+			out.WriteString(delta)
+			if onToken != nil {
+				onToken(delta)
+			}
+		}
+	}
+	t0 := time.Now()
+	st.Stop = "length"
+	toks, err := llm.GenerateDiffusion(toI64(ids), sd, func(block []int64) {
+		for _, t := range block {
+			gen = append(gen, int32(t))
+		}
+		st.Tokens = len(gen)
+		flush(false)
+	})
+	if err != nil {
+		return out.String(), st, err
+	}
+	if len(toks) < opts.MaxTokens {
+		st.Stop = "eos"
+	}
+	if ctx.Err() != nil {
+		st.Stop = "cancel"
+	}
+	flush(true)
+	st.DecodeMS = float64(time.Since(t0).Microseconds()) / 1000
+	if st.DecodeMS > 0 {
+		st.TokPerSec = float64(st.Tokens) / (st.DecodeMS / 1000)
+	}
+	return out.String(), st, nil
+}
+
+// Busy reports whether a generation is in flight.
+func (m *Model) Busy() bool {
+	if m.mu.TryLock() {
+		m.mu.Unlock()
+		return false
+	}
+	return true
+}
+
+// Prompt renders msgs with the model's chat template.
+func (m *Model) Prompt(msgs []Message) string { return m.Template.Render(msgs) }
+
+// Generate streams a reply for msgs. onToken receives decoded text deltas
+// (never partial UTF-8). It returns the full reply text. Each call uses a
+// fresh KV cache, so requests are independent; cancel via ctx.
+func (m *Model) Generate(ctx context.Context, msgs []Message, opts GenOpts, onToken func(string)) (string, Stats, error) {
+	if !m.mu.TryLock() {
+		return "", Stats{}, ErrBusy
+	}
+	defer m.mu.Unlock()
+
+	if opts.MaxTokens <= 0 {
+		opts.MaxTokens = 512
+	}
+	var rng *rand.Rand
+	if opts.Seed != 0 {
+		rng = rand.New(rand.NewPCG(opts.Seed, opts.Seed^0x9E3779B97F4A7C15))
+	} else {
+		rng = rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64()))
+	}
+	sample := models.SampleOpts{Temperature: opts.Temperature, TopK: opts.TopK, TopP: opts.TopP, Rng: rng}
+
+	ids := m.Tok.Encode(m.Prompt(msgs))
+	if m.hasBOS && (len(ids) == 0 || int64(ids[0]) != m.bos) {
+		ids = append([]int32{int32(m.bos)}, ids...)
+	}
+	if len(ids) == 0 {
+		return "", Stats{}, errors.New("engine: empty prompt")
+	}
+	maxPos := m.LM.MaxContext()
+	if len(ids)+opts.MaxTokens > maxPos {
+		if len(ids) >= maxPos {
+			return "", Stats{}, fmt.Errorf("engine: prompt has %d tokens, model max is %d", len(ids), maxPos)
+		}
+		opts.MaxTokens = maxPos - len(ids)
+	}
+
+	var st Stats
+	st.PromptTokens = len(ids)
+	if m.Diffusion {
+		return m.generateDiffusion(ctx, ids, opts, onToken, st)
+	}
+	cache := models.NewKVCache(m.LM.NumLayers())
+	defer cache.Reset()
+
+	t0 := time.Now()
+	row, err := m.step(toI64(ids), cache)
+	if err != nil {
+		return "", st, fmt.Errorf("prefill: %w", err)
+	}
+	st.PrefillMS = float64(time.Since(t0).Microseconds()) / 1000
+
+	var gen []int32
+	var out strings.Builder
+	emitted := 0
+	flush := func(final bool) {
+		text := m.Tok.Decode(gen)
+		// Hold back a trailing replacement char: the next token may complete
+		// the multi-byte sequence.
+		if !final && strings.HasSuffix(text, "�") {
+			text = strings.TrimSuffix(text, "�")
+		}
+		if len(text) > emitted {
+			delta := text[emitted:]
+			emitted = len(text)
+			out.WriteString(delta)
+			if onToken != nil {
+				onToken(delta)
+			}
+		}
+	}
+
+	t1 := time.Now()
+	st.Stop = "length"
+	for step := 0; step < opts.MaxTokens; step++ {
+		if ctx.Err() != nil {
+			st.Stop = "cancel"
+			break
+		}
+		next := models.SampleLogits(row, sample)
+		if m.eos[int64(next)] {
+			st.Stop = "eos"
+			break
+		}
+		gen = append(gen, int32(next))
+		st.Tokens++
+		flush(false)
+		if step+1 == opts.MaxTokens {
+			break
+		}
+		row, err = m.step([]int64{int64(next)}, cache)
+		if err != nil {
+			return out.String(), st, fmt.Errorf("decode step %d: %w", step, err)
+		}
+		if step%8 == 7 {
+			runtime.GC() // release device buffers of finished steps
+		}
+	}
+	flush(true)
+	st.DecodeMS = float64(time.Since(t1).Microseconds()) / 1000
+	if st.DecodeMS > 0 {
+		st.TokPerSec = float64(st.Tokens) / (st.DecodeMS / 1000)
+	}
+	return out.String(), st, nil
+}
+
+// step runs tokens through the model and returns the last-position logits.
+func (m *Model) step(tokens []int64, cache *models.KVCache) ([]float32, error) {
+	x, err := tensor.New(tokens, []int{1, len(tokens)}, m.Dev)
+	if err != nil {
+		return nil, err
+	}
+	logits, err := m.LM.ForwardWithCache(x, cache)
+	if err != nil {
+		return nil, err
+	}
+	cpu, err := logits.To(device.CPU())
+	if err != nil {
+		return nil, err
+	}
+	flat := tensor.MustSlice[float32](cpu)
+	V := m.LM.VocabSize()
+	off := (len(tokens) - 1) * V
+	return flat[off : off+V], nil
+}
+
+func toI64(ids []int32) []int64 {
+	out := make([]int64, len(ids))
+	for i, v := range ids {
+		out[i] = int64(v)
+	}
+	return out
+}
+
+// ggufDir is where the catalog looks for GGUF files by default.
+func ggufDir() string {
+	if v := os.Getenv("LIGHT_GGUF_DIR"); v != "" {
+		return v
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".cache", "light", "gguf")
+}

@@ -1,0 +1,64 @@
+// XGo (goplus/xgo) — small MLP training script in Python-like style.
+//
+// This file proves that the existing `light/...` Go packages can be driven
+// from XGo without changing any of them. XGo transpiles to plain Go via
+// `xgo run`, so the runtime, autograd graph, and CUDA kernels are exactly
+// the same as the Go examples.
+//
+// Run:
+//
+//   xgo run ./examples/xgo/01_train_mlp.xgo
+//
+// What this trains: 4-class MLP on a tiny synthetic 2-D dataset; loss
+// should drop from ~1.4 to <0.05 in 200 AdamW steps.
+
+import (
+    "light/autograd"
+    "light/device"
+    "light/dtype"
+    "light/nn"
+    "light/tensor"
+    "light/training"
+)
+
+dev := device.CPU()
+
+// 64 samples × 8 features, 4 classes.
+x, _ := tensor.Rand(dtype.F32, [64, 8], dev)
+labels := make([]int64, 64)
+for i <- 0:64 {
+    labels[i] = int64(i % 4)
+}
+y, _ := tensor.New(labels, [64], dev)
+
+// Sequential = Linear → ReLU → Linear → ReLU → Linear.
+fc1, _ := nn.NewLinear(8, 32, true, dev)
+fc2, _ := nn.NewLinear(32, 16, true, dev)
+fc3, _ := nn.NewLinear(16, 4, true, dev)
+
+forward := func(input *tensor.Tensor) *tensor.Tensor {
+    h, _ := fc1.Forward(input)
+    h, _  = autograd.ReLU(h)
+    h, _  = fc2.Forward(h)
+    h, _  = autograd.ReLU(h)
+    out, _ := fc3.Forward(h)
+    return out
+}
+
+params := append(append(fc1.Parameters(), fc2.Parameters()...), fc3.Parameters()...)
+opt, _ := training.NewAdamW(params, training.AdamWOptions{LR: 1e-2})
+
+for step <- 0:200 {
+    opt.ZeroGrad()
+    logits := forward(x)
+    loss, _ := autograd.CrossEntropyLoss(logits, y)
+    autograd.Backward(loss, nil)
+    opt.Step()
+
+    if step % 20 == 0 {
+        lc, _ := loss.To(device.CPU())
+        v := tensor.MustSlice[float32](lc)[0]
+        println "step", step, " loss=", v
+    }
+}
+println "done"

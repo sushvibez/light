@@ -1,0 +1,63 @@
+// XGo — GPT-2 inference in a Python-like script. Mirrors the Go example at
+// `examples/25_gpt2_pretrained` but reads more like a notebook cell:
+//
+//   xgo run ./examples/xgo/02_infer_gpt2.xgo
+//
+// On first run, downloads the `gpt2` checkpoint (~500 MB) from the
+// HuggingFace Hub and caches it under `~/.cache/huggingface/hub/`.
+
+import (
+    "os"
+    "light/device"
+    "light/hub"
+    "light/models"
+    "light/tensor"
+    "light/tokenizer"
+)
+
+dev := device.CPU()
+prompt := "The capital of France is"
+nGen := 6
+
+// Tokenizer.
+tokPath, _ := hub.Download("gpt2", "main", "tokenizer.json")
+f, _ := os.Open(tokPath)
+bpe, _ := tokenizer.LoadBPE(f)
+f.Close()
+
+// Model.
+gpt, _ := models.LoadGPT2FromHF("gpt2", dev)
+println "loaded gpt2 —", gpt.ParamCount()/1000000, "M params"
+
+// Encode prompt.
+ids32 := bpe.Encode(prompt)
+tokens := make([]int64, len(ids32))
+for i, v <- ids32 {
+    tokens[i] = int64(v)
+}
+println "prompt:", prompt, "  ids:", tokens
+
+// Greedy decode.
+V := gpt.Cfg.VocabSize
+for step <- 0:nGen {
+    x, _ := tensor.New(tokens, [1, len(tokens)], dev)
+    logits, _ := gpt.Forward(x)
+    cpu, _ := logits.To(device.CPU())
+    flat := tensor.MustSlice[float32](cpu)
+    lastOff := (len(tokens) - 1) * V
+    best := 0
+    for v <- 1:V {
+        if flat[lastOff+v] > flat[lastOff+best] {
+            best = v
+        }
+    }
+    tokens = append(tokens, int64(best))
+    println "  step", step, "→", best, " (\"" + bpe.Decode([int32(best)]) + "\")"
+}
+
+// Decode the whole sequence.
+finalIDs := make([]int32, len(tokens))
+for i, v <- tokens {
+    finalIDs[i] = int32(v)
+}
+println "\noutput:", bpe.Decode(finalIDs)
