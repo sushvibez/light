@@ -6,7 +6,7 @@
 
 **Kernel coverage is generated, not hand-edited.** Run `go run -tags webgpu ./scripts/opmatrix -md` and paste the table into the section below after adding kernels. Everything else in this file is maintained by hand.
 
-_Last updated: 2026-10-27 (post GoLight port; see `docs/PORTING-FROM-GOLIGHT.md`)._
+_Last updated: 2026-11-06 (stale open items reconciled with CHECKPOINTS.md)._
 
 ---
 
@@ -30,7 +30,7 @@ _Last updated: 2026-10-27 (post GoLight port; see `docs/PORTING-FROM-GOLIGHT.md`
 - [x] `storage.Storage` CUDA (`cudaMalloc`/`cudaFree`, `cudaMemset` zero-init, refcount-driven cleanup)
 - [x] `storage.Storage` WebGPU (`storage.NewWebGPU`, wgpu buffers; 2 GiB per-buffer ceiling requested explicitly at device init)
 - [x] `tensor.Tensor` constructors: `Zeros`, `Ones`, `Full[T]`, `New[T]`, `Arange`, `Rand`
-- [ ] `tensor.Tensor` constructor: `RandN`
+- [x] `tensor.Tensor` constructor: `RandN`
 - [x] Views: `Reshape` (with -1 infer), `Permute`, `Transpose`, `Contiguous`, `Narrow`, `Slice`, `Expand`
 - [x] `tensor.To(dev)` across all three device kinds; per-kind `Contiguous` / `Copy` hooks (`tensor.RegisterContig`, `tensor.RegisterCopy`)
 - [x] View sharing via atomic refcount (`storage.Track` / `Release`)
@@ -162,7 +162,7 @@ _Last updated: 2026-10-27 (post GoLight port; see `docs/PORTING-FROM-GOLIGHT.md`
 - [x] **FP8 MatMul** (`ops.MatMulF8`: E4M3 × E4M3 with per-tensor scales → F32/BF16/F16; CUDA via cuBLASLt TN GEMM on tensor cores, K % 16 == 0; CPU reference; `ops.QuantizeF8` amax/448 quantiser; `nn.Linear` runs F8 weights with `WScale`) — 2026-10-28
 - [x] Int8 weight MatMul (`ops.MatMulInt8`, per-column scales; CPU + CUDA F32 activations)
 - [x] Einsum (`ops.Einsum`, general CPU; CUDA F32 fully on-device: diagonals via `tensor.AsStrided`, N-ary pairwise contraction, batched matmul; F64 on CUDA falls back to host)
-- [ ] MatMulQuant (GGUF quantized × float, fused dequant)
+- [x] MatMulQuant (GGUF quantized × float, fused dequant) — shipped as `ops.MatMulQ`, see Quantization
 
 ## Shape / layout ops
 
@@ -174,7 +174,8 @@ _Last updated: 2026-10-27 (post GoLight port; see `docs/PORTING-FROM-GOLIGHT.md`
 - [x] Cumsum / Cumprod (CPU + CUDA F32)
 - [x] Tril / Triu, mask ops, Where (CPU + CUDA)
 - [x] Sort / TopK (CPU all; CUDA bitonic kernels F32/F64/I32/I64, bit-identical tie order; TopK = sort + narrow on CUDA)
-- [ ] Unique, Linspace / Meshgrid / Eye
+- [x] Linspace / Meshgrid / Eye (`tensor/constructors.go`)
+- [ ] Unique
 
 ## Normalization & activations
 
@@ -191,7 +192,7 @@ _Last updated: 2026-10-27 (post GoLight port; see `docs/PORTING-FROM-GOLIGHT.md`
 - [x] Conv1d (CPU + CUDA F32 forward; no backward)
 - [x] Conv2d (cuDNN on CUDA incl. BF16; forward + backward; grouped / depthwise)
 - [x] Conv3d (CPU + CUDA F32 forward)
-- [ ] ConvTranspose2d (SD 1.5 upsampling uses nearest + conv instead)
+- [x] ConvTranspose2d (`ops.ConvTranspose2d`, `nn.ConvTranspose2d`; CUDA `conv_transpose.cu`, 2026-10-28)
 - [x] MaxPool2d / AvgPool2d (forward + backward, CPU + CUDA F32)
 - [x] AdaptiveAvgPool2d (composed on CPU/CUDA; native WebGPU)
 - [x] UpsampleNearest (forward; CUDA F32 + BF16)
@@ -215,7 +216,7 @@ _Last updated: 2026-10-27 (post GoLight port; see `docs/PORTING-FROM-GOLIGHT.md`
 - [x] `nn`: ELU, LeakyReLU, Mish, HardSwish, HardSigmoid, GELU, ReLU6, PReLU, SwiGLU modules; `nn.LSTM` / `nn.GRU` (torch layout, match torch to 1e-5, trainable); `nn.ConvTranspose2d`
 - [x] Gemma 3 text decoder (`models.Gemma3`): (1+w) RMSNorm, QK-norm, GELU-tanh MLP, local/global layer pattern, logit softcap; `models.CausalLM` interface shared with `models.Llama`
 - [x] Chat engine (`engine/`): catalog of HF-cache + GGUF models, chat templates (ChatML, Llama-3, Phi-3, Mistral, Gemma), streaming generation, OpenAI-compatible `/v1/chat/completions`, `/v1/audio/transcriptions`, `/v1/embeddings`, speech-to-speech `/v1/audio/conversations` (`cmd/light-serve`), Wails v3 + React desktop app (`studio/`)
-- [ ] MoE gate / experts
+- [x] MoE gate / experts (`nn.SparseMoE`, `ops.MoEGemm` incl. quantized experts; Qwen3-MoE, 2026-10-28)
 
 ## Autograd
 
@@ -265,7 +266,7 @@ _Last updated: 2026-10-27 (post GoLight port; see `docs/PORTING-FROM-GOLIGHT.md`
 - [x] Int8 per-column weight quant (`quant.QuantizeInt8PerColumn`) + int8 × F32 matmul
 - [x] **GGUF quantized inference**: `ops.MatMulQ` (fused dequant-matmul CUDA kernels for Q4_0 / Q5_0 / Q8_0 / Q4_K / Q5_K / Q6_K; dequant+matmul fallback for the rest and on CPU), `nn.Linear` accepts quantized weights, `models.LoadLlamaGGUF` (llama / qwen2 / mistral GGUF, Q/K un-permute for llama arch, `rope_freqs` factors). Qwen2-0.5B Q8_0 / Q4_K_M and Llama-3.2-1B Q4_K_M match transformers greedy; logits within quant noise.
 - [ ] MatMulQ performance: v1 kernel (warp per column, byte loads) decodes at ~17 tok/s on 0.5B vs 31 tok/s F32 cuBLAS — needs vectorised block loads / MMVQ-style int8 dot (Q8 activations) and an MMQ tile path for prefill
-- [ ] Tokenizer from GGUF metadata (`tokenizer.ggml.*`); quantized embedding lookup (embedding is dequantized to F32 at load)
+- [x] Tokenizer from GGUF metadata (`tokenizer.LoadGGUF`, 2026-10-29); quantized embedding lookup (`index_select` on GGUF blocks, 2026-10-29)
 - [ ] IQ / TQ GGUF types (Candle lacks them too)
 - [ ] GPTQ / AWQ loaders
 - [ ] cuBLAS INT8 tensor-core GEMM
@@ -295,7 +296,8 @@ See `MODELS.md` for the full catalogue. Validated against reference weights:
 - [x] Qwen3-MoE (`LoadCausalLMFromHF` `qwen3_moe`; routed-expert FFN via `nn.SparseMoE` + `ops.MoEGemm`) — tiny-random checkpoint matches transformers 5.21 top-5 logits to 5 dp on CPU F32 / CUDA F32, BF16 within BF16 noise (2026-10-28)
 - [x] Phi-3 / 3.5 (`LoadPhi3FromHF`; fused qkv/gate_up split, LongRoPE) — Phi-3.5-mini BF16 matches transformers BF16 logits; greedy identical
 - [ ] Mistral (loader path exists via `LoadCausalLMFromHF`; untested, needs sliding window)
-- [ ] Gemma 2, T5, Whisper, CLIP vision, SDXL
+- [x] Whisper (`models.Whisper`, 2026-10-28); Gemma 2 is listed above
+- [ ] T5, CLIP vision, SDXL
 
 ## Training
 

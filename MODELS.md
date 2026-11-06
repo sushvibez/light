@@ -185,28 +185,28 @@ Too large for 16 GB (awareness only): Kolibri-1 78B-A3.5B (Aleph Alpha), GLM-5.3
 5. ~~**Phi-3 / 3.5**~~ — ✅ done (2026-10-27): fused qkv/gate_up split, LongRoPE, SentencePiece BPE.
 6. ~~**Sliding-window attention in `models.Llama`** (+ per-layer local/global pattern)~~ done 2026-10-28; NoPE layers (Muse Glimmer) still open.
 7. ~~**EmbeddingGemma 2**~~ — ✅ 2026-10-29 (`models.EmbeddingGemma2`, verified vs transformers; `/v1/embeddings`).
-8. **Mistral 7B** (loader exists, needs a checkpoint) and ~~**Gemma 3**~~ done 2026-10-28 (1B text); Gemma 2 softcaps wired but unverified.
-9. **MoE router + experts** — validate on Mellum 2.1 12B-A2.5B, then Qwen3.6-35B-A3B / Mixtral.
+8. **Mistral 7B** (loader exists, needs a checkpoint) and ~~**Gemma 3**~~ done 2026-10-28 (1B text); Gemma 2 verified 2026-10-29.
+9. ~~**MoE router + experts**~~ — ✅ 2026-10-28 (`nn.SparseMoE`, Qwen3-MoE); first real-size validation: Mellum 2.1 12B-A2.5B, then Qwen3.6-35B-A3B / Mixtral.
 10. **Muse Glimmer 30B** — Llama-3 ops + SWA + NoPE global layers; needs Q4 weight path (see Phase 9).
 11. **Gated DeltaNet + gated attention + MRoPE** — the Qwen3.5/3.6/3.8 family; a new op family (chunked linear attention).
 12. **DeepSeek-V2 / V3** — MLA + DeepSeekMoE.
-9. **GLM-4 / ChatGLM** — half-RoPE, MQA.
-10. **Nemotron** — squared-ReLU MLP.
-11. **MiMo** (Xiaomi).
-12. **MiniMax (Text-01)** — lightning attention + MoE (last because attention path is novel).
+13. **GLM-4 / ChatGLM** — half-RoPE, MQA.
+14. **Nemotron** — squared-ReLU MLP.
+15. **MiMo** (Xiaomi).
+16. **MiniMax (Text-01)** — lightning attention + MoE (last because attention path is novel).
 
 **C. Quantization (Phase 9):**
-13. GPTQ / AWQ loaders (4-bit weight checkpoints) — INT4 × FP16 GEMM via cuBLAS or a hand kernel; unlocks 7B at ~4 GB and 14B at ~8 GB.
-14. INT8 GEMM via `cublasGemmEx(CUBLAS_COMPUTE_32I)` for SmoothQuant-style W8A8.
+17. GPTQ / AWQ loaders (4-bit weight checkpoints) — INT4 × FP16 GEMM via cuBLAS or a hand kernel; unlocks 7B at ~4 GB and 14B at ~8 GB.
+18. INT8 GEMM via `cublasGemmEx(CUBLAS_COMPUTE_32I)` for SmoothQuant-style W8A8.
 
 **D. Polish before training (Phase 10):**
-15. CUDA graphs for the decode hot path — drops launch overhead, big tok/s win on small models.
-16. Benchmark harness vs Candle / vLLM / llama.cpp.
+19. CUDA graphs for the decode hot path — drops launch overhead, big tok/s win on small models.
+20. Benchmark harness vs Candle / vLLM / llama.cpp.
 
 **E. Training (Phase 8) — last in this rollout:**
-17. AdamW grad-clipping + cosine + checkpoint save/load polish.
-18. Mixed-precision training (BF16 weights, F32 master, loss scaling).
-19. LoRA modules + fine-tune-Qwen example.
+21. AdamW grad-clipping + cosine + checkpoint save/load polish.
+22. Mixed-precision training (BF16 weights, F32 master, loss scaling).
+23. LoRA modules + fine-tune-Qwen example.
 
 ---
 
@@ -311,7 +311,7 @@ Runner-ups: Nemotron-3.5-Embed-1B (after a Ministral-3 backbone), WeVisOne-VL-2B
 | GroupNorm / cross-attention / time embeddings | Stable Diffusion | ✅ done (SD 1.5) |
 | FlashAttention | Long-context decode | ✅ `ops.FlashAttention` (CUDA tiled, 16× over SDPA at S=1024) |
 | Sliding-window attention | Mistral, Gemma 2 | ✅ done 2026-10-28 (`LlamaConfig.SlidingWindow`, `SlidingLayers`; rotating KV cache) |
-| RoPE scaling (llama3) | Llama-3.1+ | ✅ `models.RopeScaling`; LongRoPE (Phi-3) not yet |
+| RoPE scaling (llama3) | Llama-3.1+ | ✅ `models.RopeScaling`; LongRoPE (Phi-3 / Phi-4-mini) done |
 | WebGPU device | non-NVIDIA GPUs | ✅ `-tags webgpu`; F32 only; GPT-2 verified |
 | Tied LM head | GPT-2, GPT-J, many transformers | ✅ done (`GPT2Config.Tied`) |
 | Sharded safetensors (`model.safetensors.index.json`) | Llama-2 7B+, GPT-2 large+, Qwen2.5-3B+ | ✅ done (`hub.DownloadModelSafetensors` + `safetensors.LoadFiles`); also reads HF Python cache layout (`refs/<rev>` + `snapshots/<sha>/`) |
