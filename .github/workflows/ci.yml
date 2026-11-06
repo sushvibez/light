@@ -1,0 +1,58 @@
+# CPU-only CI. GitHub's runners have no NVIDIA GPU, so the CUDA path is
+# compiled out; CUDA parity and LIGHT_HEAVY_TESTS runs live in
+# scripts/colab/light_heavy_tests.ipynb.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: linux (cgo, -tags nocuda)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # studio is a Wails app; on Linux its webview is cgo against GTK + WebKitGTK.
+      - name: Install GTK/WebKit headers for studio
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libgtk-3-dev libwebkit2gtk-4.1-dev
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - run: go build -tags nocuda ./...
+      - run: go vet -tags nocuda ./...
+      - run: go test -tags nocuda ./...
+
+  windows:
+    name: windows (no cgo, no tags)
+    runs-on: windows-latest
+    env:
+      # No tags on purpose: checks that a cgo-less build falls back to the
+      # CPU-only path by itself (//go:build nocuda || !cgo).
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
