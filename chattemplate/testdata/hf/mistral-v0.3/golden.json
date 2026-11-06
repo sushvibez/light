@@ -1,0 +1,546 @@
+{
+ "repo": "unsloth/mistral-7b-instruct-v0.3",
+ "revision": "60b99dcbc7f853b7cd18472a607e8d045b96f03e",
+ "special_tokens": {
+  "bos_token": "<s>",
+  "eos_token": "</s>",
+  "unk_token": "<unk>",
+  "pad_token": "[control_768]"
+ },
+ "cases": [
+  {
+   "name": "user/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<s>[INST] Hello! What is 2+2?[/INST]"
+  },
+  {
+   "name": "user/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<s>[INST] Hello! What is 2+2?[/INST]"
+  },
+  {
+   "name": "system_user/agp=0",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<s>[INST] You are a helpful assistant.\n\nHello! What is 2+2?[/INST]"
+  },
+  {
+   "name": "system_user/agp=1",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<s>[INST] You are a helpful assistant.\n\nHello! What is 2+2?[/INST]"
+  },
+  {
+   "name": "multi/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<s>[INST] Hello! What is 2+2?[/INST] 2+2 is 4.</s>[INST] And times 3?[/INST]"
+  },
+  {
+   "name": "multi/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<s>[INST] Hello! What is 2+2?[/INST] 2+2 is 4.</s>[INST] And times 3?[/INST]"
+  },
+  {
+   "name": "system_multi/agp=0",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<s>[INST] Hello! What is 2+2?[/INST] 2+2 is 4.</s>[INST] You are a helpful assistant.\n\nAnd times 3?[/INST]"
+  },
+  {
+   "name": "system_multi/agp=1",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<s>[INST] Hello! What is 2+2?[/INST] 2+2 is 4.</s>[INST] You are a helpful assistant.\n\nAnd times 3?[/INST]"
+  },
+  {
+   "name": "ends_assistant/agp=0",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<s>[INST] Hello! What is 2+2?[/INST] 2+2 is 4.</s>"
+  },
+  {
+   "name": "ends_assistant/agp=1",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<s>[INST] Hello! What is 2+2?[/INST] 2+2 is 4.</s>"
+  },
+  {
+   "name": "whitespace_unicode/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "  Spaces, \"quotes\", 'apostrophes',\ttabs\nand unicode: héllo — 你好 🙂 <b>&amp;</b>\n\n"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<s>[INST]   Spaces, \"quotes\", 'apostrophes',\ttabs\nand unicode: héllo — 你好 🙂 <b>&amp;</b>\n\n[/INST]"
+  },
+  {
+   "name": "whitespace_unicode/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "  Spaces, \"quotes\", 'apostrophes',\ttabs\nand unicode: héllo — 你好 🙂 <b>&amp;</b>\n\n"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<s>[INST]   Spaces, \"quotes\", 'apostrophes',\ttabs\nand unicode: héllo — 你好 🙂 <b>&amp;</b>\n\n[/INST]"
+  },
+  {
+   "name": "think_history/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "<think>\nSimple sum.\n</think>\n\n2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<s>[INST] Hello! What is 2+2?[/INST] <think>\nSimple sum.\n</think>\n\n2+2 is 4.</s>[INST] And times 3?[/INST]"
+  },
+  {
+   "name": "think_history/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "<think>\nSimple sum.\n</think>\n\n2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<s>[INST] Hello! What is 2+2?[/INST] <think>\nSimple sum.\n</think>\n\n2+2 is 4.</s>[INST] And times 3?[/INST]"
+  },
+  {
+   "name": "no_thinking/agp=0",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {
+    "enable_thinking": false
+   },
+   "expected": "<s>[INST] You are a helpful assistant.\n\nHello! What is 2+2?[/INST]"
+  },
+  {
+   "name": "no_thinking/agp=1",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {
+    "enable_thinking": false
+   },
+   "expected": "<s>[INST] You are a helpful assistant.\n\nHello! What is 2+2?[/INST]"
+  },
+  {
+   "name": "tools/agp=0",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. Paris"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "expected": "<s>[AVAILABLE_TOOLS] [{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name, e.g. Paris\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"celsius\", \"fahrenheit\"]}}, \"required\": [\"city\"]}}}][/AVAILABLE_TOOLS][INST] You are a helpful assistant.\n\nHello! What is 2+2?[/INST]"
+  },
+  {
+   "name": "tools/agp=1",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. Paris"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "expected": "<s>[AVAILABLE_TOOLS] [{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name, e.g. Paris\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"celsius\", \"fahrenheit\"]}}, \"required\": [\"city\"]}}}][/AVAILABLE_TOOLS][INST] You are a helpful assistant.\n\nHello! What is 2+2?[/INST]"
+  },
+  {
+   "name": "tool_call/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's the weather in Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call12345",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Paris",
+         "unit": "celsius"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call12345",
+     "name": "get_weather",
+     "content": "{\"temperature\": 22, \"sky\": \"clear\"}"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. Paris"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "expected": "<s>[AVAILABLE_TOOLS] [{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name, e.g. Paris\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"celsius\", \"fahrenheit\"]}}, \"required\": [\"city\"]}}}][/AVAILABLE_TOOLS][INST] What's the weather in Paris?[/INST][TOOL_CALLS] [{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\", \"unit\": \"celsius\"}, \"id\": \"call12345\"}]</s>[TOOL_RESULTS] {\"content\": {\"temperature\": 22, \"sky\": \"clear\"}, \"call_id\": \"call12345\"}[/TOOL_RESULTS]"
+  },
+  {
+   "name": "tool_call/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's the weather in Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call12345",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Paris",
+         "unit": "celsius"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call12345",
+     "name": "get_weather",
+     "content": "{\"temperature\": 22, \"sky\": \"clear\"}"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. Paris"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "expected": "<s>[AVAILABLE_TOOLS] [{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather for a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name, e.g. Paris\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"celsius\", \"fahrenheit\"]}}, \"required\": [\"city\"]}}}][/AVAILABLE_TOOLS][INST] What's the weather in Paris?[/INST][TOOL_CALLS] [{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\", \"unit\": \"celsius\"}, \"id\": \"call12345\"}]</s>[TOOL_RESULTS] {\"content\": {\"temperature\": 22, \"sky\": \"clear\"}, \"call_id\": \"call12345\"}[/TOOL_RESULTS]"
+  },
+  {
+   "name": "alternation_error/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "error": "TemplateError: After the optional system message, conversation roles must alternate user/assistant/user/assistant/..."
+  },
+  {
+   "name": "alternation_error/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "error": "TemplateError: After the optional system message, conversation roles must alternate user/assistant/user/assistant/..."
+  }
+ ]
+}

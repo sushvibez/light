@@ -1,0 +1,545 @@
+{
+ "repo": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+ "revision": "ad9f0ae0864d7fbcd1cd905e3c6c5b069cc8b562",
+ "special_tokens": {
+  "bos_token": "<｜begin▁of▁sentence｜>",
+  "eos_token": "<｜end▁of▁sentence｜>",
+  "pad_token": "<｜end▁of▁sentence｜>"
+ },
+ "cases": [
+  {
+   "name": "user/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<｜begin▁of▁sentence｜><｜User｜>Hello! What is 2+2?"
+  },
+  {
+   "name": "user/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<｜begin▁of▁sentence｜><｜User｜>Hello! What is 2+2?<｜Assistant｜><think>\n"
+  },
+  {
+   "name": "system_user/agp=0",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<｜begin▁of▁sentence｜>You are a helpful assistant.<｜User｜>Hello! What is 2+2?"
+  },
+  {
+   "name": "system_user/agp=1",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<｜begin▁of▁sentence｜>You are a helpful assistant.<｜User｜>Hello! What is 2+2?<｜Assistant｜><think>\n"
+  },
+  {
+   "name": "multi/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<｜begin▁of▁sentence｜><｜User｜>Hello! What is 2+2?<｜Assistant｜>2+2 is 4.<｜end▁of▁sentence｜><｜User｜>And times 3?"
+  },
+  {
+   "name": "multi/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<｜begin▁of▁sentence｜><｜User｜>Hello! What is 2+2?<｜Assistant｜>2+2 is 4.<｜end▁of▁sentence｜><｜User｜>And times 3?<｜Assistant｜><think>\n"
+  },
+  {
+   "name": "system_multi/agp=0",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<｜begin▁of▁sentence｜>You are a helpful assistant.<｜User｜>Hello! What is 2+2?<｜Assistant｜>2+2 is 4.<｜end▁of▁sentence｜><｜User｜>And times 3?"
+  },
+  {
+   "name": "system_multi/agp=1",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<｜begin▁of▁sentence｜>You are a helpful assistant.<｜User｜>Hello! What is 2+2?<｜Assistant｜>2+2 is 4.<｜end▁of▁sentence｜><｜User｜>And times 3?<｜Assistant｜><think>\n"
+  },
+  {
+   "name": "ends_assistant/agp=0",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<｜begin▁of▁sentence｜>You are a helpful assistant.<｜User｜>Hello! What is 2+2?<｜Assistant｜>2+2 is 4.<｜end▁of▁sentence｜>"
+  },
+  {
+   "name": "ends_assistant/agp=1",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<｜begin▁of▁sentence｜>You are a helpful assistant.<｜User｜>Hello! What is 2+2?<｜Assistant｜>2+2 is 4.<｜end▁of▁sentence｜><｜Assistant｜><think>\n"
+  },
+  {
+   "name": "whitespace_unicode/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "  Spaces, \"quotes\", 'apostrophes',\ttabs\nand unicode: héllo — 你好 🙂 <b>&amp;</b>\n\n"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<｜begin▁of▁sentence｜><｜User｜>  Spaces, \"quotes\", 'apostrophes',\ttabs\nand unicode: héllo — 你好 🙂 <b>&amp;</b>\n\n"
+  },
+  {
+   "name": "whitespace_unicode/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "  Spaces, \"quotes\", 'apostrophes',\ttabs\nand unicode: héllo — 你好 🙂 <b>&amp;</b>\n\n"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<｜begin▁of▁sentence｜><｜User｜>  Spaces, \"quotes\", 'apostrophes',\ttabs\nand unicode: héllo — 你好 🙂 <b>&amp;</b>\n\n<｜Assistant｜><think>\n"
+  },
+  {
+   "name": "think_history/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "<think>\nSimple sum.\n</think>\n\n2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<｜begin▁of▁sentence｜><｜User｜>Hello! What is 2+2?<｜Assistant｜>\n\n2+2 is 4.<｜end▁of▁sentence｜><｜User｜>And times 3?"
+  },
+  {
+   "name": "think_history/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "<think>\nSimple sum.\n</think>\n\n2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<｜begin▁of▁sentence｜><｜User｜>Hello! What is 2+2?<｜Assistant｜>\n\n2+2 is 4.<｜end▁of▁sentence｜><｜User｜>And times 3?<｜Assistant｜><think>\n"
+  },
+  {
+   "name": "no_thinking/agp=0",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {
+    "enable_thinking": false
+   },
+   "expected": "<｜begin▁of▁sentence｜>You are a helpful assistant.<｜User｜>Hello! What is 2+2?"
+  },
+  {
+   "name": "no_thinking/agp=1",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {
+    "enable_thinking": false
+   },
+   "expected": "<｜begin▁of▁sentence｜>You are a helpful assistant.<｜User｜>Hello! What is 2+2?<｜Assistant｜><think>\n"
+  },
+  {
+   "name": "tools/agp=0",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. Paris"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "expected": "<｜begin▁of▁sentence｜>You are a helpful assistant.<｜User｜>Hello! What is 2+2?"
+  },
+  {
+   "name": "tools/agp=1",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. Paris"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "expected": "<｜begin▁of▁sentence｜>You are a helpful assistant.<｜User｜>Hello! What is 2+2?<｜Assistant｜><think>\n"
+  },
+  {
+   "name": "tool_call/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's the weather in Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call12345",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Paris",
+         "unit": "celsius"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call12345",
+     "name": "get_weather",
+     "content": "{\"temperature\": 22, \"sky\": \"clear\"}"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. Paris"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "expected": "<｜begin▁of▁sentence｜><｜User｜>What's the weather in Paris?<｜Assistant｜><｜end▁of▁sentence｜><｜tool▁outputs▁begin｜><｜tool▁output▁begin｜>{\"temperature\": 22, \"sky\": \"clear\"}<｜tool▁output▁end｜><｜tool▁outputs▁end｜>"
+  },
+  {
+   "name": "tool_call/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's the weather in Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call12345",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Paris",
+         "unit": "celsius"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call12345",
+     "name": "get_weather",
+     "content": "{\"temperature\": 22, \"sky\": \"clear\"}"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. Paris"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "expected": "<｜begin▁of▁sentence｜><｜User｜>What's the weather in Paris?<｜Assistant｜><｜end▁of▁sentence｜><｜tool▁outputs▁begin｜><｜tool▁output▁begin｜>{\"temperature\": 22, \"sky\": \"clear\"}<｜tool▁output▁end｜><｜tool▁outputs▁end｜>"
+  },
+  {
+   "name": "alternation_error/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<｜begin▁of▁sentence｜><｜User｜>Hello! What is 2+2?<｜User｜>And times 3?"
+  },
+  {
+   "name": "alternation_error/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<｜begin▁of▁sentence｜><｜User｜>Hello! What is 2+2?<｜User｜>And times 3?<｜Assistant｜><think>\n"
+  }
+ ]
+}

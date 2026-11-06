@@ -3,6 +3,7 @@ package engine
 import (
 	"strings"
 
+	"light/chattemplate"
 	"light/tokenizer"
 )
 
@@ -14,13 +15,21 @@ type Message struct {
 
 // Template renders a conversation into the prompt string a model family
 // was trained on, ending with the assistant prefix so generation starts at
-// the reply. Templates are hand-ported from the HF chat_template of each
-// family (Jinja is not executed).
+// the reply. When the checkpoint ships a chat_template (HF
+// tokenizer_config.json / chat_template.jinja, or GGUF
+// tokenizer.chat_template) that renders, Load executes it through
+// light/chattemplate (Source "jinja", byte-identical to transformers'
+// apply_chat_template); otherwise the hand-ported family template below is
+// used (Source "builtin").
 type Template struct {
 	Family string
 	Render func(msgs []Message) string
 	// Stop lists extra end-of-turn strings whose ids are added to EOS.
 	Stop []string
+	// Source is "jinja" or "builtin".
+	Source string
+	// Jinja is the model's compiled chat template when Source is "jinja".
+	Jinja *chattemplate.Template
 }
 
 var templates = map[string]Template{
@@ -143,6 +152,12 @@ var templates = map[string]Template{
 // TemplateFor picks the chat template by the special tokens present in the
 // vocabulary; falls back to a plain "User:/Assistant:" transcript.
 func TemplateFor(tok *tokenizer.BPE) Template {
+	t := builtinFor(tok)
+	t.Source = "builtin"
+	return t
+}
+
+func builtinFor(tok *tokenizer.BPE) Template {
 	has := func(s string) bool { return tok.TokenToID(s) >= 0 }
 	switch {
 	case has("<|im_start|>"):

@@ -148,6 +148,9 @@ func Load(spec Spec) (*Model, error) {
 
 	m := &Model{Spec: spec, LM: lm, Tok: tok, Dev: dev, eos: map[int64]bool{}}
 	m.Template = TemplateFor(tok)
+	if ct := loadChatTemplate(spec, tok); ct != nil {
+		m.Template = withJinja(m.Template, ct)
+	}
 	m.Spec.Family = m.Template.Family
 	if spec.Repo != "" {
 		if ids, err := models.EOSTokenIDs(spec.Repo); err == nil {
@@ -167,13 +170,29 @@ func Load(spec Spec) (*Model, error) {
 			m.bos, m.hasBOS = int64(ggufVocab.BOS), true
 		}
 	}
-	for _, s := range m.Template.Stop {
+	stops := m.Template.Stop
+	if m.Template.Jinja != nil {
+		if eos := m.Template.Jinja.Special["eos_token"]; eos != "" {
+			stops = append(stops[:len(stops):len(stops)], eos)
+		}
+	}
+	for _, s := range stops {
 		if id := tok.TokenToID(s); id >= 0 {
 			m.eos[int64(id)] = true
 		}
 	}
-	// Templates that write the BOS token themselves must not get a second.
-	if m.Template.Family == "llama3" || m.Template.Family == "mistral" || m.Template.Family == "gemma" {
+	switch {
+	case m.Template.Source == "jinja" && spec.GGUF == "":
+		// transformers tokenizes the rendered chat with
+		// add_special_tokens=False: BOS appears only if the template
+		// writes bos_token itself.
+		m.hasBOS = false
+	case m.Template.Source == "jinja":
+		// llama.cpp: add_bos still applies to GGUF models, but a BOS the
+		// template already wrote is not doubled (Generate checks ids[0]).
+	case m.Template.Family == "llama3" || m.Template.Family == "mistral" || m.Template.Family == "gemma":
+		// Built-in templates that write the BOS token themselves must not
+		// get a second.
 		m.hasBOS = false
 	}
 	if spec.GGUF == "" && spec.Repo != "" {

@@ -1,0 +1,546 @@
+{
+ "repo": "microsoft/Phi-4-mini-instruct",
+ "revision": "cfbefacb99257ffa30c83adab238a50856ac3083",
+ "special_tokens": {
+  "bos_token": "<|endoftext|>",
+  "eos_token": "<|endoftext|>",
+  "unk_token": "<|endoftext|>",
+  "pad_token": "<|endoftext|>"
+ },
+ "cases": [
+  {
+   "name": "user/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<|user|>Hello! What is 2+2?<|end|><|endoftext|>"
+  },
+  {
+   "name": "user/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<|user|>Hello! What is 2+2?<|end|><|assistant|>"
+  },
+  {
+   "name": "system_user/agp=0",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<|system|>You are a helpful assistant.<|end|><|user|>Hello! What is 2+2?<|end|><|endoftext|>"
+  },
+  {
+   "name": "system_user/agp=1",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<|system|>You are a helpful assistant.<|end|><|user|>Hello! What is 2+2?<|end|><|assistant|>"
+  },
+  {
+   "name": "multi/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<|user|>Hello! What is 2+2?<|end|><|assistant|>2+2 is 4.<|end|><|user|>And times 3?<|end|><|endoftext|>"
+  },
+  {
+   "name": "multi/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<|user|>Hello! What is 2+2?<|end|><|assistant|>2+2 is 4.<|end|><|user|>And times 3?<|end|><|assistant|>"
+  },
+  {
+   "name": "system_multi/agp=0",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<|system|>You are a helpful assistant.<|end|><|user|>Hello! What is 2+2?<|end|><|assistant|>2+2 is 4.<|end|><|user|>And times 3?<|end|><|endoftext|>"
+  },
+  {
+   "name": "system_multi/agp=1",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<|system|>You are a helpful assistant.<|end|><|user|>Hello! What is 2+2?<|end|><|assistant|>2+2 is 4.<|end|><|user|>And times 3?<|end|><|assistant|>"
+  },
+  {
+   "name": "ends_assistant/agp=0",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<|system|>You are a helpful assistant.<|end|><|user|>Hello! What is 2+2?<|end|><|assistant|>2+2 is 4.<|end|><|endoftext|>"
+  },
+  {
+   "name": "ends_assistant/agp=1",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "2+2 is 4."
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<|system|>You are a helpful assistant.<|end|><|user|>Hello! What is 2+2?<|end|><|assistant|>2+2 is 4.<|end|><|assistant|>"
+  },
+  {
+   "name": "whitespace_unicode/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "  Spaces, \"quotes\", 'apostrophes',\ttabs\nand unicode: héllo — 你好 🙂 <b>&amp;</b>\n\n"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<|user|>  Spaces, \"quotes\", 'apostrophes',\ttabs\nand unicode: héllo — 你好 🙂 <b>&amp;</b>\n\n<|end|><|endoftext|>"
+  },
+  {
+   "name": "whitespace_unicode/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "  Spaces, \"quotes\", 'apostrophes',\ttabs\nand unicode: héllo — 你好 🙂 <b>&amp;</b>\n\n"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<|user|>  Spaces, \"quotes\", 'apostrophes',\ttabs\nand unicode: héllo — 你好 🙂 <b>&amp;</b>\n\n<|end|><|assistant|>"
+  },
+  {
+   "name": "think_history/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "<think>\nSimple sum.\n</think>\n\n2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<|user|>Hello! What is 2+2?<|end|><|assistant|><think>\nSimple sum.\n</think>\n\n2+2 is 4.<|end|><|user|>And times 3?<|end|><|endoftext|>"
+  },
+  {
+   "name": "think_history/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "assistant",
+     "content": "<think>\nSimple sum.\n</think>\n\n2+2 is 4."
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<|user|>Hello! What is 2+2?<|end|><|assistant|><think>\nSimple sum.\n</think>\n\n2+2 is 4.<|end|><|user|>And times 3?<|end|><|assistant|>"
+  },
+  {
+   "name": "no_thinking/agp=0",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {
+    "enable_thinking": false
+   },
+   "expected": "<|system|>You are a helpful assistant.<|end|><|user|>Hello! What is 2+2?<|end|><|endoftext|>"
+  },
+  {
+   "name": "no_thinking/agp=1",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {
+    "enable_thinking": false
+   },
+   "expected": "<|system|>You are a helpful assistant.<|end|><|user|>Hello! What is 2+2?<|end|><|assistant|>"
+  },
+  {
+   "name": "tools/agp=0",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. Paris"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "expected": "<|system|>You are a helpful assistant.<|end|><|user|>Hello! What is 2+2?<|end|><|endoftext|>"
+  },
+  {
+   "name": "tools/agp=1",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a helpful assistant."
+    },
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. Paris"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "expected": "<|system|>You are a helpful assistant.<|end|><|user|>Hello! What is 2+2?<|end|><|assistant|>"
+  },
+  {
+   "name": "tool_call/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's the weather in Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call12345",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Paris",
+         "unit": "celsius"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call12345",
+     "name": "get_weather",
+     "content": "{\"temperature\": 22, \"sky\": \"clear\"}"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. Paris"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "expected": "<|user|>What's the weather in Paris?<|end|><|assistant|><|end|><|tool|>{\"temperature\": 22, \"sky\": \"clear\"}<|end|><|endoftext|>"
+  },
+  {
+   "name": "tool_call/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "What's the weather in Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call12345",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": {
+         "city": "Paris",
+         "unit": "celsius"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "call12345",
+     "name": "get_weather",
+     "content": "{\"temperature\": 22, \"sky\": \"clear\"}"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "get_weather",
+       "description": "Get the current weather for a city.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "city": {
+          "type": "string",
+          "description": "City name, e.g. Paris"
+         },
+         "unit": {
+          "type": "string",
+          "enum": [
+           "celsius",
+           "fahrenheit"
+          ]
+         }
+        },
+        "required": [
+         "city"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "expected": "<|user|>What's the weather in Paris?<|end|><|assistant|><|end|><|tool|>{\"temperature\": 22, \"sky\": \"clear\"}<|end|><|assistant|>"
+  },
+  {
+   "name": "alternation_error/agp=0",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": false,
+   "kwargs": {},
+   "expected": "<|user|>Hello! What is 2+2?<|end|><|user|>And times 3?<|end|><|endoftext|>"
+  },
+  {
+   "name": "alternation_error/agp=1",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello! What is 2+2?"
+    },
+    {
+     "role": "user",
+     "content": "And times 3?"
+    }
+   ],
+   "add_generation_prompt": true,
+   "kwargs": {},
+   "expected": "<|user|>Hello! What is 2+2?<|end|><|user|>And times 3?<|end|><|assistant|>"
+  }
+ ]
+}
