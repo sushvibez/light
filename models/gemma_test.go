@@ -109,3 +109,33 @@ func TestGemma3CacheConsistency(t *testing.T) {
 		}
 	}
 }
+
+// TestGemma3CacheConsistencyF32Window repeats TestGemma3CacheConsistency's
+// forced window-5 check with F32 weights and activations. The window-5
+// configuration is far from what the model was trained on, so in BF16 the
+// chunked and single-shot paths may drift apart through rounding alone
+// (seen on an A100: ~0.9 logit). In F32 that rounding is gone: a gap here
+// means a real cache / mask bug rather than precision.
+func TestGemma3CacheConsistencyF32Window(t *testing.T) {
+	dev := gemmaCUDA(t)
+	m, err := LoadGemma3FromHF(gemmaRepo, dev, dtype.F32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Cfg.SlidingWindow = 5
+	full := lastLogits(t, m, gemmaChatIDs, NewKVCache(m.NumLayers()), dev)
+	cache := NewKVCache(m.NumLayers())
+	lastLogits(t, m, gemmaChatIDs[:4], cache, dev)
+	lastLogits(t, m, gemmaChatIDs[4:9], cache, dev)
+	var step []float32
+	for i := 9; i < len(gemmaChatIDs); i++ {
+		step = lastLogits(t, m, gemmaChatIDs[i:i+1], cache, dev)
+	}
+	d := maxAbsDiff(full, step)
+	top := top5(full)
+	t.Logf("F32 window 5: max |full - chunked| = %.3g; top-5 %v full %.3f %.3f chunked %.3f %.3f",
+		d, top, full[top[0]], full[top[1]], step[top[0]], step[top[1]])
+	if d > 0.05 {
+		t.Errorf("F32 window 5: chunked and single-shot logits differ by %.3g", d)
+	}
+}
