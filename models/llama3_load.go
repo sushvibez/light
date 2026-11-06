@@ -15,16 +15,13 @@ import (
 // differs from Qwen2's: the rope_scaling block and the eos_token_id field,
 // which may be an int or a list.
 type llamaHFConfig struct {
-	RopeScaling *struct {
-		RopeType             string    `json:"rope_type"`
-		Type                 string    `json:"type"` // older configs use "type"
-		Factor               float64   `json:"factor"`
-		LowFreqFactor        float64   `json:"low_freq_factor"`
-		HighFreqFactor       float64   `json:"high_freq_factor"`
-		OriginalMaxPositions int       `json:"original_max_position_embeddings"`
-		ShortFactor          []float64 `json:"short_factor"` // longrope
-		LongFactor           []float64 `json:"long_factor"`  // longrope
-	} `json:"rope_scaling"`
+	RopeScaling *hfRopeParams `json:"rope_scaling"`
+	// transformers ≥ 5 writes rope settings to rope_parameters instead: either
+	// one flat block, or one block per layer type ("full_attention" /
+	// "sliding_attention", Mellum 2.1).
+	RopeParameters json.RawMessage `json:"rope_parameters"`
+	// Per-layer "dense" / "sparse" FFN (Mellum 2.1).
+	MLPLayerTypes []string `json:"mlp_layer_types"`
 	// Phi-3 keeps original_max_position_embeddings at the top level.
 	OriginalMaxPositions int             `json:"original_max_position_embeddings"`
 	MaxPositions         int             `json:"max_position_embeddings"`
@@ -39,6 +36,104 @@ type llamaHFConfig struct {
 	MaxWindowLayers  *int     `json:"max_window_layers"`
 	LayerTypes       []string `json:"layer_types"`
 	NumHiddenLayers  int      `json:"num_hidden_layers"`
+}
+
+// hfRopeParams is one HF rope_scaling / rope_parameters block.
+type hfRopeParams struct {
+	RopeType             string    `json:"rope_type"`
+	Type                 string    `json:"type"` // older configs use "type"
+	RopeTheta            float64   `json:"rope_theta"`
+	Factor               float64   `json:"factor"`
+	LowFreqFactor        float64   `json:"low_freq_factor"`
+	HighFreqFactor       float64   `json:"high_freq_factor"`
+	OriginalMaxPositions int       `json:"original_max_position_embeddings"`
+	ShortFactor          []float64 `json:"short_factor"` // longrope
+	LongFactor           []float64 `json:"long_factor"`  // longrope
+	BetaFast             float64   `json:"beta_fast"`    // yarn
+	BetaSlow             float64   `json:"beta_slow"`
+	AttentionFactor      float64   `json:"attention_factor"`
+	MScale               float64   `json:"mscale"`
+	MScaleAllDim         float64   `json:"mscale_all_dim"`
+}
+
+// scaling converts the block to a RopeScaling (nil for plain RoPE).
+// origFallback / maxPositions are the config's top-level
+// original_max_position_embeddings and max_position_embeddings.
+func (p *hfRopeParams) scaling(origFallback, maxPositions int) (*RopeScaling, error) {
+	if p == nil {
+		return nil, nil
+	}
+	typ := p.RopeType
+	if typ == "" {
+		typ = p.Type
+	}
+	orig := p.OriginalMaxPositions
+	if orig == 0 {
+		orig = origFallback
+	}
+	switch typ {
+	case "llama3":
+		return &RopeScaling{
+			Type: "llama3", Factor: p.Factor,
+			LowFreqFactor: p.LowFreqFactor, HighFreqFactor: p.HighFreqFactor,
+			OriginalMaxPositions: p.OriginalMaxPositions,
+		}, nil
+	case "longrope":
+		return &RopeScaling{
+			Type: "longrope", ShortFactor: p.ShortFactor, LongFactor: p.LongFactor,
+			OriginalMaxPositions: orig, MaxPositions: maxPositions,
+		}, nil
+	case "yarn":
+		return &RopeScaling{
+			Type: "yarn", Factor: p.Factor, OriginalMaxPositions: orig, MaxPositions: maxPositions,
+			BetaFast: p.BetaFast, BetaSlow: p.BetaSlow, AttnFactor: p.AttentionFactor,
+			MScale: p.MScale, MScaleAllDim: p.MScaleAllDim,
+		}, nil
+	case "", "default":
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("rope type %q not supported", typ)
+	}
+}
+
+// ropeParameters splits rope_parameters into the full-attention (or only)
+// block and the sliding-attention block, which is nil unless the config
+// keys its rope settings by layer type.
+func (hf *llamaHFConfig) ropeParameters() (full, sliding *hfRopeParams, err error) {
+	if len(hf.RopeParameters) == 0 || string(hf.RopeParameters) == "null" {
+		return nil, nil, nil
+	}
+	var byType map[string]json.RawMessage
+	if err := json.Unmarshal(hf.RopeParameters, &byType); err != nil {
+		return nil, nil, fmt.Errorf("rope_parameters: %w", err)
+	}
+	_, hasFull := byType["full_attention"]
+	_, hasSliding := byType["sliding_attention"]
+	if !hasFull && !hasSliding {
+		var flat hfRopeParams
+		if err := json.Unmarshal(hf.RopeParameters, &flat); err != nil {
+			return nil, nil, fmt.Errorf("rope_parameters: %w", err)
+		}
+		return &flat, nil, nil
+	}
+	parse := func(key string) (*hfRopeParams, error) {
+		raw, ok := byType[key]
+		if !ok {
+			return nil, nil
+		}
+		var p hfRopeParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, fmt.Errorf("rope_parameters.%s: %w", key, err)
+		}
+		return &p, nil
+	}
+	if full, err = parse("full_attention"); err != nil {
+		return nil, nil, err
+	}
+	if sliding, err = parse("sliding_attention"); err != nil {
+		return nil, nil, err
+	}
+	return full, sliding, nil
 }
 
 // slidingWindowConfig derives (SlidingWindow, SlidingLayers) from the HF
@@ -132,31 +227,36 @@ func fetchLlamaConfig(repo string) (LlamaConfig, error) {
 		return LlamaConfig{}, fmt.Errorf("fetchLlamaConfig: parse: %w", err)
 	}
 	cfg.SlidingWindow, cfg.SlidingLayers = hf.slidingWindowConfig()
-	if rs := hf.RopeScaling; rs != nil {
-		typ := rs.RopeType
-		if typ == "" {
-			typ = rs.Type
+	if cfg.RopeScaling, err = hf.RopeScaling.scaling(hf.OriginalMaxPositions, hf.MaxPositions); err != nil {
+		return LlamaConfig{}, fmt.Errorf("fetchLlamaConfig: rope_scaling: %w", err)
+	}
+	full, sliding, err := hf.ropeParameters()
+	if err != nil {
+		return LlamaConfig{}, fmt.Errorf("fetchLlamaConfig: %w", err)
+	}
+	if full != nil {
+		if full.RopeTheta > 0 {
+			cfg.RopeBase = full.RopeTheta
 		}
-		switch typ {
-		case "llama3":
-			cfg.RopeScaling = &RopeScaling{
-				Type: "llama3", Factor: rs.Factor,
-				LowFreqFactor: rs.LowFreqFactor, HighFreqFactor: rs.HighFreqFactor,
-				OriginalMaxPositions: rs.OriginalMaxPositions,
+		if cfg.RopeScaling == nil {
+			if cfg.RopeScaling, err = full.scaling(hf.OriginalMaxPositions, hf.MaxPositions); err != nil {
+				return LlamaConfig{}, fmt.Errorf("fetchLlamaConfig: rope_parameters: %w", err)
 			}
-		case "longrope":
-			orig := rs.OriginalMaxPositions
-			if orig == 0 {
-				orig = hf.OriginalMaxPositions
-			}
-			cfg.RopeScaling = &RopeScaling{
-				Type: "longrope", ShortFactor: rs.ShortFactor, LongFactor: rs.LongFactor,
-				OriginalMaxPositions: orig, MaxPositions: hf.MaxPositions,
-			}
-		case "", "default":
-			// no scaling
-		default:
-			return LlamaConfig{}, fmt.Errorf("fetchLlamaConfig: rope_scaling type %q not supported", typ)
+		}
+	}
+	if sliding != nil && cfg.SlidingWindow > 0 {
+		cfg.SlidingRopeBase = sliding.RopeTheta
+		if cfg.SlidingRopeBase == 0 {
+			cfg.SlidingRopeBase = cfg.RopeBase
+		}
+		if cfg.SlidingRopeScaling, err = sliding.scaling(hf.OriginalMaxPositions, hf.MaxPositions); err != nil {
+			return LlamaConfig{}, fmt.Errorf("fetchLlamaConfig: rope_parameters.sliding_attention: %w", err)
+		}
+	}
+	// mlp_layer_types: "dense" layers keep the SwiGLU MLP in an MoE model.
+	for i, t := range hf.MLPLayerTypes {
+		if t == "dense" {
+			cfg.MLPOnlyLayers = append(cfg.MLPOnlyLayers, i)
 		}
 	}
 	return cfg, nil
@@ -263,12 +363,12 @@ func LoadCausalLMFromHF(repo string, dev device.Device, weightDT dtype.DType) (*
 	switch hf.ModelType {
 	case "llama", "mistral":
 		return loadLlama3(repo, dev, weightDT)
-	case "qwen2", "qwen2_5", "qwen3", "qwen3_moe", "sdar":
+	case "qwen2", "qwen2_5", "qwen3", "qwen3_moe", "mellum", "sdar":
 		return loadQwen2(repo, dev, weightDT)
 	case "phi3":
 		return LoadPhi3FromHF(repo, dev, weightDT)
 	default:
-		return nil, fmt.Errorf("LoadCausalLMFromHF: model_type %q not supported (llama, mistral, qwen2, qwen3, qwen3_moe, sdar, phi3)", hf.ModelType)
+		return nil, fmt.Errorf("LoadCausalLMFromHF: model_type %q not supported (llama, mistral, qwen2, qwen3, qwen3_moe, mellum, sdar, phi3)", hf.ModelType)
 	}
 }
 

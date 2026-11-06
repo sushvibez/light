@@ -295,6 +295,7 @@ See `MODELS.md` for the full catalogue. Validated against reference weights:
 - [x] SDAR block-diffusion LM (`model_type` `sdar`; `Llama.ForwardDiffusion` block mask + no-store KV, `GenerateDiffusion` denoising loop, engine streaming per block) — SDAR-1.7B-Chat BF16 matches transformers top-5 and greedy decode (2026-10-28)
 - [x] Qwen3-MoE (`LoadCausalLMFromHF` `qwen3_moe`; routed-expert FFN via `nn.SparseMoE` + `ops.MoEGemm`) — tiny-random checkpoint matches transformers 5.21 top-5 logits to 5 dp on CPU F32 / CUDA F32, BF16 within BF16 noise (2026-10-28)
 - [x] Phi-3 / 3.5 (`LoadPhi3FromHF`; fused qkv/gate_up split, LongRoPE) — Phi-3.5-mini BF16 matches transformers BF16 logits; greedy identical
+- [~] Mellum 2.1 12B-A2.5B (`model_type` `mellum`: Qwen3-MoE + per-layer sliding window + per-layer-type RoPE with YaRN on full layers, `mlp_layer_types`) — tiny-random checkpoint matches transformers F32 top-5 and greedy on CPU (2026-11-06); real 12B BF16 check on the A100 pending
 - [ ] Mistral (loader path exists via `LoadCausalLMFromHF`; untested, needs sliding window)
 - [x] Whisper (`models.Whisper`, 2026-10-28); Gemma 2 is listed above
 - [ ] T5, CLIP vision, SDXL

@@ -32,7 +32,13 @@ type LlamaConfig struct {
 	WeightDType      dtype.DType  // BF16 for mixed-precision inference; defaults to F32
 	SkipInit         bool         // skip Kaiming/uniform random init (loader will fill); turns model construction from minutes into seconds for 3B+ models
 	RopeScaling      *RopeScaling // optional frequency scaling (Llama 3.1/3.2 "llama3"); nil = plain RoPE on RopeBase
-	PartialRotary    float64      // fraction of HeadDim that RoPE rotates (Phi-4-mini 0.75); 0 or 1 = all of it
+	// Per-layer-type RoPE (Mellum 2.1: YaRN on full layers, plain RoPE on
+	// sliding ones). When SlidingRopeBase > 0, layers that use SlidingWindow
+	// rotate with SlidingRopeBase / SlidingRopeScaling, and RopeBase /
+	// RopeScaling apply to the full-attention layers only.
+	SlidingRopeBase    float64
+	SlidingRopeScaling *RopeScaling
+	PartialRotary      float64 // fraction of HeadDim that RoPE rotates (Phi-4-mini 0.75); 0 or 1 = all of it
 	LazyLinear       bool         // allocate no Linear weights; the loader installs them (GGUF quantized models). Implies SkipInit.
 	SlidingWindow    int          // Mistral/Gemma-style sliding-window attention: each query sees at most this many keys back. 0 = full causal.
 	SlidingLayers    []bool       // optional per-layer switch (len NumLayers); nil = every layer uses SlidingWindow. Gemma alternates local/global layers.
@@ -49,8 +55,6 @@ type LlamaConfig struct {
 	MLPOnlyLayers       []int // layers forced dense regardless of the step
 }
 
-// slidingWindowFor returns the attention window for one layer (0 = full
-// causal attention).
 // IsMoELayer reports whether layer i uses the routed-expert FFN.
 func (cfg LlamaConfig) IsMoELayer(i int) bool {
 	if cfg.NumExperts <= 0 {
@@ -68,6 +72,8 @@ func (cfg LlamaConfig) IsMoELayer(i int) bool {
 	return (i+1)%step == 0
 }
 
+// slidingWindowFor returns the attention window for one layer (0 = full
+// causal attention).
 func (cfg LlamaConfig) slidingWindowFor(layer int) int {
 	if cfg.SlidingWindow <= 0 {
 		return 0
@@ -76,6 +82,15 @@ func (cfg LlamaConfig) slidingWindowFor(layer int) int {
 		return 0
 	}
 	return cfg.SlidingWindow
+}
+
+// ropeFor returns the RoPE base and scaling for one layer, and which cached
+// table set (0 = full / default, 1 = sliding) it uses.
+func (cfg LlamaConfig) ropeFor(layer int) (base float64, rs *RopeScaling, slot int) {
+	if cfg.SlidingRopeBase > 0 && cfg.slidingWindowFor(layer) > 0 {
+		return cfg.SlidingRopeBase, cfg.SlidingRopeScaling, 1
+	}
+	return cfg.RopeBase, cfg.RopeScaling, 0
 }
 
 // Qwen2_0_5B returns the public Qwen2-0.5B-Instruct config.
@@ -249,10 +264,22 @@ type Llama struct {
 	posDev    device.Device
 	posCache  *tensor.Tensor
 
-	invFreq     *tensor.Tensor // (HeadDim/2,) F32 scaled RoPE table; nil when Cfg.RopeScaling == nil
+	rope       [2]ropeTables // scaled RoPE tables per layer type (Cfg.ropeFor slot); built lazily per device
+	invFreqDev device.Device
+}
+
+// ropeTables caches one RoPE scheme's tables on a device.
+type ropeTables struct {
+	invFreq     *tensor.Tensor // (rotDim/2,) F32 scaled RoPE table
 	invFreqLong *tensor.Tensor // LongRoPE long-factor table (seqLen > OriginalMaxPositions)
-	ropeAttn    *tensor.Tensor // (1,) LongRoPE attention factor in the activation dtype
-	invFreqDev  device.Device
+	attn        *tensor.Tensor // (1,) attention factor (LongRoPE / YaRN) in the activation dtype
+}
+
+// resetRoPETables drops the cached RoPE tables, e.g. after changing
+// Cfg.RopeScaling or Cfg.PartialRotary on a live model.
+func (m *Llama) resetRoPETables() {
+	m.rope = [2]ropeTables{}
+	m.invFreqDev = nil
 }
 
 // KVCache stores per-layer K and V tensors so we don't recompute past tokens
@@ -546,11 +573,11 @@ func (m *Llama) runBlock(blk *llamaBlock, x *tensor.Tensor, B, T, prior int, dev
 	if err != nil {
 		return nil, err
 	}
-	q, err = m.applyRoPE(q, pos, prior+T, dev)
+	q, err = m.applyRoPE(q, pos, prior+T, layerIdx, dev)
 	if err != nil {
 		return nil, err
 	}
-	k, err = m.applyRoPE(k, pos, prior+T, dev)
+	k, err = m.applyRoPE(k, pos, prior+T, layerIdx, dev)
 	if err != nil {
 		return nil, err
 	}
@@ -722,7 +749,11 @@ attend:
 // cached). seqLen is the total sequence length after this step (prior + T);
 // LongRoPE picks its short or long factor table from it and additionally
 // scales the rotated output by its attention factor.
-func (m *Llama) applyRoPE(x, pos *tensor.Tensor, seqLen int, dev device.Device) (*tensor.Tensor, error) {
+//
+// layer selects the per-layer-type scheme (Cfg.ropeFor): sliding-window
+// layers use SlidingRopeBase / SlidingRopeScaling when set.
+func (m *Llama) applyRoPE(x, pos *tensor.Tensor, seqLen, layer int, dev device.Device) (*tensor.Tensor, error) {
+	base, rs, slot := m.Cfg.ropeFor(layer)
 	rotDim := m.rotaryDim()
 	if rotDim < m.Cfg.HeadDim {
 		// Partial rotary (Phi-4-mini): rotate_half runs over the first rotDim
@@ -734,7 +765,7 @@ func (m *Llama) applyRoPE(x, pos *tensor.Tensor, seqLen int, dev device.Device) 
 		if rot, err = autograd.Contiguous(rot); err != nil {
 			return nil, err
 		}
-		if rot, err = m.applyRoPEDim(rot, pos, seqLen, rotDim, dev); err != nil {
+		if rot, err = m.applyRoPEDim(rot, pos, seqLen, rotDim, base, rs, slot, dev); err != nil {
 			return nil, err
 		}
 		pass, err := x.Narrow(3, rotDim, m.Cfg.HeadDim-rotDim)
@@ -743,7 +774,7 @@ func (m *Llama) applyRoPE(x, pos *tensor.Tensor, seqLen int, dev device.Device) 
 		}
 		return ops.Concat([]*tensor.Tensor{rot, pass}, 3)
 	}
-	return m.applyRoPEDim(x, pos, seqLen, rotDim, dev)
+	return m.applyRoPEDim(x, pos, seqLen, rotDim, base, rs, slot, dev)
 }
 
 // rotaryDim is the number of head dims RoPE rotates (even).
@@ -754,22 +785,22 @@ func (m *Llama) rotaryDim() int {
 	return m.Cfg.HeadDim
 }
 
-func (m *Llama) applyRoPEDim(x, pos *tensor.Tensor, seqLen, rotDim int, dev device.Device) (*tensor.Tensor, error) {
-	rs := m.Cfg.RopeScaling
+func (m *Llama) applyRoPEDim(x, pos *tensor.Tensor, seqLen, rotDim int, base float64, rs *RopeScaling, slot int, dev device.Device) (*tensor.Tensor, error) {
 	if rs == nil {
-		return ops.RoPE(x, pos, m.Cfg.RopeBase)
+		return ops.RoPE(x, pos, base)
 	}
 	if m.invFreqDev == nil || !m.invFreqDev.SameAs(dev) {
-		m.invFreq, m.invFreqLong, m.ropeAttn = nil, nil, nil
+		m.rope = [2]ropeTables{}
 		m.invFreqDev = dev
 	}
-	table := &m.invFreq
+	tb := &m.rope[slot]
+	table := &tb.invFreq
 	long := rs.Type == "longrope" && seqLen > rs.OriginalMaxPositions
 	if long {
-		table = &m.invFreqLong
+		table = &tb.invFreqLong
 	}
 	if *table == nil {
-		t, err := rs.invFreqTensor(rotDim, m.Cfg.RopeBase, long, dev)
+		t, err := rs.invFreqTensor(rotDim, base, long, dev)
 		if err != nil {
 			return nil, err
 		}
@@ -783,7 +814,7 @@ func (m *Llama) applyRoPEDim(x, pos *tensor.Tensor, seqLen, rotDim int, dev devi
 	if af == 1 {
 		return out, nil
 	}
-	if m.ropeAttn == nil {
+	if tb.attn == nil || tb.attn.DType() != x.DType() {
 		t, err := tensor.New([]float32{float32(af)}, []int{1}, dev)
 		if err != nil {
 			return nil, err
@@ -793,9 +824,9 @@ func (m *Llama) applyRoPEDim(x, pos *tensor.Tensor, seqLen, rotDim int, dev devi
 				return nil, err
 			}
 		}
-		m.ropeAttn = t
+		tb.attn = t
 	}
-	return ops.Mul(out, m.ropeAttn)
+	return ops.Mul(out, tb.attn)
 }
 
 // headsForward reshapes (B, T, H*HD) to (B, H, T, HD) and contiguifies.

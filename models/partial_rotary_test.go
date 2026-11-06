@@ -38,13 +38,13 @@ func TestPartialRotaryConsistency(t *testing.T) {
 	// Flipping to full rotary must change the logits (the pass-through dims
 	// are really left alone).
 	m.Cfg.PartialRotary = 0
-	m.invFreq, m.invFreqLong = nil, nil
+	m.resetRoPETables()
 	m.Cfg.RopeScaling = &RopeScaling{Type: "longrope", ShortFactor: []float64{1, 1.5, 1, 1}, LongFactor: []float64{2, 3, 1, 1}, OriginalMaxPositions: 32, MaxPositions: 64}
 	if d := maxAbsDiff(full, lastLogits(t, m, ids, NewKVCache(m.NumLayers()), cpu)); d < 1e-3 {
 		t.Fatalf("partial and full rotary agree to %.2e; partial rotary is not applied", d)
 	}
 	m.Cfg.PartialRotary, m.Cfg.RopeScaling = cfg.PartialRotary, cfg.RopeScaling
-	m.invFreq, m.invFreqLong = nil, nil
+	m.resetRoPETables()
 	if !device.CUDAAvailable() {
 		return
 	}

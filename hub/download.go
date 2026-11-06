@@ -57,6 +57,16 @@ func Download(repo, revision, filename string) (string, error) {
 	if revision == "" {
 		revision = "main"
 	}
+	// A local checkpoint directory (e.g. a tiny-random test model under a
+	// testdata/ folder) is read in place. A missing file reports HTTP 404,
+	// as the Hub would, so single-file → sharded fallbacks still work.
+	if st, err := os.Stat(repo); err == nil && st.IsDir() {
+		p := filepath.Join(repo, filepath.FromSlash(filename))
+		if _, err := os.Stat(p); err != nil {
+			return "", fmt.Errorf("hub.Download: %s not in local directory %s (HTTP 404)", filename, repo)
+		}
+		return p, nil
+	}
 	cache, err := CacheDir()
 	if err != nil {
 		return "", err

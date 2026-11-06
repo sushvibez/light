@@ -49,6 +49,7 @@ type qwenHFConfig struct {
 	ModelType         string  `json:"model_type"`
 	// Qwen3-MoE
 	NumExperts          int   `json:"num_experts"`
+	NumLocalExperts     int   `json:"num_local_experts"` // same count, as transformers 5.21 serialises Mellum / Mixtral configs
 	NumExpertsPerTok    int   `json:"num_experts_per_tok"`
 	MoEIntermediateSize int   `json:"moe_intermediate_size"`
 	NormTopKProb        bool  `json:"norm_topk_prob"`
@@ -131,6 +132,9 @@ func fetchQwenConfig(repo string) (LlamaConfig, error) {
 	if hf.NumKeyValueHeads == 0 {
 		hf.NumKeyValueHeads = hf.NumAttentionHeads
 	}
+	if hf.NumExperts == 0 {
+		hf.NumExperts = hf.NumLocalExperts
+	}
 	headDim := hf.HeadDim
 	if headDim == 0 {
 		headDim = hf.HiddenSize / hf.NumAttentionHeads
@@ -155,7 +159,7 @@ func fetchQwenConfig(repo string) (LlamaConfig, error) {
 		TieEmbed:            hf.TieWordEmbed,
 		PartialRotary:       hf.PartialRotary,
 		QKVBias:             qkvBias,
-		QKNorm:              hf.ModelType == "qwen3" || hf.ModelType == "qwen3_moe" || hf.ModelType == "sdar",
+		QKNorm:              hf.ModelType == "qwen3" || hf.ModelType == "qwen3_moe" || hf.ModelType == "mellum" || hf.ModelType == "sdar",
 		NumExperts:          hf.NumExperts,
 		NumExpertsPerTok:    hf.NumExpertsPerTok,
 		MoEIntermediateSize: hf.MoEIntermediateSize,
