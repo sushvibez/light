@@ -20,8 +20,8 @@ jobs:
     name: linux (cgo, -tags nocuda)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       # studio is a Wails v3 app; on Linux its webview is cgo against
@@ -50,8 +50,8 @@ jobs:
       # CPU-only path by itself (//go:build nocuda || !cgo).
       CGO_ENABLED: "0"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
       - run: go build ./...
