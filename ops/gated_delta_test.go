@@ -191,3 +191,113 @@ func TestSoftplus(t *testing.T) {
 		}
 	}
 }
+
+// CUDA: the same transformers goldens through the GPU kernels. The CUDA
+// launcher uses the token-by-token kernel for both modes, so the chunked
+// fixtures also pin that it equals the chunked reference.
+func TestGatedDeltaRuleCUDAMatchesTransformers(t *testing.T) {
+	if !device.CUDAAvailable() {
+		t.Skip("no CUDA")
+	}
+	gpu, err := device.CUDA(0)
+	if err != nil {
+		t.Skip(err)
+	}
+	toGPU := func(x *tensor.Tensor) *tensor.Tensor {
+		if x == nil {
+			return nil
+		}
+		g, err := x.To(gpu)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+	toCPU := func(x *tensor.Tensor) *tensor.Tensor {
+		c, err := x.To(device.CPU())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	for _, name := range []string{
+		"delta_recurrent_t1_state.npz", "delta_recurrent_t37.npz", "delta_chunked_t37_c16.npz",
+		"delta_chunked_t150_state.npz", "delta_chunked_t20_d128.npz",
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := gdLoadNpz(t, name)
+			meta := tensor.MustSlice[int64](f["meta"])
+			opts := ops.GatedDeltaOptions{Mode: ops.GatedDeltaRecurrent, ChunkSize: int(meta[1]), QKL2Norm: meta[2] == 1}
+			if meta[0] == 1 {
+				opts.Mode = ops.GatedDeltaChunked
+			}
+			out, final, err := ops.GatedDeltaRule(toGPU(f["q"]), toGPU(f["k"]), toGPU(f["v"]), toGPU(f["g"]), toGPU(f["beta"]), toGPU(f["state"]), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if d := gdMaxDiff(t, toCPU(out), f["out"]); d > 2e-5 {
+				t.Errorf("CUDA output differs from transformers by %.2e", d)
+			}
+			if d := gdMaxDiff(t, toCPU(final), f["final"]); d > 2e-5 {
+				t.Errorf("CUDA final state differs from transformers by %.2e", d)
+			}
+		})
+	}
+	// Prefill + one-token decode through the carried state, on the GPU.
+	f := gdLoadNpz(t, "delta_chunked_t150_state.npz")
+	q, k, v, g, beta := toGPU(f["q"]), toGPU(f["k"]), toGPU(f["v"]), toGPU(f["g"]), toGPU(f["beta"])
+	piece := func(x *tensor.Tensor, start, n int) *tensor.Tensor { return gdNarrow(t, x, 1, start, n) }
+	o, s, err := ops.GatedDeltaRule(piece(q, 0, 100), piece(k, 0, 100), piece(v, 0, 100), piece(g, 0, 100), piece(beta, 0, 100), toGPU(f["state"]), ops.GatedDeltaOptions{QKL2Norm: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := gdMaxDiff(t, toCPU(o), gdNarrow(t, f["out"], 1, 0, 100)); d > 2e-5 {
+		t.Errorf("CUDA prefill piece: %.2e", d)
+	}
+	for i := 100; i < q.Dim(1); i++ {
+		if o, s, err = ops.GatedDeltaRule(piece(q, i, 1), piece(k, i, 1), piece(v, i, 1), piece(g, i, 1), piece(beta, i, 1), s, ops.GatedDeltaOptions{QKL2Norm: true}); err != nil {
+			t.Fatal(err)
+		}
+		if d := gdMaxDiff(t, toCPU(o), gdNarrow(t, f["out"], 1, i, 1)); d > 2e-5 {
+			t.Fatalf("CUDA decode step %d: %.2e", i, d)
+		}
+	}
+	if d := gdMaxDiff(t, toCPU(s), f["final"]); d > 2e-5 {
+		t.Errorf("CUDA state after prefill + decode: %.2e", d)
+	}
+
+	// Short conv (whole and split) and softplus.
+	c := gdLoadNpz(t, "conv_k4.npz")
+	x, w := toGPU(c["x"]), toGPU(c["w"])
+	co, _, err := ops.CausalConv1dDepthwise(x, w, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := gdMaxDiff(t, toCPU(co), c["out"]); d > 1e-5 {
+		t.Errorf("CUDA conv: %.2e", d)
+	}
+	co, cs, err := ops.CausalConv1dDepthwise(gdNarrow(t, x, 2, 0, 7), w, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 7; i < x.Dim(2); i++ {
+		if co, cs, err = ops.CausalConv1dDepthwise(gdNarrow(t, x, 2, i, 1), w, cs, true); err != nil {
+			t.Fatal(err)
+		}
+		if d := gdMaxDiff(t, toCPU(co), gdNarrow(t, c["out"], 2, i, 1)); d > 1e-5 {
+			t.Fatalf("CUDA conv step %d: %.2e", i, d)
+		}
+	}
+	in, _ := tensor.New([]float32{-30, -1, 0, 1, 19.5, 25}, []int{6}, device.CPU())
+	want, err := ops.Softplus(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ops.Softplus(toGPU(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := gdMaxDiff(t, toCPU(got), want); d > 1e-5 {
+		t.Errorf("CUDA softplus: %.2e", d)
+	}
+}
