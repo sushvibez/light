@@ -232,6 +232,21 @@ func init() {
 		func(a float32) float32 { return a / (1.0 + float32(math.Exp(float64(-a)))) },
 		func(a float64) float64 { return a / (1.0 + math.Exp(-a)) },
 	)
+	// softplus: torch's default (beta 1, threshold 20): x itself above 20.
+	registerUnaryFloat("softplus",
+		func(a float32) float32 {
+			if a > 20 {
+				return a
+			}
+			return float32(math.Log1p(math.Exp(float64(a))))
+		},
+		func(a float64) float64 {
+			if a > 20 {
+				return a
+			}
+			return math.Log1p(math.Exp(a))
+		},
+	)
 	registerUnaryFloat("tan",
 		func(a float32) float32 { return float32(math.Tan(float64(a))) },
 		math.Tan,

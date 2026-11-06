@@ -39,6 +39,10 @@ func Relu(a *tensor.Tensor) (*tensor.Tensor, error)    { return unaryDispatch("r
 func Gelu(a *tensor.Tensor) (*tensor.Tensor, error)    { return unaryDispatch("gelu", a) }
 func SiLU(a *tensor.Tensor) (*tensor.Tensor, error)    { return unaryDispatch("silu", a) }
 
+// Softplus is log(1 + eˣ), and x itself above 20 (torch's default
+// threshold). CPU only so far.
+func Softplus(a *tensor.Tensor) (*tensor.Tensor, error) { return unaryDispatch("softplus", a) }
+
 // GeluErf is the exact Gaussian Error Linear Unit, 0.5·x·(1+erf(x/√2)) —
 // PyTorch's default `F.gelu(x)` and HF BERT's `hidden_act: "gelu"`. `Gelu`
 // above is the tanh approximation (GPT-2 / HF "gelu_new").
