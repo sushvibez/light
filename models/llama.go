@@ -39,10 +39,10 @@ type LlamaConfig struct {
 	SlidingRopeBase    float64
 	SlidingRopeScaling *RopeScaling
 	PartialRotary      float64 // fraction of HeadDim that RoPE rotates (Phi-4-mini 0.75); 0 or 1 = all of it
-	LazyLinear       bool         // allocate no Linear weights; the loader installs them (GGUF quantized models). Implies SkipInit.
-	SlidingWindow    int          // Mistral/Gemma-style sliding-window attention: each query sees at most this many keys back. 0 = full causal.
-	SlidingLayers    []bool       // optional per-layer switch (len NumLayers); nil = every layer uses SlidingWindow. Gemma alternates local/global layers.
-	QKNorm           bool         // Qwen3: RMSNorm over the head dim of Q and K (per layer weights) before RoPE
+	LazyLinear         bool    // allocate no Linear weights; the loader installs them (GGUF quantized models). Implies SkipInit.
+	SlidingWindow      int     // Mistral/Gemma-style sliding-window attention: each query sees at most this many keys back. 0 = full causal.
+	SlidingLayers      []bool  // optional per-layer switch (len NumLayers); nil = every layer uses SlidingWindow. Gemma alternates local/global layers.
+	QKNorm             bool    // Qwen3: RMSNorm over the head dim of Q and K (per layer weights) before RoPE
 	// Mixture-of-experts FFN (Qwen3-MoE / Mixtral / DeepSeek-style). NumExperts
 	// > 0 turns the FFN of every layer selected by DecoderSparseStep /
 	// MLPOnlyLayers into an nn.SparseMoE with NumExpertsPerTok routed experts
