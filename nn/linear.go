@@ -30,8 +30,9 @@ type Linear struct {
 	// WBlockScale switches an F8E4M3 weight to block scaling (the "fp8"
 	// fine-grained format of Qwen3.5 / DeepSeek-V3 FP8 checkpoints):
 	// W[i, j] ≈ codes[i, j] · WBlockScale[i / WBlock[0], j / WBlock[1]], F32.
-	// Forward dequantizes the weight to the activation dtype and runs the
-	// ordinary GEMM (works on any GPU; the weight stays 1 byte / param at rest).
+	// Forward runs ops.MatMulF8Block: a fused FP8 GEMV for decode, the
+	// weight expanded to the activation dtype + the ordinary GEMM otherwise
+	// (any GPU; the weight stays 1 byte / param at rest).
 	WBlockScale *tensor.Tensor
 	WBlock      [2]int
 	inFeatures  int
@@ -193,15 +194,14 @@ func (l *Linear) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 		return nil, fmt.Errorf("nn.Linear: F8E4M3 weight needs F32/BF16/F16 activations, got %v", x.DType())
 	}
 	w := l.W
-	if fp8 && l.WBlockScale != nil {
-		// Block-scaled FP8: expand to the activation dtype for this call.
-		dq, err := ops.DequantizeF8Block(l.W, l.WBlockScale, l.WBlock[0], l.WBlock[1], x.DType())
-		if err != nil {
-			return nil, fmt.Errorf("nn.Linear: %w", err)
+	blockFP8 := fp8 && l.WBlockScale != nil
+	if blockFP8 {
+		fp8 = false // handled by ops.MatMulF8Block below
+		if x.DType() == dtype.F16 {
+			return nil, fmt.Errorf("nn.Linear: block-scaled FP8 needs F32 or BF16 activations, got F16")
 		}
-		w, fp8 = dq, false
 	}
-	if !quantized && !fp8 && x.DType() != w.DType() {
+	if !quantized && !fp8 && !blockFP8 && x.DType() != w.DType() {
 		return nil, fmt.Errorf("nn.Linear: x dtype %v != W dtype %v — cast at the boundary, not inside the layer", x.DType(), l.W.DType())
 	}
 
@@ -222,7 +222,11 @@ func (l *Linear) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 
 	var y *tensor.Tensor
 	var err error
-	if quantized {
+	if blockFP8 {
+		// Block-scaled FP8 (inference only): fused GEMV for a few rows,
+		// dequantize + GEMM otherwise.
+		y, err = ops.MatMulF8Block(flat, l.W, l.WBlockScale, l.WBlock[0], l.WBlock[1])
+	} else if quantized {
 		// GGUF weight: fused dequant-matmul (no autograd; inference only).
 		flatC, err2 := flat.Contiguous()
 		if err2 != nil {

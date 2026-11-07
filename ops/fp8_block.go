@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"light/dtype"
+	"light/internal/registry"
 	"light/tensor"
 )
 
@@ -33,6 +34,28 @@ func DequantizeF8Block(w, scale *tensor.Tensor, blockR, blockC int, outDT dtype.
 	if !w.Device().SameAs(scale.Device()) {
 		return nil, fmt.Errorf("ops.DequantizeF8Block: weight on %v, scale on %v", w.Device(), scale.Device())
 	}
+	// Fused kernel (one pass, CUDA) when there is one for outDT.
+	if C%4 == 0 && blockC%4 == 0 {
+		if k, err := registry.Lookup(registry.Key{Op: "fp8_block_dequant", Dev: w.Device().Kind(), DType: outDT}); err == nil {
+			wc, err := w.Contiguous()
+			if err != nil {
+				return nil, err
+			}
+			sc, err := scale.Contiguous()
+			if err != nil {
+				return nil, err
+			}
+			out, err := tensor.Zeros(outDT, []int{R, C}, w.Device())
+			if err != nil {
+				return nil, err
+			}
+			if err := k(&registry.Context{Inputs: []*tensor.Tensor{wc, sc}, Output: out,
+				Attrs: map[string]any{"block_r": blockR, "block_c": blockC}}); err != nil {
+				return nil, err
+			}
+			return out, nil
+		}
+	}
 	w32, err := Cast(w, dtype.F32)
 	if err != nil {
 		return nil, err
@@ -58,4 +81,63 @@ func DequantizeF8Block(w, scale *tensor.Tensor, blockR, blockC int, outDT dtype.
 		return out, nil
 	}
 	return Cast(out, outDT)
+}
+
+// fp8GEMVMaxM is the largest row count the fused FP8 GEMV kernel takes
+// (FP8_GEMV_MAXM in kernels/cuda/src/fp8_block.cu).
+const fp8GEMVMaxM = 8
+
+// MatMulF8Block computes x · Wᵀ for a block-scaled F8E4M3 weight w (N, K)
+// with scale (N / blockR, K / blockC): x is (M, K) F32 or BF16, the result
+// (M, N) at x's dtype. Up to 8 rows (decode) on CUDA it runs a fused GEMV
+// that reads the 1-byte codes directly; otherwise the weight is expanded to
+// x's dtype (DequantizeF8Block) and multiplied by the regular GEMM.
+func MatMulF8Block(x, w, scale *tensor.Tensor, blockR, blockC int) (*tensor.Tensor, error) {
+	if x.Rank() != 2 || w.Rank() != 2 || x.Dim(1) != w.Dim(1) {
+		return nil, fmt.Errorf("ops.MatMulF8Block: x %v, w %v", x.Shape(), w.Shape())
+	}
+	M, K, N := x.Dim(0), x.Dim(1), w.Dim(0)
+	if M <= fp8GEMVMaxM && K%16 == 0 && blockC%16 == 0 && blockR > 0 && N%blockR == 0 && K%blockC == 0 &&
+		w.DType() == dtype.F8E4M3 && scale.DType() == dtype.F32 && scale.Rank() == 2 &&
+		scale.Dim(0) == N/blockR && scale.Dim(1) == K/blockC {
+		if k, err := registry.Lookup(registry.Key{Op: "fp8_block_gemv", Dev: x.Device().Kind(), DType: x.DType()}); err == nil {
+			xc, err := x.Contiguous()
+			if err != nil {
+				return nil, err
+			}
+			wc, err := w.Contiguous()
+			if err != nil {
+				return nil, err
+			}
+			sc, err := scale.Contiguous()
+			if err != nil {
+				return nil, err
+			}
+			out, err := tensor.Zeros(x.DType(), []int{M, N}, x.Device())
+			if err != nil {
+				return nil, err
+			}
+			if err := k(&registry.Context{Inputs: []*tensor.Tensor{xc, wc, sc}, Output: out,
+				Attrs: map[string]any{"block_r": blockR, "block_c": blockC}}); err != nil {
+				return nil, err
+			}
+			return out, nil
+		}
+	}
+	dq, err := DequantizeF8Block(w, scale, blockR, blockC, x.DType())
+	if err != nil {
+		return nil, err
+	}
+	wT, err := dq.Transpose(0, 1)
+	if err != nil {
+		return nil, err
+	}
+	xc, err := x.Contiguous()
+	if err != nil {
+		return nil, err
+	}
+	if x.DType() == dtype.BF16 || x.DType() == dtype.F16 {
+		return MatMulMixed(xc, wT)
+	}
+	return MatMul(xc, wT)
 }
