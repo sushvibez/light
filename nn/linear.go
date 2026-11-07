@@ -26,7 +26,14 @@ type Linear struct {
 	B *tensor.Tensor // nil if no bias; same dtype as W (activation dtype for F8 weights)
 	// WScale de-quantises an F8E4M3 weight: W ≈ codes · WScale (0 means 1).
 	// Loaders set it from `weight_scale` / `weight_scale_inv` tensors.
-	WScale      float32
+	WScale float32
+	// WBlockScale switches an F8E4M3 weight to block scaling (the "fp8"
+	// fine-grained format of Qwen3.5 / DeepSeek-V3 FP8 checkpoints):
+	// W[i, j] ≈ codes[i, j] · WBlockScale[i / WBlock[0], j / WBlock[1]], F32.
+	// Forward dequantizes the weight to the activation dtype and runs the
+	// ordinary GEMM (works on any GPU; the weight stays 1 byte / param at rest).
+	WBlockScale *tensor.Tensor
+	WBlock      [2]int
 	inFeatures  int
 	outFeatures int
 }
@@ -185,7 +192,16 @@ func (l *Linear) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 	if fp8 && x.DType() != dtype.F32 && x.DType() != dtype.BF16 && x.DType() != dtype.F16 {
 		return nil, fmt.Errorf("nn.Linear: F8E4M3 weight needs F32/BF16/F16 activations, got %v", x.DType())
 	}
-	if !quantized && !fp8 && x.DType() != l.W.DType() {
+	w := l.W
+	if fp8 && l.WBlockScale != nil {
+		// Block-scaled FP8: expand to the activation dtype for this call.
+		dq, err := ops.DequantizeF8Block(l.W, l.WBlockScale, l.WBlock[0], l.WBlock[1], x.DType())
+		if err != nil {
+			return nil, fmt.Errorf("nn.Linear: %w", err)
+		}
+		w, fp8 = dq, false
+	}
+	if !quantized && !fp8 && x.DType() != w.DType() {
 		return nil, fmt.Errorf("nn.Linear: x dtype %v != W dtype %v — cast at the boundary, not inside the layer", x.DType(), l.W.DType())
 	}
 
@@ -234,11 +250,11 @@ func (l *Linear) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 			wScale = 1
 		}
 		y, err = ops.MatMulF8(xq, wT, xScale, wScale, x.DType())
-	} else if l.W.DType() == dtype.BF16 || l.W.DType() == dtype.F16 {
+	} else if w.DType() == dtype.BF16 || w.DType() == dtype.F16 {
 		// BF16 / F16 → cuBLAS GemmEx tensor-core path (16-bit in, F32
 		// accumulate, 16-bit out). Caller has already arranged dtype uniformity, so the
 		// transpose is a pure view and contig is needed once.
-		wT, err2 := l.W.Transpose(0, 1)
+		wT, err2 := w.Transpose(0, 1)
 		if err2 != nil {
 			return nil, err2
 		}
@@ -248,7 +264,7 @@ func (l *Linear) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 		}
 		y, err = ops.MatMulMixed(flatC, wT)
 	} else {
-		wT, err2 := autograd.Transpose(l.W, 0, 1)
+		wT, err2 := autograd.Transpose(w, 0, 1)
 		if err2 != nil {
 			return nil, err2
 		}

@@ -42,9 +42,12 @@ type Qwen35Config struct {
 	TieEmbed    bool
 	WeightDType dtype.DType // F32 or BF16; activations run at the same dtype
 
-	// lazyWeights: allocate no Linear or embedding weights (the GGUF loader
-	// installs its block-quantized tensors).
+	// lazyWeights: allocate no Linear or embedding weights (the loaders
+	// install them at their final dtype / format).
 	lazyWeights bool
+	// fp8Block is the weight_block_size of a fine-grained FP8 checkpoint
+	// (zero otherwise).
+	fp8Block [2]int
 }
 
 func (c Qwen35Config) activationDType() dtype.DType {
