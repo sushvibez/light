@@ -153,13 +153,20 @@ func TestYarnInvFreqMatchesTransformers(t *testing.T) {
 }
 
 // Mellum 2.1 12B-A2.5B (Thinking), BF16 on CUDA, against transformers 5.21
-// BF16 eager on an A100: `ref_mellum.py JetBrains/Mellum2.1-12B-A2.5B-Thinking
-// bf16 --chat` (system "You are a concise assistant.", user "Explain in one
-// sentence why the sky is blue.", generation prompt). The model opens with
-// <think> by a margin of 28 logits, so the top-1 check is easy; the other
-// four logits (near -20, BF16 step 0.125) and the 16-token greedy
-// continuation are what pin the sliding / YaRN / MoE paths down. 24.3 GB
-// of weights: needs an A100-class GPU (an L4's 22 GiB is too small).
+// eager on an A100 (`ref_mellum.py JetBrains/Mellum2.1-12B-A2.5B-Thinking
+// {f32|bf16} --chat`; system "You are a concise assistant.", user "Explain in
+// one sentence why the sky is blue.", generation prompt).
+//
+// The logits are checked against the F32 reference: two BF16 runs of a
+// 28-layer MoE drift apart through rounding alone (transformers' own BF16
+// <think> logit is 8.44 against 7.78 in F32; Light BF16 gives 7.94), so a
+// BF16-to-BF16 comparison mostly measures noise. Tolerance 1.0, about
+// 1.5 × transformers' own BF16-vs-F32 gap. The greedy continuation is
+// compared with transformers BF16, which it should follow token for token
+// (F32 inserts " the" at token 12). The model opens with <think> by a margin
+// of 28 logits; the other four logits (near −20) and the greedy run are what
+// pin the sliding / YaRN / MoE paths down. 24.3 GB of weights: needs an
+// A100-class GPU (an L4's 22 GiB is too small).
 const mellum12BRepo = "JetBrains/Mellum2.1-12B-A2.5B-Thinking"
 
 var (
@@ -168,7 +175,7 @@ var (
 	mellum12BRef = []struct {
 		id    int
 		logit float32
-	}{{23, 8.4375}, {629, -19.75}, {15114, -20.25}, {91657, -21.125}, {28, -21.5}}
+	}{{23, 7.7828}, {629, -19.9658}, {15114, -20.1398}, {91657, -20.7684}, {23758, -21.5000}} // F32
 	// "<think>\nWe need to respond with one sentence explaining why sky is blue. Concise"
 	mellum12BGreedy = []int64{23, 233, 2116, 895, 333, 6246, 434, 768, 7505, 18469, 3306, 11734, 359, 5786, 48, 94113}
 )
@@ -217,8 +224,8 @@ func TestMellum12BMatchesTransformersBF16(t *testing.T) {
 		t.Errorf("top-1: got %d (%.3f), want %d", got[0], row[got[0]], mellum12BRef[0].id)
 	}
 	for _, w := range mellum12BRef {
-		if d := row[w.id] - w.logit; d > 0.5 || d < -0.5 {
-			t.Errorf("logit[%d] = %.3f, want %.3f (BF16 tol 0.5)", w.id, row[w.id], w.logit)
+		if d := row[w.id] - w.logit; d > 1.0 || d < -1.0 {
+			t.Errorf("logit[%d] = %.3f, want %.3f (transformers F32; BF16 tol 1.0)", w.id, row[w.id], w.logit)
 		}
 	}
 	t.Logf("top-5 %v logits %.3f %.3f %.3f %.3f %.3f", got, row[got[0]], row[got[1]], row[got[2]], row[got[3]], row[got[4]])
