@@ -23,6 +23,12 @@ import (
 // once. Binding the current runtime device's primary context here is cheap
 // (a no-op when a context is already current) and makes the driver calls
 // thread-agnostic.
+//
+// The check and the driver call it guards must run on the same OS thread:
+// every cgo call may land on a different thread, so a goroutine can pass
+// ensureContext on one thread and reach cuLaunchKernel on another that has
+// no context (seen on an A100 as an intermittent code 201 during a long
+// decode). Callers therefore hold runtime.LockOSThread across both.
 func ensureContext() error {
 	var ctx C.CUcontext
 	if rc := C.cuCtxGetCurrent(&ctx); rc != C.CUDA_SUCCESS {
@@ -75,6 +81,8 @@ func ModuleLoadData(ptxText []byte) (*Module, error) {
 	if err := EnsureDriver(); err != nil {
 		return nil, err
 	}
+	runtime.LockOSThread() // ensureContext and the load on one thread
+	defer runtime.UnlockOSThread()
 	if err := ensureContext(); err != nil {
 		return nil, err
 	}
@@ -133,6 +141,8 @@ func LaunchKernel(
 	stream uintptr,
 	args []unsafe.Pointer,
 ) error {
+	runtime.LockOSThread() // ensureContext and the launch on one thread
+	defer runtime.UnlockOSThread()
 	if err := ensureContext(); err != nil {
 		return err
 	}
@@ -148,15 +158,26 @@ func LaunchKernel(
 		pinner.Pin(&args[0])
 		argsPtr = unsafe.Pointer(&args[0])
 	}
-	rc := C.cuLaunchKernel(
-		fn.handle,
-		C.uint(gridX), C.uint(gridY), C.uint(gridZ),
-		C.uint(blockX), C.uint(blockY), C.uint(blockZ),
-		C.uint(sharedBytes),
-		C.CUstream(unsafe.Pointer(stream)),
-		(*unsafe.Pointer)(argsPtr),
-		nil,
-	)
+	launch := func() C.CUresult {
+		return C.cuLaunchKernel(
+			fn.handle,
+			C.uint(gridX), C.uint(gridY), C.uint(gridZ),
+			C.uint(blockX), C.uint(blockY), C.uint(blockZ),
+			C.uint(sharedBytes),
+			C.CUstream(unsafe.Pointer(stream)),
+			(*unsafe.Pointer)(argsPtr),
+			nil,
+		)
+	}
+	rc := launch()
+	if rc == C.CUDA_ERROR_INVALID_CONTEXT {
+		// Same recovery as module loads: re-bind the primary context on
+		// this (locked) thread and retry once.
+		if err := BindPrimaryContext(); err != nil {
+			return fmt.Errorf("%w (after %v)", err, driverError(rc, "cuLaunchKernel"))
+		}
+		rc = launch()
+	}
 	if rc != C.CUDA_SUCCESS {
 		return driverError(rc, "cuLaunchKernel")
 	}
@@ -165,6 +186,8 @@ func LaunchKernel(
 
 // CtxSynchronize blocks until all work on the current context is complete.
 func CtxSynchronize() error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	if err := ensureContext(); err != nil {
 		return err
 	}
