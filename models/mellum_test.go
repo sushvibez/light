@@ -16,7 +16,9 @@ import (
 // and full layers, YaRN on the full layers with a derived attention factor,
 // a different RoPE base on the sliding layers and a dense MLP layer between
 // sparse ones, so every Mellum-specific path is exercised by an 18-token
-// prompt and an 8-token greedy continuation.
+// prompt and an 8-token greedy continuation. Heads are 4 × 24 = 96 wide on
+// a 64-wide model: like the real 12B (32 × 128 on 2304), the attention
+// width differs from the hidden size.
 const mellumTinyDir = "testdata/mellum/tiny"
 
 var (
@@ -24,8 +26,8 @@ var (
 	mellumTinyRef = []struct {
 		id    int
 		logit float32
-	}{{225, 0.4841}, {10, 0.4689}, {190, 0.4524}, {104, 0.4511}, {159, 0.4444}}
-	mellumTinyGreedy = []int64{225, 351, 504, 254, 254, 377, 255, 28}
+	}{{420, 0.4712}, {187, 0.4264}, {451, 0.3898}, {282, 0.3868}, {262, 0.3738}}
+	mellumTinyGreedy = []int64{420, 462, 93, 511, 15, 53, 367, 183}
 )
 
 func TestMellumTinyMatchesTransformers(t *testing.T) {

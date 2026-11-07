@@ -24,7 +24,7 @@ if sys.argv[1] == "--make-tiny":
     out = sys.argv[2]
     cfg = MellumConfig(
         vocab_size=512, hidden_size=64, intermediate_size=128, moe_intermediate_size=32,
-        num_hidden_layers=4, num_attention_heads=4, num_key_value_heads=2, head_dim=16,
+        num_hidden_layers=4, num_attention_heads=4, num_key_value_heads=2, head_dim=24,
         num_experts=8, num_experts_per_tok=2, norm_topk_prob=True,
         max_position_embeddings=256, sliding_window=6, tie_word_embeddings=False,
         layer_types=["sliding_attention", "full_attention", "sliding_attention", "full_attention"],

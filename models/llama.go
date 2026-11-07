@@ -128,9 +128,6 @@ type llamaBlock struct {
 
 func newLlamaBlock(cfg LlamaConfig, layer int, dev device.Device) (*llamaBlock, error) {
 	D, NH, KH, HD, IM := cfg.HiddenSize, cfg.NumHeads, cfg.NumKVHeads, cfg.HeadDim, cfg.IntermediateSize
-	if NH*HD != D {
-		return nil, fmt.Errorf("llama: NumHeads*HeadDim (%d*%d) != HiddenSize (%d)", NH, HD, D)
-	}
 	if KH <= 0 || NH%KH != 0 {
 		return nil, fmt.Errorf("llama: NumHeads (%d) not divisible by NumKVHeads (%d)", NH, KH)
 	}
@@ -538,7 +535,7 @@ func (m *Llama) ForwardEmbeds(h *tensor.Tensor, cache *KVCache) (*tensor.Tensor,
 
 func (m *Llama) runBlock(blk *llamaBlock, x *tensor.Tensor, B, T, prior int, dev device.Device, cache *KVCache, layerIdx int) (*tensor.Tensor, error) {
 	cfg := m.Cfg
-	D, NH, KH, HD := cfg.HiddenSize, cfg.NumHeads, cfg.NumKVHeads, cfg.HeadDim
+	NH, KH, HD := cfg.NumHeads, cfg.NumKVHeads, cfg.HeadDim
 	g := NH / KH
 
 	h, err := blk.N1.Forward(x)
@@ -708,7 +705,9 @@ attend:
 	if err != nil {
 		return nil, err
 	}
-	ctx, err = autograd.Reshape(ctx, B, T, D)
+	// NumHeads·HeadDim need not equal HiddenSize (Qwen3, Mellum 2.1:
+	// 32 × 128 heads on a 2304-wide model); OProj maps back to HiddenSize.
+	ctx, err = autograd.Reshape(ctx, B, T, NH*HD)
 	if err != nil {
 		return nil, err
 	}
