@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Qwen3.5 reference logits (transformers, eager) for models/qwen3_5_test.go.
 
-    .venv/bin/python scripts/verify/ref_qwen35.py <repo_or_dir> [bf16|f32] [--tiny-ids | --chat]
+    .venv/bin/python scripts/verify/ref_qwen35.py <repo_or_dir> [bf16|f32] [--tiny-ids | --chat] [--cpu]
     .venv/bin/python scripts/verify/ref_qwen35.py --make-tiny <dir>
 
 --make-tiny writes a seeded tiny-random Qwen3_5ForCausalLM (text only):
@@ -44,7 +44,6 @@ if sys.argv[1] == "--make-tiny":
 
 repo = sys.argv[1]
 dt = torch.float32 if (len(sys.argv) > 2 and sys.argv[2] == "f32") else torch.bfloat16
-dev = "cuda" if torch.cuda.is_available() else "cpu"
 chat = "--chat" in sys.argv
 tok = None
 if "--tiny-ids" in sys.argv:
@@ -57,7 +56,19 @@ else:
         ids = tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True, return_dict=False)
     else:
         ids = tok("The capital of France is Paris. The capital of Germany is Berlin. The capital of Italy is").input_ids
-model = AutoModelForCausalLM.from_pretrained(repo, dtype=dt, attn_implementation="eager").to(dev).eval()
+model = AutoModelForCausalLM.from_pretrained(repo, dtype=dt, attn_implementation="eager").eval()
+# Load on the CPU first and move to CUDA only when the weights fit with room
+# for activations (Qwen3.5-27B BF16 is 54 GB: too big for a 40 GB A100, so
+# its reference runs on the CPU; Colab High-RAM has enough). --cpu forces it.
+dev = "cpu"
+if torch.cuda.is_available() and "--cpu" not in sys.argv:
+    need = sum(p.numel() * p.element_size() for p in model.parameters())
+    free, _ = torch.cuda.mem_get_info()
+    if need < free - (2 << 30):
+        dev = "cuda"
+    else:
+        print(f"weights {need / 2**30:.1f} GiB > free GPU {free / 2**30:.1f} GiB - 2: running on the CPU")
+model = model.to(dev)
 print("model class:", type(model).__name__)
 print("prompt ids:", ids)
 x = torch.tensor([ids], device=dev)

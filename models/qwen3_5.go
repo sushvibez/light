@@ -29,11 +29,22 @@ type Qwen35Config struct {
 
 	// Gated DeltaNet: key / value heads and dims, short-conv kernel.
 	LinearKHeads, LinearVHeads, LinearKDim, LinearVDim, ConvKernel int
+	// VHeadsTiled: the value heads are in llama.cpp's tiled order
+	// [G0v0, G1v0, …, G0v1, G1v1, …] (every GGUF qwen35 file) rather than HF's
+	// grouped order [G0v0, G0v1, …, G1v0, …], so value head j reads key head
+	// j mod LinearKHeads instead of j / (LinearVHeads / LinearKHeads). The
+	// weights that touch value heads are all reordered consistently, so only
+	// the q / k head repeat differs.
+	VHeadsTiled bool
 
 	RmsEps      float64
 	MaxPosition int
 	TieEmbed    bool
 	WeightDType dtype.DType // F32 or BF16; activations run at the same dtype
+
+	// lazyWeights: allocate no Linear or embedding weights (the GGUF loader
+	// installs its block-quantized tensors).
+	lazyWeights bool
 }
 
 func (c Qwen35Config) activationDType() dtype.DType {
@@ -110,14 +121,22 @@ func NewQwen35(cfg Qwen35Config, dev device.Device) (*Qwen35, error) {
 	}
 	act := cfg.activationDType()
 	D, NH, KH, HD, IM := cfg.HiddenSize, cfg.NumHeads, cfg.NumKVHeads, cfg.HeadDim, cfg.IntermediateSize
-	emb, err := nn.NewEmbeddingUninit(cfg.VocabSize, D, act, dev)
-	if err != nil {
-		return nil, err
+	var emb *nn.Embedding
+	var err error
+	if !cfg.lazyWeights {
+		if emb, err = nn.NewEmbeddingUninit(cfg.VocabSize, D, act, dev); err != nil {
+			return nil, err
+		}
 	}
 	norm := func(n int, dt dtype.DType) (*nn.RMSNorm, error) {
 		return nn.NewRMSNormWithDType(n, cfg.RmsEps, dt, dev)
 	}
-	lin := func(in, out int) (*nn.Linear, error) { return nn.NewLinearUninit(in, out, false, act, dev) }
+	lin := func(in, out int) (*nn.Linear, error) {
+		if cfg.lazyWeights {
+			return nn.NewLinearPlaceholder(in, out, false, dev)
+		}
+		return nn.NewLinearUninit(in, out, false, act, dev)
+	}
 	f32 := func(dims ...int) (*tensor.Tensor, error) { return tensor.Zeros(dtype.F32, dims, dev) }
 	qOut := NH * HD
 	if cfg.AttnOutputGate {
@@ -186,7 +205,7 @@ func NewQwen35(cfg Qwen35Config, dev device.Device) (*Qwen35, error) {
 		return nil, err
 	}
 	var head *nn.Linear
-	if cfg.TieEmbed {
+	if cfg.TieEmbed && !cfg.lazyWeights {
 		head, err = nn.NewLinearTied(emb.Weight, false, dev)
 	} else {
 		head, err = lin(D, cfg.VocabSize)
@@ -524,11 +543,17 @@ func (m *Qwen35) deltaNet(blk *qwen35Block, h *tensor.Tensor, B, T int, cache *K
 	if err != nil {
 		return nil, err
 	}
-	if r := Hv / Hk; r > 1 { // repeat_interleave over heads: value head j reads key head j / r
-		if q, err = repeatHeadsInterleave(q, r); err != nil {
+	if r := Hv / Hk; r > 1 {
+		// Value head j reads key head j / r (HF, repeat_interleave) or
+		// j mod Hk (llama.cpp's tiled order, see VHeadsTiled).
+		rep := repeatHeadsInterleave
+		if cfg.VHeadsTiled {
+			rep = repeatHeadsTiled
+		}
+		if q, err = rep(q, r); err != nil {
 			return nil, err
 		}
-		if k, err = repeatHeadsInterleave(k, r); err != nil {
+		if k, err = rep(k, r); err != nil {
 			return nil, err
 		}
 	}
@@ -671,6 +696,16 @@ func repeatHeadsInterleave(x *tensor.Tensor, r int) (*tensor.Tensor, error) {
 		return nil, err
 	}
 	return autograd.Reshape(cat, B, T, H*r, d)
+}
+
+// repeatHeadsTiled repeats the head axis of (B, T, H, d) r times as a whole:
+// head j of the result is head j mod H.
+func repeatHeadsTiled(x *tensor.Tensor, r int) (*tensor.Tensor, error) {
+	parts := make([]*tensor.Tensor, r)
+	for i := range parts {
+		parts[i] = x
+	}
+	return ops.Concat(parts, 2)
 }
 
 func narrowContig(x *tensor.Tensor, dim, start, n int) (*tensor.Tensor, error) {

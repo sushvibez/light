@@ -1,6 +1,7 @@
 package nn
 
 import (
+	"fmt"
 	"math"
 	"unsafe"
 
@@ -36,6 +37,15 @@ func NewEmbedding(numEmbeddings, embDim int, dev device.Device) (*Embedding, err
 		}
 	}
 	return &Embedding{Weight: w, numEmb: numEmbeddings, embDim: embDim}, nil
+}
+
+// NewEmbeddingFromWeight wraps an existing (NumEmbeddings, EmbDim) table,
+// e.g. a GGUF block-quantized one, without allocating.
+func NewEmbeddingFromWeight(w *tensor.Tensor) (*Embedding, error) {
+	if w == nil || w.Rank() != 2 {
+		return nil, fmt.Errorf("nn.NewEmbeddingFromWeight: want a rank-2 table, got %v", w)
+	}
+	return &Embedding{Weight: w, numEmb: w.Dim(0), embDim: w.Dim(1)}, nil
 }
 
 // NewEmbeddingUninit allocates a zero-initialised table at `wdt` directly on
