@@ -232,18 +232,20 @@ func TestQwen35SmallMatchesTransformersBF16(t *testing.T) {
 //
 //	python scripts/verify/ref_qwen35.py Qwen/Qwen3.5-9B bf16 --chat
 //
-// TODO(qwen35-9b): fill in qwen359BRef / qwen359BGreedy from that run (and
-// check its prompt ids equal qwen35SmallChatIDs: the sizes share tokenizer
-// and template). Until then the test runs the reference-free checks below
-// and then skips.
+// The 9B's chat template leaves thinking on, so the prompt ends in an open
+// "<think>\n" (the 0.8B's renders an empty think block) and the model
+// starts with "Thinking Process:".
 const qwen359BRepo = "Qwen/Qwen3.5-9B"
 
 var (
-	qwen359BRef []struct {
+	qwen359BChatIDs = []int64{248045, 8678, 198, 2523, 513, 264, 61446, 17313, 13, 248046, 198, 248045, 846, 198, 814, 20139,
+		303, 799, 11316, 3069, 279, 12515, 369, 6105, 13, 248046, 198, 248045, 74455, 198, 248068, 198}
+	qwen359BRef = []struct {
 		id    int
 		logit float32
-	}
-	qwen359BGreedy []int64
+	}{{90700, 28.125}, {31248, 19.5}, {760, 17.875}, {79420, 17.25}, {1596, 15.9375}}
+	// "Thinking Process:\n\n1.  **Analyze the Request:**\n    *"
+	qwen359BGreedy = []int64{90700, 8340, 25, 271, 16, 13, 220, 2972, 2014, 53983, 279, 5952, 64700, 198, 262, 348}
 )
 
 func TestQwen359BMatchesTransformersBF16(t *testing.T) {
@@ -283,14 +285,14 @@ func TestQwen359BMatchesTransformersBF16(t *testing.T) {
 	}
 	t.Logf("text params %.3f B", float64(m.ParamCount())/1e9)
 
-	// Prefill (34 tokens) runs the chunked CUDA kernel; forcing the
+	// Prefill (32 tokens) runs the chunked CUDA kernel; forcing the
 	// recurrent form must give the same logits up to BF16 noise.
 	cache := NewKVCache(m.NumLayers())
-	row := lastLogits(t, m, qwen35SmallChatIDs, cache, dev)
+	row := lastLogits(t, m, qwen359BChatIDs, cache, dev)
 	got := top5(row)
 	t.Logf("top-5 %v logits %.3f %.3f %.3f %.3f %.3f", got, row[got[0]], row[got[1]], row[got[2]], row[got[3]], row[got[4]])
 	m.deltaMode = ops.GatedDeltaRecurrent
-	rec := lastLogits(t, m, qwen35SmallChatIDs, NewKVCache(m.NumLayers()), dev)
+	rec := lastLogits(t, m, qwen359BChatIDs, NewKVCache(m.NumLayers()), dev)
 	m.deltaMode = ops.GatedDeltaAuto
 	var worst float32
 	for _, id := range got {
@@ -314,9 +316,6 @@ func TestQwen359BMatchesTransformersBF16(t *testing.T) {
 	}
 	t.Logf("greedy %v", greedy)
 
-	if qwen359BRef == nil {
-		t.Skip("transformers reference values not recorded yet (see TODO(qwen35-9b))")
-	}
 	for i, w := range qwen359BRef {
 		if i < 2 && got[i] != w.id {
 			t.Errorf("top-%d: got %d (%.3f), want %d (%.3f)", i+1, got[i], first[got[i]], w.id, w.logit)
