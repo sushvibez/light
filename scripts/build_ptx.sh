@@ -8,6 +8,12 @@
 #   scripts/build_ptx.sh           # builds compute_80 baseline
 #
 # Override baseline via LIGHT_PTX_ARCH env var (e.g. compute_90 for Hopper-only).
+#
+# The committed PTX is built with scripts/nvrtc_ptx.py --all (NVRTC 13.0,
+# PTX ISA 9.0, loads on CUDA 13.0+ drivers). This script uses whatever nvcc
+# is installed, so a newer toolkit raises the ISA and with it the minimum
+# driver; use it for local rebuilds (e.g. the Colab notebook does when the
+# driver is older than the committed PTX needs).
 
 set -euo pipefail
 
