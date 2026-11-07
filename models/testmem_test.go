@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"light/device"
 )
 
 // hostMemAvailableGB reads MemAvailable from /proc/meminfo (0 when unknown).
@@ -50,4 +52,17 @@ func releaseModelMemory(t *testing.T) {
 		runtime.GC()
 		debug.FreeOSMemory()
 	})
+}
+
+// requireGPUMemGB skips the test when GPU ordinal has less than gb free
+// (e.g. a 24 GB BF16 checkpoint on a 22 GiB L4).
+func requireGPUMemGB(t *testing.T, ordinal int, gb float64) {
+	t.Helper()
+	free, _, err := device.CUDAMemInfo(ordinal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if avail := float64(free) / (1 << 30); avail < gb {
+		t.Skipf("need %.0f GB free on CUDA(%d), %.1f GB free", gb, ordinal, avail)
+	}
 }

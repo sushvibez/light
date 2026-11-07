@@ -47,3 +47,16 @@ func CUDAComputeCapability(ordinal int) (major, minor int, err error) {
 	}
 	return p.ComputeMajor, p.ComputeMinor, nil
 }
+
+// CUDAMemInfo returns the free and total memory, in bytes, of the GPU at
+// ordinal. It makes that GPU the calling thread's current device.
+func CUDAMemInfo(ordinal int) (free, total uint64, err error) {
+	if err := cudart.SetDevice(ordinal); err != nil {
+		return 0, 0, fmt.Errorf("device: %w", err)
+	}
+	f, t, err := cudart.MemInfo()
+	if err != nil {
+		return 0, 0, fmt.Errorf("device: %w", err)
+	}
+	return uint64(f), uint64(t), nil
+}

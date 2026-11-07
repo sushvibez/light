@@ -1,6 +1,8 @@
 package models
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -145,5 +147,92 @@ func TestYarnInvFreqMatchesTransformers(t *testing.T) {
 	s.AttnFactor = 1.2772588722239782
 	if af := s.AttentionFactor(); af != 1.2772588722239782 {
 		t.Errorf("explicit attention factor %.12f ignored", af)
+	}
+}
+
+// Mellum 2.1 12B-A2.5B (Thinking), BF16 on CUDA, against transformers 5.21
+// BF16 eager on an A100: `ref_mellum.py JetBrains/Mellum2.1-12B-A2.5B-Thinking
+// bf16 --chat` (system "You are a concise assistant.", user "Explain in one
+// sentence why the sky is blue.", generation prompt). The model opens with
+// <think> by a margin of 28 logits, so the top-1 check is easy; the other
+// four logits (near -20, BF16 step 0.125) and the 16-token greedy
+// continuation are what pin the sliding / YaRN / MoE paths down. 24.3 GB
+// of weights: needs an A100-class GPU (an L4's 22 GiB is too small).
+const mellum12BRepo = "JetBrains/Mellum2.1-12B-A2.5B-Thinking"
+
+var (
+	mellum12BChatIDs = []int64{27, 5217, 233, 2591, 445, 255, 99, 22810, 16833, 48, 28, 233, 27, 1397, 233,
+		41770, 325, 768, 7505, 3306, 302, 11734, 359, 5786, 48, 28, 233, 27, 8091, 233}
+	mellum12BRef = []struct {
+		id    int
+		logit float32
+	}{{23, 8.4375}, {629, -19.75}, {15114, -20.25}, {91657, -21.125}, {28, -21.5}}
+	// "<think>\nWe need to respond with one sentence explaining why sky is blue. Concise"
+	mellum12BGreedy = []int64{23, 233, 2116, 895, 333, 6246, 434, 768, 7505, 18469, 3306, 11734, 359, 5786, 48, 94113}
+)
+
+func TestMellum12BMatchesTransformersBF16(t *testing.T) {
+	if os.Getenv("LIGHT_HEAVY_TESTS") == "" {
+		t.Skip("set LIGHT_HEAVY_TESTS=1 (24.3 GB BF16 checkpoint)")
+	}
+	home, _ := os.UserHomeDir()
+	if m, _ := filepath.Glob(filepath.Join(home, ".cache/huggingface/hub/models--JetBrains--Mellum2.1-12B-A2.5B-Thinking/snapshots/*/model*.safetensors")); len(m) == 0 {
+		t.Skip(mellum12BRepo + " not in HF cache")
+	}
+	if !device.CUDAAvailable() {
+		t.Skip("no CUDA")
+	}
+	requireHostMemGB(t, 30)
+	requireGPUMemGB(t, 0, 27)
+	releaseModelMemory(t)
+	dev, err := device.CUDA(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Setenv("HF_HUB_OFFLINE", "1")
+	m, err := LoadCausalLMFromHF(mellum12BRepo, dev, dtype.BF16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := m.Cfg
+	sliding := 0
+	for _, s := range c.SlidingLayers {
+		if s {
+			sliding++
+		}
+	}
+	if !c.QKNorm || c.NumExperts == 0 || c.NumExpertsPerTok == 0 || c.SlidingWindow == 0 || sliding == 0 ||
+		sliding == len(c.SlidingLayers) || c.RopeScaling == nil || c.RopeScaling.Type != "yarn" {
+		t.Fatalf("config %+v (rope scaling %+v)", c, c.RopeScaling)
+	}
+	t.Logf("params %.2f B, %d layers (%d sliding, window %d), %d experts top-%d, dense MLP layers %v",
+		float64(m.ParamCount())/1e9, len(c.SlidingLayers), sliding, c.SlidingWindow, c.NumExperts, c.NumExpertsPerTok, c.MLPOnlyLayers)
+
+	cache := NewKVCache(m.NumLayers())
+	row := lastLogits(t, m, mellum12BChatIDs, cache, dev)
+	got := top5(row)
+	if got[0] != mellum12BRef[0].id {
+		t.Errorf("top-1: got %d (%.3f), want %d", got[0], row[got[0]], mellum12BRef[0].id)
+	}
+	for _, w := range mellum12BRef {
+		if d := row[w.id] - w.logit; d > 0.5 || d < -0.5 {
+			t.Errorf("logit[%d] = %.3f, want %.3f (BF16 tol 0.5)", w.id, row[w.id], w.logit)
+		}
+	}
+	t.Logf("top-5 %v logits %.3f %.3f %.3f %.3f %.3f", got, row[got[0]], row[got[1]], row[got[2]], row[got[3]], row[got[4]])
+
+	var greedy []int64
+	for len(greedy) < len(mellum12BGreedy) {
+		next := int64(top5(row)[0])
+		greedy = append(greedy, next)
+		row = lastLogits(t, m, []int64{next}, cache, dev)
+	}
+	agree := 0
+	for agree < len(greedy) && greedy[agree] == mellum12BGreedy[agree] {
+		agree++
+	}
+	t.Logf("greedy %v (first %d of %d agree with transformers BF16)", greedy, agree, len(greedy))
+	if agree < 8 {
+		t.Errorf("greedy %v diverges from transformers BF16 %v after %d tokens", greedy, mellum12BGreedy, agree)
 	}
 }

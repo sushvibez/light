@@ -15,3 +15,9 @@ func CUDAComputeCapability(ordinal int) (major, minor int, err error) {
 	_ = ordinal
 	return 0, 0, ErrCUDANotBuilt
 }
+
+// CUDAMemInfo returns ErrCUDANotBuilt on builds without CUDA.
+func CUDAMemInfo(ordinal int) (free, total uint64, err error) {
+	_ = ordinal
+	return 0, 0, ErrCUDANotBuilt
+}
