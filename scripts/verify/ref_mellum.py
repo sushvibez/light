@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mellum 2.1 reference logits (transformers, eager) for models/mellum_test.go.
 
-    .venv/bin/python scripts/verify/ref_mellum.py <repo_or_dir> [bf16|f32] [--ids 1,2,3 | --chat]
+    .venv/bin/python scripts/verify/ref_mellum.py <repo_or_dir> [bf16|f32] [--ids 1,2,3 | --chat] [--cpu]
     .venv/bin/python scripts/verify/ref_mellum.py --make-tiny <dir>
 
 --chat renders the validation-bar prompt (system + user, the same messages
@@ -43,13 +43,24 @@ if sys.argv[1] == "--make-tiny":
 
 repo = sys.argv[1]
 dt = torch.float32 if (len(sys.argv) > 2 and sys.argv[2] == "f32") else torch.bfloat16
-dev = "cuda" if torch.cuda.is_available() else "cpu"
 ids = None
 chat = "--chat" in sys.argv
 if "--ids" in sys.argv:
     ids = [int(x) for x in sys.argv[sys.argv.index("--ids") + 1].split(",")]
 tok = None if ids is not None else AutoTokenizer.from_pretrained(repo)
-model = AutoModelForCausalLM.from_pretrained(repo, dtype=dt, attn_implementation="eager").to(dev).eval()
+model = AutoModelForCausalLM.from_pretrained(repo, dtype=dt, attn_implementation="eager").eval()
+# Load on the CPU first and move to CUDA only when the weights fit with
+# room for activations (the 12B BF16 checkpoint is 24.3 GB: too big for an
+# L4's 22 GiB). --cpu forces the CPU.
+dev = "cpu"
+if torch.cuda.is_available() and "--cpu" not in sys.argv:
+    need = sum(p.numel() * p.element_size() for p in model.parameters())
+    free, _ = torch.cuda.mem_get_info()
+    if need < free - (2 << 30):
+        dev = "cuda"
+    else:
+        print(f"weights {need / 2**30:.1f} GiB > free GPU {free / 2**30:.1f} GiB - 2: running on the CPU")
+model = model.to(dev)
 if chat:
     msgs = [{"role": "system", "content": "You are a concise assistant."},
             {"role": "user", "content": "Explain in one sentence why the sky is blue."}]
