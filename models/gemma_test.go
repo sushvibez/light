@@ -86,36 +86,16 @@ func TestGemma3CacheConsistency(t *testing.T) {
 			t.Errorf("logit %d: full %.3f chunked %.3f", id, full[id], step[id])
 		}
 	}
-	// Force the window to bite: tiny window, chunked must equal single-shot.
-	m.Cfg.SlidingWindow = 5
-	full = lastLogits(t, m, gemmaChatIDs, NewKVCache(m.NumLayers()), dev)
-	cache = NewKVCache(m.NumLayers())
-	lastLogits(t, m, gemmaChatIDs[:4], cache, dev)
-	lastLogits(t, m, gemmaChatIDs[4:9], cache, dev)
-	for i := 9; i < len(gemmaChatIDs); i++ {
-		step = lastLogits(t, m, gemmaChatIDs[i:i+1], cache, dev)
-	}
-	for l, k := range cache.K {
-		if m.Cfg.isSliding(l) && k.Dim(2) > 5 {
-			t.Fatalf("layer %d holds %d keys, window 5", l, k.Dim(2))
-		}
-		if !m.Cfg.isSliding(l) && k.Dim(2) != len(gemmaChatIDs) {
-			t.Fatalf("global layer %d holds %d keys, want %d", l, k.Dim(2), len(gemmaChatIDs))
-		}
-	}
-	for _, id := range top5(full) {
-		if d := math.Abs(float64(full[id] - step[id])); d > 0.5 {
-			t.Errorf("window 5 logit %d: full %.3f chunked %.3f", id, full[id], step[id])
-		}
-	}
+	// The forced small-window check lives in TestGemma3CacheConsistencyF32Window.
 }
 
-// TestGemma3CacheConsistencyF32Window repeats TestGemma3CacheConsistency's
-// forced window-5 check with F32 weights and activations. The window-5
-// configuration is far from what the model was trained on, so in BF16 the
-// chunked and single-shot paths may drift apart through rounding alone
-// (seen on an A100: ~0.9 logit). In F32 that rounding is gone: a gap here
-// means a real cache / mask bug rather than precision.
+// TestGemma3CacheConsistencyF32Window forces the sliding window to bite
+// (window 5 on a 16-token prompt) and checks that chunked decode through
+// the rotating cache equals the single-shot forward. It runs in F32: window
+// 5 is far from what the model was trained on, and in BF16 the two paths
+// drift apart through rounding alone (A100: ~0.9 logit, while the F32 gap
+// is 1.6e-4), so a BF16 version could not tell a cache / mask bug from
+// precision. Here a gap means a real bug.
 func TestGemma3CacheConsistencyF32Window(t *testing.T) {
 	dev := gemmaCUDA(t)
 	m, err := LoadGemma3FromHF(gemmaRepo, dev, dtype.F32)
@@ -130,6 +110,14 @@ func TestGemma3CacheConsistencyF32Window(t *testing.T) {
 	var step []float32
 	for i := 9; i < len(gemmaChatIDs); i++ {
 		step = lastLogits(t, m, gemmaChatIDs[i:i+1], cache, dev)
+	}
+	for l, k := range cache.K {
+		if m.Cfg.isSliding(l) && k.Dim(2) > 5 {
+			t.Fatalf("layer %d holds %d keys, window 5", l, k.Dim(2))
+		}
+		if !m.Cfg.isSliding(l) && k.Dim(2) != len(gemmaChatIDs) {
+			t.Fatalf("global layer %d holds %d keys, want %d", l, k.Dim(2), len(gemmaChatIDs))
+		}
 	}
 	d := maxAbsDiff(full, step)
 	top := top5(full)
