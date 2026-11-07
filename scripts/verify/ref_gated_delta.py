@@ -70,6 +70,9 @@ delta_case("chunked_t37_c16", 2, B=1, T=37, H=2, dk=8, dv=4, with_state=False, c
 delta_case("chunked_t150_state", 3, B=2, T=150, H=2, dk=16, dv=8, with_state=True, chunked=True)
 # Real head dims (128 x 128), one chunk.
 delta_case("chunked_t20_d128", 4, B=1, T=20, H=1, dk=128, dv=128, with_state=False, chunked=True)
+# Real head dims over many chunks from a state: what the CUDA chunked kernel
+# (16-token blocks, 128 x 128 heads only) runs on.
+delta_case("chunked_t150_d128_state", 7, B=2, T=150, H=2, dk=128, dv=128, with_state=True, chunked=True)
 
 conv_case("k4", 5, B=2, C=6, T=11, K=4)
 conv_case("k4_t2", 6, B=1, C=3, T=2, K=4)

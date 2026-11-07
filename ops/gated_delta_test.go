@@ -59,7 +59,7 @@ func gdNarrow(t *testing.T, x *tensor.Tensor, dim, start, n int) *tensor.Tensor 
 func TestGatedDeltaRuleMatchesTransformers(t *testing.T) {
 	for _, name := range []string{
 		"delta_recurrent_t1_state.npz", "delta_recurrent_t37.npz", "delta_chunked_t37_c16.npz",
-		"delta_chunked_t150_state.npz", "delta_chunked_t20_d128.npz",
+		"delta_chunked_t150_state.npz", "delta_chunked_t20_d128.npz", "delta_chunked_t150_d128_state.npz",
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := gdLoadNpz(t, name)
@@ -222,7 +222,7 @@ func TestGatedDeltaRuleCUDAMatchesTransformers(t *testing.T) {
 	}
 	for _, name := range []string{
 		"delta_recurrent_t1_state.npz", "delta_recurrent_t37.npz", "delta_chunked_t37_c16.npz",
-		"delta_chunked_t150_state.npz", "delta_chunked_t20_d128.npz",
+		"delta_chunked_t150_state.npz", "delta_chunked_t20_d128.npz", "delta_chunked_t150_d128_state.npz",
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := gdLoadNpz(t, name)
@@ -299,5 +299,41 @@ func TestGatedDeltaRuleCUDAMatchesTransformers(t *testing.T) {
 	}
 	if d := gdMaxDiff(t, toCPU(got), want); d > 1e-5 {
 		t.Errorf("CUDA softplus: %.2e", d)
+	}
+}
+
+// On CUDA, 128 × 128 chunked calls run the dedicated chunked kernel; it must
+// agree with the token-by-token kernel on the same inputs.
+func TestGatedDeltaRuleCUDAChunkedEqualsRecurrent(t *testing.T) {
+	if !device.CUDAAvailable() {
+		t.Skip("no CUDA")
+	}
+	gpu, err := device.CUDA(0)
+	if err != nil {
+		t.Skip(err)
+	}
+	f := gdLoadNpz(t, "delta_chunked_t150_d128_state.npz")
+	in := map[string]*tensor.Tensor{}
+	for _, n := range []string{"q", "k", "v", "g", "beta", "state"} {
+		if in[n], err = f[n].To(gpu); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run := func(mode ops.GatedDeltaMode) (*tensor.Tensor, *tensor.Tensor) {
+		out, fin, err := ops.GatedDeltaRule(in["q"], in["k"], in["v"], in["g"], in["beta"], in["state"], ops.GatedDeltaOptions{Mode: mode, QKL2Norm: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		oc, _ := out.To(device.CPU())
+		fc, _ := fin.To(device.CPU())
+		return oc, fc
+	}
+	co, cf := run(ops.GatedDeltaChunked)
+	ro, rf := run(ops.GatedDeltaRecurrent)
+	if d := gdMaxDiff(t, co, ro); d > 2e-5 {
+		t.Errorf("CUDA chunked vs recurrent output: %.2e", d)
+	}
+	if d := gdMaxDiff(t, cf, rf); d > 2e-5 {
+		t.Errorf("CUDA chunked vs recurrent state: %.2e", d)
 	}
 }

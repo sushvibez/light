@@ -21,10 +21,15 @@ func init() {
 // gdMaxDK is GD_MAX_DK in gated_delta.cu (per-thread state column length).
 const gdMaxDK = 256
 
-// gatedDeltaLauncher runs ops.GatedDeltaRule on CUDA with the token-by-token
-// kernel for both modes: the chunked form computes the same function (the
-// CPU tests pin recurrent == chunked to 1e-5), it only does fewer FLOPs on
-// long prompts. A chunked CUDA kernel is a later optimisation.
+// gdChunkD is GDC_D in gated_delta.cu: the chunked kernel's head dim.
+const gdChunkD = 128
+
+// gatedDeltaLauncher runs ops.GatedDeltaRule on CUDA. Chunked calls over
+// several tokens with 128 × 128 heads (every Qwen3.5 size) use
+// gated_delta_chunked_f32, which keeps the state in registers and walks the
+// prompt 16 tokens at a time; everything else, decode included, uses the
+// token-by-token gated_delta_recurrent_f32. Both compute the same function
+// (the tests pin recurrent == chunked to 1e-5).
 //
 //	Inputs: q, k (B,T,H,dk), v (B,T,H,dv), g, beta (B,T,H), state (B,H,dk,dv),
 //	        final (B,H,dk,dv) written
@@ -33,6 +38,9 @@ func gatedDeltaLauncher(ctx *registry.Context) error {
 	q, k, v, g, beta, st, fin := ctx.Inputs[0], ctx.Inputs[1], ctx.Inputs[2], ctx.Inputs[3], ctx.Inputs[4], ctx.Inputs[5], ctx.Inputs[6]
 	out := ctx.Output
 	B, T, H, dk, dv := q.Dim(0), q.Dim(1), q.Dim(2), q.Dim(3), v.Dim(3)
+	if ctx.Attrs["chunked"].(bool) && T > 1 && dk == gdChunkD && dv == gdChunkD {
+		return gatedDeltaChunked(ctx, B, T, H)
+	}
 	if dk > gdMaxDK {
 		return fmt.Errorf("cuda gated_delta_rule: key head dim %d > %d", dk, gdMaxDK)
 	}
@@ -66,6 +74,34 @@ func gatedDeltaLauncher(ctx *registry.Context) error {
 	}
 	shared := uint32(2 * dk * 4)
 	return cudart.LaunchKernel(fn, uint32(B*H), 1, 1, block, 1, 1, shared, 0, args)
+}
+
+// gatedDeltaChunked launches gated_delta_chunked_f32: one 256-thread block
+// per (batch, head), static shared memory only.
+func gatedDeltaChunked(ctx *registry.Context, B, T, H int) error {
+	q, k, v, g, beta, st, fin := ctx.Inputs[0], ctx.Inputs[1], ctx.Inputs[2], ctx.Inputs[3], ctx.Inputs[4], ctx.Inputs[5], ctx.Inputs[6]
+	out := ctx.Output
+	if err := cudart.SetDevice(out.Device().Ordinal()); err != nil {
+		return err
+	}
+	fn, err := GetKernel("gated_delta_chunked_f32")
+	if err != nil {
+		return err
+	}
+	l2 := int32(0)
+	if ctx.Attrs["l2norm"].(bool) {
+		l2 = 1
+	}
+	qP, kP, vP := q.Storage().CUDAPtr(), k.Storage().CUDAPtr(), v.Storage().CUDAPtr()
+	gP, bP := g.Storage().CUDAPtr(), beta.Storage().CUDAPtr()
+	sP, fP, oP := st.Storage().CUDAPtr(), fin.Storage().CUDAPtr(), out.Storage().CUDAPtr()
+	b32, t32, h32 := int32(B), int32(T), int32(H)
+	args := []unsafe.Pointer{
+		unsafe.Pointer(&qP), unsafe.Pointer(&kP), unsafe.Pointer(&vP), unsafe.Pointer(&gP), unsafe.Pointer(&bP),
+		unsafe.Pointer(&sP), unsafe.Pointer(&fP), unsafe.Pointer(&oP),
+		unsafe.Pointer(&b32), unsafe.Pointer(&t32), unsafe.Pointer(&h32), unsafe.Pointer(&l2),
+	}
+	return cudart.LaunchKernel(fn, uint32(B*H), 1, 1, 256, 1, 1, 0, 0, args)
 }
 
 // causalConv1dDepthwiseLauncher: see ops.CausalConv1dDepthwise.
