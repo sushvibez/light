@@ -269,7 +269,7 @@ type Llama struct {
 type ropeTables struct {
 	invFreq     *tensor.Tensor // (rotDim/2,) F32 scaled RoPE table
 	invFreqLong *tensor.Tensor // LongRoPE long-factor table (seqLen > OriginalMaxPositions)
-	attn        *tensor.Tensor // (1,) attention factor (LongRoPE / YaRN) in the activation dtype
+	attn        *tensor.Tensor // (1,) F32 attention factor (LongRoPE / YaRN)
 }
 
 // resetRoPETables drops the cached RoPE tables, e.g. after changing
@@ -825,19 +825,29 @@ func (m *Llama) applyRoPEDim(x, pos *tensor.Tensor, seqLen, rotDim int, base flo
 	if af == 1 {
 		return out, nil
 	}
-	if tb.attn == nil || tb.attn.DType() != x.DType() {
+	// The factor multiplies in F32. transformers folds it into cos / sin in
+	// F32 before casting them; a BF16 scalar would round it (Mellum 2.1:
+	// 1.27726 → 1.2734, 0.3 % low on q and on k, so every full-layer score
+	// came out 0.6 % small).
+	if tb.attn == nil {
 		t, err := tensor.New([]float32{float32(af)}, []int{1}, dev)
 		if err != nil {
 			return nil, err
 		}
-		if x.DType() != dtype.F32 {
-			if t, err = ops.Cast(t, x.DType()); err != nil {
-				return nil, err
-			}
-		}
 		tb.attn = t
 	}
-	return ops.Mul(out, tb.attn)
+	if out.DType() == dtype.F32 {
+		return ops.Mul(out, tb.attn)
+	}
+	dt := out.DType()
+	o32, err := ops.Cast(out, dtype.F32)
+	if err != nil {
+		return nil, err
+	}
+	if o32, err = ops.Mul(o32, tb.attn); err != nil {
+		return nil, err
+	}
+	return ops.Cast(o32, dt)
 }
 
 // headsForward reshapes (B, T, H*HD) to (B, H, T, HD) and contiguifies.
