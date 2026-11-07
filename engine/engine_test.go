@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -632,5 +633,38 @@ func TestOpenAISpeechToSpeech(t *testing.T) {
 	}
 	if s := rt.Speech(); s == nil || s.Spec.Family != "moshi" {
 		t.Fatal("speech slot not filled")
+	}
+}
+
+// Qwen3.5-0.8B through the engine on CPU (F32): the model's own Jinja
+// chat_template (thinking off: an empty <think></think> block), prompt ids
+// and the greedy reply identical to transformers 5.21
+// (apply_chat_template + generate, F32, 24 new tokens).
+func TestGenerateQwen35SmallCPU(t *testing.T) {
+	os.Setenv("HF_HUB_OFFLINE", "1")
+	home, _ := os.UserHomeDir()
+	if m, _ := filepath.Glob(filepath.Join(home, ".cache/huggingface/hub/models--Qwen--Qwen3.5-0.8B/snapshots/*/config.json")); len(m) == 0 {
+		t.Skip("Qwen/Qwen3.5-0.8B not in HF cache")
+	}
+	m, err := Load(Spec{ID: "Qwen/Qwen3.5-0.8B", Repo: "Qwen/Qwen3.5-0.8B", DType: "f32", Device: "cpu"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Template.Source != "jinja" {
+		t.Fatalf("template source %q, want the model's own jinja template", m.Template.Source)
+	}
+	msgs := []Message{{Role: "user", Content: "What is 2+2?"}}
+	wantIDs := []int32{248045, 846, 198, 3710, 369, 220, 17, 10, 17, 30, 248046, 198, 248045, 74455, 198, 248068, 271, 248069, 271}
+	if got := m.Tok.Encode(m.Prompt(msgs)); !slices.Equal(got, wantIDs) {
+		t.Fatalf("prompt ids %v\nwant       %v (transformers apply_chat_template)", got, wantIDs)
+	}
+	text, st, err := m.Generate(t.Context(), msgs, GenOpts{Temperature: 0, MaxTokens: 24}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("%q stop=%s %.1f tok/s prefill %.0f ms", text, st.Stop, st.TokPerSec, st.PrefillMS)
+	const want = "The answer to \"What is 2+2?\" is **4**.\n\nThis is a fundamental concept in mathematics known"
+	if text != want || st.Stop != "length" {
+		t.Fatalf("reply %q stop %s\nwant  %q stop length", text, st.Stop, want)
 	}
 }
