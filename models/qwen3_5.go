@@ -87,6 +87,11 @@ type Qwen35 struct {
 	attnScale *tensor.Tensor
 	masks     map[[2]int]*tensor.Tensor
 	masksDev  device.Device
+
+	// deltaMode picks the delta-rule form; the zero value (Auto) is chunked
+	// for prefill and recurrent for decode. Tests force one form to check
+	// the two agree on a real checkpoint.
+	deltaMode ops.GatedDeltaMode
 }
 
 // NewQwen35 allocates an uninitialised model; LoadQwen35FromHF fills it.
@@ -555,7 +560,7 @@ func (m *Qwen35) deltaNet(blk *qwen35Block, h *tensor.Tensor, B, T int, cache *K
 	if err != nil {
 		return nil, err
 	}
-	out, recState, err := ops.GatedDeltaRule(q, k, v, g, beta, recState, ops.GatedDeltaOptions{QKL2Norm: true})
+	out, recState, err := ops.GatedDeltaRule(q, k, v, g, beta, recState, ops.GatedDeltaOptions{Mode: m.deltaMode, QKL2Norm: true})
 	if err != nil {
 		return nil, err
 	}

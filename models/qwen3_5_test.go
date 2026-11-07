@@ -8,6 +8,7 @@ import (
 
 	"light/device"
 	"light/dtype"
+	"light/ops"
 )
 
 // Tiny-random Qwen3.5 text model written by
@@ -218,5 +219,118 @@ func TestQwen35SmallMatchesTransformersBF16(t *testing.T) {
 				t.Errorf("greedy %v diverges from transformers BF16 %v after %d tokens", greedy, qwen35SmallGreedyBF16, agree)
 			}
 		})
+	}
+}
+
+// Qwen3.5-9B, BF16 on CUDA. Against the 0.8B it adds more value than key
+// heads in the DeltaNet layers (32 over 16, so the head repeat runs on a
+// real checkpoint), full-attention head dim 256 and a sharded checkpoint
+// whose index also lists vision and MTP weights (skipped). 32 layers, every
+// fourth full attention; 18 GB of text weights.
+//
+// Reference: transformers 5.21 BF16 eager on an A100,
+//
+//	python scripts/verify/ref_qwen35.py Qwen/Qwen3.5-9B bf16 --chat
+//
+// TODO(qwen35-9b): fill in qwen359BRef / qwen359BGreedy from that run (and
+// check its prompt ids equal qwen35SmallChatIDs: the sizes share tokenizer
+// and template). Until then the test runs the reference-free checks below
+// and then skips.
+const qwen359BRepo = "Qwen/Qwen3.5-9B"
+
+var (
+	qwen359BRef []struct {
+		id    int
+		logit float32
+	}
+	qwen359BGreedy []int64
+)
+
+func TestQwen359BMatchesTransformersBF16(t *testing.T) {
+	if os.Getenv("LIGHT_HEAVY_TESTS") == "" {
+		t.Skip("set LIGHT_HEAVY_TESTS=1 (19 GB BF16 checkpoint)")
+	}
+	home, _ := os.UserHomeDir()
+	if m, _ := filepath.Glob(filepath.Join(home, ".cache/huggingface/hub/models--Qwen--Qwen3.5-9B/snapshots/*/model*.safetensors")); len(m) == 0 {
+		t.Skip(qwen359BRepo + " not in HF cache")
+	}
+	if !device.CUDAAvailable() {
+		t.Skip("no CUDA")
+	}
+	requireHostMemGB(t, 24)
+	requireGPUMemGB(t, 0, 20)
+	releaseModelMemory(t)
+	dev, err := device.CUDA(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Setenv("HF_HUB_OFFLINE", "1")
+	m, err := LoadQwen35FromHF(qwen359BRepo, dev, dtype.BF16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := m.Cfg
+	linear := 0
+	for _, l := range c.LinearLayers {
+		if l {
+			linear++
+		}
+	}
+	if c.NumLayers != 32 || linear != 24 || c.LinearLayers[3] || !c.LinearLayers[4] || c.LinearKHeads != 16 ||
+		c.LinearVHeads != 32 || c.LinearKDim != 128 || c.LinearVDim != 128 || c.HeadDim != 256 || c.rotaryDim() != 64 ||
+		c.NumHeads != 16 || c.NumKVHeads != 4 || !c.AttnOutputGate || c.TieEmbed {
+		t.Fatalf("config %+v", c)
+	}
+	t.Logf("text params %.3f B", float64(m.ParamCount())/1e9)
+
+	// Prefill (34 tokens) runs the chunked CUDA kernel; forcing the
+	// recurrent form must give the same logits up to BF16 noise.
+	cache := NewKVCache(m.NumLayers())
+	row := lastLogits(t, m, qwen35SmallChatIDs, cache, dev)
+	got := top5(row)
+	t.Logf("top-5 %v logits %.3f %.3f %.3f %.3f %.3f", got, row[got[0]], row[got[1]], row[got[2]], row[got[3]], row[got[4]])
+	m.deltaMode = ops.GatedDeltaRecurrent
+	rec := lastLogits(t, m, qwen35SmallChatIDs, NewKVCache(m.NumLayers()), dev)
+	m.deltaMode = ops.GatedDeltaAuto
+	var worst float32
+	for _, id := range got {
+		if d := row[id] - rec[id]; d > worst {
+			worst = d
+		} else if -d > worst {
+			worst = -d
+		}
+	}
+	t.Logf("chunked vs recurrent prefill: max |Δ| over the top 5 = %.3f, full-row max %.3f", worst, maxAbsDiff(row, rec))
+	if top5(rec)[0] != got[0] || worst > 0.5 {
+		t.Errorf("recurrent prefill top-1 %d (chunked %d), top-5 logits differ by up to %.3f", top5(rec)[0], got[0], worst)
+	}
+
+	first := slices.Clone(row)
+	var greedy []int64
+	for len(greedy) < 16 {
+		next := int64(top5(row)[0])
+		greedy = append(greedy, next)
+		row = lastLogits(t, m, []int64{next}, cache, dev)
+	}
+	t.Logf("greedy %v", greedy)
+
+	if qwen359BRef == nil {
+		t.Skip("transformers reference values not recorded yet (see TODO(qwen35-9b))")
+	}
+	for i, w := range qwen359BRef {
+		if i < 2 && got[i] != w.id {
+			t.Errorf("top-%d: got %d (%.3f), want %d (%.3f)", i+1, got[i], first[got[i]], w.id, w.logit)
+		}
+		if d := first[w.id] - w.logit; d > 0.5 || d < -0.5 {
+			t.Errorf("logit[%d] = %.3f, want %.3f (BF16 tol 0.5)", w.id, first[w.id], w.logit)
+		}
+	}
+	agree := 0
+	for agree < len(greedy) && agree < len(qwen359BGreedy) && greedy[agree] == qwen359BGreedy[agree] {
+		agree++
+	}
+	t.Logf("greedy: first %d of %d agree with transformers BF16", agree, len(qwen359BGreedy))
+	if agree < 8 {
+		t.Errorf("greedy %v diverges from transformers BF16 %v after %d tokens", greedy, qwen359BGreedy, agree)
 	}
 }
