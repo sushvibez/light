@@ -389,7 +389,10 @@ func TestMatMulBatchedViewsParity(t *testing.T) {
 			qNc, _ := qN.Contiguous()
 			want, _ := ops.MatMul(qNc, kTc)
 			got := f32s(t, view)
-			expectRow(t, fmt.Sprintf("%v %v view vs contiguous", dev, dt), got, f32s(t, want), 0)
+			// The view (kᵀ: dot products) and the contiguous copy (row-major:
+			// axpy rows) take different CPU fast paths that sum in different
+			// orders, so allow last-bit differences.
+			expectRow(t, fmt.Sprintf("%v %v view vs contiguous", dev, dt), got, f32s(t, want), 1e-5)
 			if ref == nil {
 				ref = got
 			} else {

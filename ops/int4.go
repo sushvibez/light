@@ -82,7 +82,9 @@ func MatMulInt4(x *tensor.Tensor, w quant.Int4) (*tensor.Tensor, error) {
 			return nil, err
 		}
 	}
-	if M <= int4GEMVMaxM && w.K()%32 == 0 && w.Group%32 == 0 {
+	// The fused kernel: decode GEMV for M ≤ 8 on GPUs; on the CPU it is the
+	// row-decode + SIMD dot kernel for any M.
+	if (M <= int4GEMVMaxM || device.IsCPU(x.Device())) && w.K()%32 == 0 && w.Group%32 == 0 {
 		if k, err := registry.Lookup(registry.Key{Op: "int4_gemv", Dev: x.Device().Kind(), DType: x.DType()}); err == nil {
 			out, err := tensor.Zeros(x.DType(), []int{M, N}, x.Device())
 			if err != nil {

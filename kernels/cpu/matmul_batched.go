@@ -1,8 +1,11 @@
 package cpu
 
 import (
+	"sync"
+
 	"light/device"
 	"light/dtype"
+	"light/internal/parallel"
 	"light/internal/registry"
 )
 
@@ -35,6 +38,25 @@ func batchedMatmulKernel[T dtype.Numeric](ctx *registry.Context) error {
 	aStr, bStr := a.Strides().Slice(), b.Strides().Slice()
 	outStride := M * N
 
+	if af, ok := any(aS).([]float32); ok {
+		bf, of := any(bS).([]float32), any(outS).([]float32)
+		as2, bs2 := []int{aStr[1], aStr[2]}, []int{bStr[1], bStr[2]}
+		fast := true
+		var mu sync.Mutex
+		parallel.For(B, 1, func(lo, hi int) {
+			for batch := lo; batch < hi; batch++ {
+				if !matmulF32Fast(af, batch*aStr[0]+a.Offset(), as2, bf, batch*bStr[0]+b.Offset(), bs2, of[batch*outStride:], M, K, N) {
+					mu.Lock()
+					fast = false
+					mu.Unlock()
+					return
+				}
+			}
+		})
+		if fast {
+			return nil
+		}
+	}
 	for batch := range B {
 		aBase := batch*aStr[0] + a.Offset()
 		bBase := batch*bStr[0] + b.Offset()

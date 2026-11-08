@@ -164,6 +164,16 @@ func gpuName(kind string) string {
 	return ""
 }
 
+// settleMemory collects garbage until device and host buffers freed through
+// runtime cleanups are really gone (a cleanup runs after the GC that found
+// its tensor unreachable, so its storage goes at the next one), then
+// returns the freed pages to the OS: the working set is then live memory.
+func settleMemory() {
+	runtime.GC()
+	time.Sleep(50 * time.Millisecond) // let queued cleanups run
+	debug.FreeOSMemory()
+}
+
 // loadMeasured loads spec on rt and records load time, host RAM growth and
 // GPU memory growth in the table.
 func loadMeasured(rt *engine.Runtime, spec engine.Spec) (*engine.Model, error) {
@@ -175,13 +185,13 @@ func loadMeasured(rt *engine.Runtime, spec engine.Spec) (*engine.Model, error) {
 			kind = "cuda"
 		}
 	}
-	debug.FreeOSMemory() // the working set then counts live memory, not freed heap Go kept
+	settleMemory()
 	ram0, gpu0 := processRSS(), gpuMemMB(rt, kind)
 	m, err := rt.Load(spec)
 	if err != nil {
 		return nil, err
 	}
-	debug.FreeOSMemory()
+	settleMemory()
 	kind = devLabel(m.Dev)
 	ram1, gpu1 := processRSS(), gpuMemMB(rt, kind)
 	updatePerf(func(h *perfHost) {

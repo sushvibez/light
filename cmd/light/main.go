@@ -19,6 +19,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime/debug"
 )
 
 type command struct {
@@ -50,6 +51,13 @@ func usage() {
 }
 
 func main() {
+	// Model weights are long-lived, pointer-free buffers on the Go heap; the
+	// default GOGC=100 lets the heap grow to twice them before collecting
+	// (a 2 GB model ran at ~4.5 GB). Marking them costs almost nothing, so
+	// collect at 25 % growth instead ($GOGC still overrides).
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(25)
+	}
 	if len(os.Args) == 1 {
 		if st, err := os.Stdin.Stat(); err == nil && st.Mode()&os.ModeCharDevice != 0 {
 			if err := cmdShell(); err != nil {

@@ -96,6 +96,11 @@ func matmulKernel[T dtype.Numeric](ctx *registry.Context) error {
 	aBase := a.Offset()
 	bBase := b.Offset()
 
+	if af, ok := any(aS).([]float32); ok {
+		if matmulF32Fast(af, aBase, aStr, any(bS).([]float32), bBase, bStr, any(outS).([]float32), M, K, N) {
+			return nil
+		}
+	}
 	for i := range M {
 		for j := range N {
 			var sum T
