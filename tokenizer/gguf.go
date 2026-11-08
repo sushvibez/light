@@ -16,6 +16,7 @@ type GGUFVocab struct {
 	Model          string // "llama" (SentencePiece) or "gpt2" (byte-level BPE)
 	Pre            string // tokenizer.ggml.pre, pre-tokenizer family (BPE only)
 	BOS, EOS       int32  // -1 when absent
+	EOT            int32  // end-of-turn token (tokenizer.ggml.eot_token_id), -1 when absent
 	UNK, PAD       int32  // -1 when absent
 	AddBOS, AddEOS bool
 	AddSpacePrefix bool
@@ -58,6 +59,7 @@ func FromGGUFMeta(meta map[string]any) (*BPE, *GGUFVocab, error) {
 	info.ChatTemplate, _ = meta["tokenizer.chat_template"].(string)
 	info.BOS = metaInt(meta, "tokenizer.ggml.bos_token_id", -1)
 	info.EOS = metaInt(meta, "tokenizer.ggml.eos_token_id", -1)
+	info.EOT = metaInt(meta, "tokenizer.ggml.eot_token_id", -1)
 	info.UNK = metaInt(meta, "tokenizer.ggml.unknown_token_id", -1)
 	info.PAD = metaInt(meta, "tokenizer.ggml.padding_token_id", -1)
 

@@ -398,6 +398,23 @@ func copyGGUFF32(g *gguf.File, name string, dst *tensor.Tensor) error {
 	return dst.CopyFrom(t)
 }
 
+// LoadChatModelGGUF loads a chat GGUF by its general.architecture: qwen35
+// (LoadQwen35GGUF), muse-glimmer (LoadMuseGlimmerGGUF), and every
+// Llama-decoder architecture LoadLlamaGGUF reads.
+func LoadChatModelGGUF(path string, dev device.Device) (CausalLM, error) {
+	arch, err := GGUFArchitecture(path)
+	if err != nil {
+		return nil, err
+	}
+	switch arch {
+	case "qwen35":
+		return LoadQwen35GGUF(path, dev)
+	case "muse-glimmer":
+		return LoadMuseGlimmerGGUF(path, dev)
+	}
+	return LoadLlamaGGUF(path, dev)
+}
+
 // GGUFArchitecture returns general.architecture of a GGUF file, for
 // callers that want to pick a loader or tokenizer by it.
 func GGUFArchitecture(path string) (string, error) {

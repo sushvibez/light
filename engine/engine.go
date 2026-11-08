@@ -134,7 +134,7 @@ func Load(spec Spec) (*Model, error) {
 	var lm models.CausalLM
 	switch {
 	case spec.GGUF != "":
-		lm, err = models.LoadLlamaGGUF(spec.GGUF, dev)
+		lm, err = models.LoadChatModelGGUF(spec.GGUF, dev)
 	default:
 		wdt := dtype.F32
 		if strings.EqualFold(spec.DType, "bf16") {
@@ -165,6 +165,9 @@ func Load(spec Spec) (*Model, error) {
 	if ggufVocab != nil {
 		if ggufVocab.EOS >= 0 {
 			m.eos[int64(ggufVocab.EOS)] = true
+		}
+		if ggufVocab.EOT >= 0 { // end of turn (Muse Glimmer's <|eot|>)
+			m.eos[int64(ggufVocab.EOT)] = true
 		}
 		if ggufVocab.AddBOS && ggufVocab.BOS >= 0 {
 			m.bos, m.hasBOS = int64(ggufVocab.BOS), true

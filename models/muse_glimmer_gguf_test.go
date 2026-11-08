@@ -296,3 +296,23 @@ func TestMuseGlimmer30BGGUFMatchesTransformers(t *testing.T) {
 		t.Errorf("greedy %v diverges from transformers BF16 %v after %d tokens", greedy, museGlimmer30BGreedy, agree)
 	}
 }
+
+// LoadChatModelGGUF (the engine's GGUF entry point) dispatches on
+// general.architecture.
+func TestLoadChatModelGGUFDispatch(t *testing.T) {
+	cpu := device.CPU()
+	m, err := LoadChatModelGGUF(writeTinyMuseGlimmerGGUF(t, dtype.F32), cpu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.(*Gemma3); !ok {
+		t.Errorf("muse-glimmer GGUF loaded as %T, want *Gemma3", m)
+	}
+	q, err := LoadChatModelGGUF(writeTinyQwen35GGUF(t, dtype.F32), cpu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := q.(*Qwen35); !ok {
+		t.Errorf("qwen35 GGUF loaded as %T, want *Qwen35", q)
+	}
+}
