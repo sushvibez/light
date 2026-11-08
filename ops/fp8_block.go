@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sync"
 
+	"light/device"
 	"light/dtype"
 	"light/internal/registry"
 	"light/tensor"
@@ -121,14 +122,20 @@ type fp8ScratchKey struct {
 }
 
 // fp8ScratchView returns an (R, C) view at offset 0 of the scratch buffer
-// for (dev, dt), growing it when needed. Callers hold fp8ScratchMu.
+// for (w's device, dt), growing it when needed. Callers hold fp8ScratchMu.
 func fp8ScratchView(w *tensor.Tensor, dt dtype.DType) (*tensor.Tensor, error) {
-	R, C := w.Dim(0), w.Dim(1)
-	key := fp8ScratchKey{w.Device().String(), dt}
+	return weightScratch(w.Device(), dt, w.Dim(0), w.Dim(1))
+}
+
+// weightScratch returns an (R, C) view at offset 0 of the per-(device,
+// dtype) buffer that quantized weights (FP8, 4-bit) are expanded into before
+// a GEMM; see fp8Scratch. Callers hold fp8ScratchMu.
+func weightScratch(dev device.Device, dt dtype.DType, R, C int) (*tensor.Tensor, error) {
+	key := fp8ScratchKey{dev.String(), dt}
 	buf := fp8Scratch[key]
 	if buf == nil || buf.NumElements() < R*C {
 		var err error
-		if buf, err = tensor.Zeros(dt, []int{R * C}, w.Device()); err != nil {
+		if buf, err = tensor.Zeros(dt, []int{R * C}, dev); err != nil {
 			return nil, err
 		}
 		fp8Scratch[key] = buf

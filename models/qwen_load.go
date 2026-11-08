@@ -88,6 +88,13 @@ func loadQwen2(repo string, dev device.Device, weightDT dtype.DType) (*Llama, er
 	}
 	cfg.WeightDType = weightDT
 	cfg.SkipInit = true // we're about to overwrite every weight from disk
+	q4, err := fetchInt4Config(repo)
+	if err != nil {
+		return nil, err
+	}
+	if q4 != nil {
+		cfg.LazyLinear = true // 4-bit / plain weights installed below; nothing allocated at full size
+	}
 	tensors, err := loadSafetensorsAuto(repo)
 	if err != nil {
 		return nil, fmt.Errorf("LoadQwen2FromHF: %w", err)
@@ -95,6 +102,11 @@ func loadQwen2(repo string, dev device.Device, weightDT dtype.DType) (*Llama, er
 	llama, err := NewLlama(cfg, dev)
 	if err != nil {
 		return nil, err
+	}
+	if q4 != nil {
+		if err := installInt4Llama(llama, tensors, q4, dev); err != nil {
+			return nil, err
+		}
 	}
 	if err := mapHFToLlama(llama, tensors); err != nil {
 		return nil, err
@@ -183,21 +195,29 @@ func mapHFToLlamaPrefix(m *Llama, hf map[string]*tensor.Tensor, prefix string) e
 	if err := copyExactCast(m.TokenEmb.Weight, hf, prefix+"embed_tokens.weight"); err != nil {
 		return err
 	}
+	// Linear weights go through copyLinearW: 4-bit layers are already
+	// installed, placeholders (4-bit loaders) take a cast-and-move.
+	linDT := m.Cfg.WeightDType
+	if linDT != dtype.BF16 {
+		linDT = dtype.F32
+	}
+	dev := m.TokenEmb.Weight.Device()
+	lin := func(l *nn.Linear, name string) error { return copyLinearW(l, hf, name, linDT, dev) }
 	for i, blk := range m.Blocks {
 		p := prefix + "layers." + strconv.Itoa(i) + "."
 		if err := copyExactCast(blk.N1.Weight, hf, p+"input_layernorm.weight"); err != nil {
 			return err
 		}
-		if err := copyExactCast(blk.QProj.W, hf, p+"self_attn.q_proj.weight"); err != nil {
+		if err := lin(blk.QProj, p+"self_attn.q_proj.weight"); err != nil {
 			return err
 		}
-		if err := copyExactCast(blk.KProj.W, hf, p+"self_attn.k_proj.weight"); err != nil {
+		if err := lin(blk.KProj, p+"self_attn.k_proj.weight"); err != nil {
 			return err
 		}
-		if err := copyExactCast(blk.VProj.W, hf, p+"self_attn.v_proj.weight"); err != nil {
+		if err := lin(blk.VProj, p+"self_attn.v_proj.weight"); err != nil {
 			return err
 		}
-		if err := copyExactCast(blk.OProj.W, hf, p+"self_attn.o_proj.weight"); err != nil {
+		if err := lin(blk.OProj, p+"self_attn.o_proj.weight"); err != nil {
 			return err
 		}
 		if m.Cfg.QKVBias {
@@ -228,13 +248,13 @@ func mapHFToLlamaPrefix(m *Llama, hf map[string]*tensor.Tensor, prefix string) e
 			}
 			continue
 		}
-		if err := copyExactCast(blk.GateProj.W, hf, p+"mlp.gate_proj.weight"); err != nil {
+		if err := lin(blk.GateProj, p+"mlp.gate_proj.weight"); err != nil {
 			return err
 		}
-		if err := copyExactCast(blk.UpProj.W, hf, p+"mlp.up_proj.weight"); err != nil {
+		if err := lin(blk.UpProj, p+"mlp.up_proj.weight"); err != nil {
 			return err
 		}
-		if err := copyExactCast(blk.DownProj.W, hf, p+"mlp.down_proj.weight"); err != nil {
+		if err := lin(blk.DownProj, p+"mlp.down_proj.weight"); err != nil {
 			return err
 		}
 	}
@@ -242,7 +262,7 @@ func mapHFToLlamaPrefix(m *Llama, hf map[string]*tensor.Tensor, prefix string) e
 		return err
 	}
 	if !m.Cfg.TieEmbed {
-		if err := copyExactCast(m.LMHead.W, hf, "lm_head.weight"); err != nil {
+		if err := lin(m.LMHead, "lm_head.weight"); err != nil {
 			return err
 		}
 	}

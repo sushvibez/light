@@ -9,6 +9,7 @@ import (
 	"light/device"
 	"light/dtype"
 	"light/ops"
+	"light/quant"
 	"light/tensor"
 )
 
@@ -35,6 +36,9 @@ type Linear struct {
 	// (any GPU; the weight stays 1 byte / param at rest).
 	WBlockScale *tensor.Tensor
 	WBlock      [2]int
+	// W4 holds a group-quantized 4-bit weight (GPTQ / AWQ, converted to
+	// quant.Int4) instead of W; Forward runs ops.MatMulInt4.
+	W4          *quant.Int4
 	inFeatures  int
 	outFeatures int
 }
@@ -176,6 +180,9 @@ func newLinearImpl(inFeatures, outFeatures int, bias bool, wdt dtype.DType, dev 
 // the cublasGemmEx BF16-tensor-core path automatically when W is BF16 (via
 // `ops.MatMulMixed`); F32 / F64 weights route through the regular GEMM.
 func (l *Linear) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
+	if l.W4 != nil {
+		return l.forwardInt4(x)
+	}
 	if l.W == nil {
 		return nil, fmt.Errorf("nn.Linear: weight not loaded (placeholder layer %d→%d)", l.inFeatures, l.outFeatures)
 	}
@@ -312,10 +319,17 @@ func (l *Linear) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 
 // Parameters returns [W] or [W, B].
 func (l *Linear) Parameters() []*tensor.Tensor {
-	if l.B != nil {
-		return []*tensor.Tensor{l.W, l.B}
+	var ps []*tensor.Tensor
+	if l.W4 != nil {
+		// Packed codes (8 per element) plus per-group scales / zeros.
+		ps = []*tensor.Tensor{l.W4.Codes, l.W4.Scales, l.W4.Zeros}
+	} else {
+		ps = []*tensor.Tensor{l.W}
 	}
-	return []*tensor.Tensor{l.W}
+	if l.B != nil {
+		ps = append(ps, l.B)
+	}
+	return ps
 }
 
 // InFeatures returns the input dimension.
@@ -359,4 +373,58 @@ func linearBF16Bias(x, wT, b *tensor.Tensor) (*tensor.Tensor, error) {
 		return nil, err
 	}
 	return ops.Cast(y, dtype.BF16)
+}
+
+// SetInt4 installs a 4-bit weight of shape (outFeatures, inFeatures).
+func (l *Linear) SetInt4(w quant.Int4) error {
+	if w.N() != l.outFeatures || w.K() != l.inFeatures {
+		return fmt.Errorf("nn.Linear.SetInt4: want (%d, %d), got (%d, %d)", l.outFeatures, l.inFeatures, w.N(), w.K())
+	}
+	l.W4, l.W = &w, nil
+	return nil
+}
+
+// forwardInt4 is Forward for a 4-bit weight (inference only). With a bias
+// and BF16 activations the product is formed in F32 and rounded once after
+// the bias, as for BF16 weights (see linearBF16Bias).
+func (l *Linear) forwardInt4(x *tensor.Tensor) (*tensor.Tensor, error) {
+	if !x.Device().SameAs(l.W4.Codes.Device()) {
+		return nil, fmt.Errorf("nn.Linear: x on %v but the 4-bit weight on %v", x.Device(), l.W4.Codes.Device())
+	}
+	if x.Rank() < 1 || x.Dim(-1) != l.inFeatures {
+		return nil, fmt.Errorf("nn.Linear: last dim of x (%d) != in_features (%d)", x.Dim(-1), l.inFeatures)
+	}
+	dims := x.Shape().Dims()
+	flat, err := autograd.Reshape(x, -1, l.inFeatures)
+	if err != nil {
+		return nil, err
+	}
+	in := flat
+	if l.B != nil && x.DType() == dtype.BF16 {
+		if in, err = ops.Cast(flat, dtype.F32); err != nil {
+			return nil, err
+		}
+	}
+	y, err := ops.MatMulInt4(in, *l.W4)
+	if err != nil {
+		return nil, err
+	}
+	if l.B != nil {
+		b := l.B
+		if b.DType() != y.DType() {
+			if b, err = ops.Cast(b, y.DType()); err != nil {
+				return nil, err
+			}
+		}
+		if y, err = ops.Add(y, b); err != nil {
+			return nil, err
+		}
+		if y.DType() != x.DType() {
+			if y, err = ops.Cast(y, x.DType()); err != nil {
+				return nil, err
+			}
+		}
+	}
+	dims[len(dims)-1] = l.outFeatures
+	return autograd.Reshape(y, dims...)
 }

@@ -192,6 +192,13 @@ func loadLlama3(repo string, dev device.Device, weightDT dtype.DType) (*Llama, e
 	}
 	cfg.WeightDType = weightDT
 	cfg.SkipInit = true
+	q4, err := fetchInt4Config(repo)
+	if err != nil {
+		return nil, err
+	}
+	if q4 != nil {
+		cfg.LazyLinear = true
+	}
 	tensors, err := loadSafetensorsAuto(repo)
 	if err != nil {
 		return nil, fmt.Errorf("LoadLlama3FromHF: %w", err)
@@ -199,6 +206,11 @@ func loadLlama3(repo string, dev device.Device, weightDT dtype.DType) (*Llama, e
 	llama, err := NewLlama(cfg, dev)
 	if err != nil {
 		return nil, err
+	}
+	if q4 != nil {
+		if err := installInt4Llama(llama, tensors, q4, dev); err != nil {
+			return nil, err
+		}
 	}
 	if err := mapHFToLlama(llama, tensors); err != nil {
 		return nil, err

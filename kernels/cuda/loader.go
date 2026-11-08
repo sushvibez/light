@@ -68,6 +68,9 @@ var gatedDeltaPTX []byte
 //go:embed ptx/fp8_block.ptx
 var fp8BlockPTX []byte
 
+//go:embed ptx/int4.ptx
+var int4PTX []byte
+
 type lazyModule struct {
 	name string
 	data []byte
@@ -119,6 +122,7 @@ var modules = []*lazyModule{
 	{name: "moe_gguf", data: moeGGUFPTX},
 	{name: "gated_delta", data: gatedDeltaPTX},
 	{name: "fp8_block", data: fp8BlockPTX},
+	{name: "int4", data: int4PTX},
 }
 
 var (
