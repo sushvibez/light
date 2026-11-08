@@ -222,6 +222,7 @@ func (l *Linear) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 
 	var y *tensor.Tensor
 	var err error
+	biasDone := false
 	if blockFP8 {
 		// Block-scaled FP8 (inference only): fused GEMV for a few rows,
 		// dequantize + GEMM otherwise.
@@ -266,7 +267,18 @@ func (l *Linear) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 		if err2 != nil {
 			return nil, err2
 		}
-		y, err = ops.MatMulMixed(flatC, wT)
+		if l.B != nil && w.DType() == dtype.BF16 && flatC.DType() == dtype.BF16 {
+			// x·Wᵀ + b with one rounding, as cuBLAS's bias epilogue does for
+			// transformers: GEMM to F32, add the bias in F32, round once.
+			// Rounding x·Wᵀ to BF16 first loses the small difference when it
+			// nearly cancels a large bias (Qwen2-family k_proj biases reach
+			// 55, where BF16 steps are 0.25: MiMo-7B's logits moved by up to
+			// 14 before this).
+			y, err = linearBF16Bias(flatC, wT, l.B)
+			biasDone = true
+		} else {
+			y, err = ops.MatMulMixed(flatC, wT)
+		}
 	} else {
 		wT, err2 := autograd.Transpose(w, 0, 1)
 		if err2 != nil {
@@ -277,7 +289,7 @@ func (l *Linear) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 	if err != nil {
 		return nil, err
 	}
-	if l.B != nil {
+	if l.B != nil && !biasDone {
 		y, err = autograd.Add(y, l.B)
 		if err != nil {
 			return nil, err
@@ -322,4 +334,29 @@ func scaleUniform(t *tensor.Tensor, k float32) {
 	for i := range vals {
 		vals[i] = vals[i]*scale - k
 	}
+}
+
+// linearBF16Bias returns round_bf16(x·wT + b) for BF16 x (M, K), BF16 wT
+// (K, N) and a bias b (N,): the product is accumulated and stored in F32
+// (the F32 × BF16 GEMM, which casts x back to BF16 exactly), the bias added
+// in F32, and the sum rounded once.
+func linearBF16Bias(x, wT, b *tensor.Tensor) (*tensor.Tensor, error) {
+	x32, err := ops.Cast(x, dtype.F32)
+	if err != nil {
+		return nil, err
+	}
+	y, err := ops.MatMulMixed(x32, wT) // F32 out
+	if err != nil {
+		return nil, err
+	}
+	b32 := b
+	if b.DType() != dtype.F32 {
+		if b32, err = ops.Cast(b, dtype.F32); err != nil {
+			return nil, err
+		}
+	}
+	if y, err = ops.Add(y, b32); err != nil {
+		return nil, err
+	}
+	return ops.Cast(y, dtype.BF16)
 }
