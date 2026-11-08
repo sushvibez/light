@@ -8,6 +8,7 @@ import (
 
 	"light/device"
 	"light/dtype"
+	"light/tensor"
 )
 
 // Tiny-random MiMo written by `scripts/verify/ref_mimo.py --make-tiny`: a
@@ -189,5 +190,137 @@ func TestMiMo7BMatchesTransformersF32(t *testing.T) {
 		if d := row[w.id] - w.logit; d > 0.02 || d < -0.02 {
 			t.Errorf("logit[%d] = %.4f, want %.4f (F32 tol 0.02)", w.id, row[w.id], w.logit)
 		}
+	}
+}
+
+// The MTP draft head of the tiny MiMo (random mtp_layers.0) against
+// `scripts/verify/ref_mimo_mtp.py testdata/mimo/tiny --ids …`: MiMo's MTP
+// layer re-expressed in plain PyTorch on transformers' final normed hidden
+// states, the pairs (h_i, ids[i+1]) as one causal sequence; last row top-5.
+func TestMiMoMTPDraftMatchesReference(t *testing.T) {
+	ids := []int64{5, 17, 300, 42, 8, 499, 13, 77, 256, 3, 64, 250, 19, 6, 400, 41, 2, 90}
+	ref := []struct {
+		id    int
+		logit float32
+	}{{148, 0.4520}, {7, 0.4276}, {245, 0.4224}, {472, 0.4010}, {191, 0.4002}}
+	cpu := device.CPU()
+	m, err := LoadCausalLMFromHF("testdata/mimo/tiny", cpu, dtype.F32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.MTP == nil {
+		t.Fatal("MTP head not loaded")
+	}
+	lastLogits(t, m, ids, NewKVCache(m.NumLayers()), cpu)
+	T := len(ids) - 1
+	h, err := m.LastHidden.Narrow(1, 0, T)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h, err = h.Contiguous(); err != nil {
+		t.Fatal(err)
+	}
+	logits, err := m.MTPDraft(h, ids[1:], NewKVCache(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs, err := rows(logits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := rs[len(rs)-1]
+	got := top5(row)
+	for i, w := range ref {
+		if i < 3 && got[i] != w.id {
+			t.Errorf("draft top-%d: got %d (%.4f), want %d (%.4f)", i+1, got[i], row[got[i]], w.id, w.logit)
+		}
+		if d := row[w.id] - w.logit; d > 2e-4 || d < -2e-4 {
+			t.Errorf("draft logit[%d] = %.5f, want %.4f", w.id, row[w.id], w.logit)
+		}
+	}
+}
+
+// Speculative greedy decoding with the MTP head emits exactly the plain
+// greedy tokens (the tiny model's random draft head is mostly wrong, so
+// both the accept and the reject / rollback paths run).
+func TestSpecGreedyEqualsGreedy(t *testing.T) {
+	ids := []int64{5, 17, 300, 42, 8, 499, 13, 77, 256, 3, 64, 250, 19, 6, 400, 41, 2, 90}
+	const n = 24
+	cpu := device.CPU()
+	m, err := LoadCausalLMFromHF("testdata/mimo/tiny", cpu, dtype.F32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := NewKVCache(m.NumLayers())
+	row := lastLogits(t, m, ids, cache, cpu)
+	var want []int64
+	for len(want) < n {
+		next := int64(top5(row)[0])
+		want = append(want, next)
+		row = lastLogits(t, m, []int64{next}, cache, cpu)
+	}
+	var got []int64
+	st, err := SpecGreedy(m, ids, n, func(tok int64) bool { got = append(got, tok); return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("drafted %d, accepted %d", st.Drafted, st.Accepted)
+	if !slices.Equal(got, want) {
+		t.Fatalf("speculative %v\nwant greedy %v", got, want)
+	}
+	if st.Drafted == 0 || st.Accepted == st.Drafted {
+		t.Logf("note: the run did not exercise both accept and reject (%d / %d)", st.Accepted, st.Drafted)
+	}
+}
+
+// The accept and reject paths of speculative decoding with a scripted
+// drafter (right except at every third draft): the output is still plain
+// greedy, and the drafter sees every (hidden, next) pair of the stream
+// exactly once and in order: prompt[1:] followed by the emitted tokens.
+func TestSpecGreedyAcceptReject(t *testing.T) {
+	ids := []int64{5, 17, 300, 42, 8, 499, 13, 77, 256, 3, 64, 250, 19, 6, 400, 41, 2, 90}
+	const n = 24
+	cpu := device.CPU()
+	m, err := LoadCausalLMFromHF("testdata/mimo/tiny", cpu, dtype.F32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := NewKVCache(m.NumLayers())
+	row := lastLogits(t, m, ids, cache, cpu)
+	var want []int64
+	for len(want) < n+2 {
+		next := int64(top5(row)[0])
+		want = append(want, next)
+		row = lastLogits(t, m, []int64{next}, cache, cpu)
+	}
+	var got, fed []int64
+	hiddenRows, calls := 0, 0
+	st, err := specGreedy(m, ids, n, func(tok int64) bool { got = append(got, tok); return true },
+		func(h *tensor.Tensor, next []int64) (int64, error) {
+			if h.Dim(1) != len(next) {
+				t.Fatalf("draft call %d: %d hidden rows for %d tokens", calls, h.Dim(1), len(next))
+			}
+			hiddenRows += h.Dim(1)
+			fed = append(fed, next...)
+			calls++
+			k := len(fed) - (len(ids) - 1) // emitted tokens known so far
+			if calls%3 == 0 {
+				return (want[k] + 1) % 512, nil
+			}
+			return want[k], nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("drafted %d, accepted %d", st.Drafted, st.Accepted)
+	if !slices.Equal(got, want[:n]) {
+		t.Fatalf("speculative %v\nwant greedy %v", got, want[:n])
+	}
+	if st.Accepted == 0 || st.Accepted == st.Drafted {
+		t.Fatalf("want both accepts and rejects, got %d / %d", st.Accepted, st.Drafted)
+	}
+	stream := append(slices.Clone(ids[1:]), want...)
+	if !slices.Equal(fed, stream[:len(fed)]) {
+		t.Fatalf("drafter fed %v\nwant prefix of %v", fed, stream)
 	}
 }

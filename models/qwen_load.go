@@ -111,6 +111,11 @@ func loadQwen2(repo string, dev device.Device, weightDT dtype.DType) (*Llama, er
 	if err := mapHFToLlama(llama, tensors); err != nil {
 		return nil, err
 	}
+	// MiMo-7B ships one multi-token-prediction layer: keep it as a draft
+	// head for speculative decoding (the forward never uses it).
+	if llama.MTP, err = loadMTPHead(llama, tensors, "model.mtp_layers.0."); err != nil {
+		return nil, err
+	}
 	return llama, nil
 }
 

@@ -668,3 +668,51 @@ func TestGenerateQwen35SmallCPU(t *testing.T) {
 		t.Fatalf("reply %q stop %s\nwant  %q stop length", text, st.Stop, want)
 	}
 }
+
+// MiMo-7B-RL through the engine at BF16 with its MTP head: greedy requests
+// decode speculatively (draft one token, verify two per main forward). The
+// reply must equal plain greedy decoding (MTP head detached) token for
+// token; the log shows the draft acceptance rate and both speeds.
+func TestGenerateMiMoSpeculativeBF16(t *testing.T) {
+	if os.Getenv("LIGHT_HEAVY_TESTS") == "" {
+		t.Skip("set LIGHT_HEAVY_TESTS=1")
+	}
+	requireHostMemGB(t, 20)
+	releaseModelMemory(t)
+	os.Setenv("HF_HUB_OFFLINE", "1")
+	home, _ := os.UserHomeDir()
+	if m, _ := filepath.Glob(filepath.Join(home, ".cache/huggingface/hub/models--XiaomiMiMo--MiMo-7B-RL/snapshots/*/model-*.safetensors")); len(m) < 2 {
+		t.Skip("XiaomiMiMo/MiMo-7B-RL not in HF cache")
+	}
+	m, err := Load(Spec{ID: "XiaomiMiMo/MiMo-7B-RL", Repo: "XiaomiMiMo/MiMo-7B-RL", DType: "bf16"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, ok := m.LM.(*models.Llama)
+	if !ok || l.MTP == nil {
+		t.Fatalf("MiMo loaded without an MTP head (%T)", m.LM)
+	}
+	msgs := []Message{{Role: "user", Content: "Write the numbers from 1 to 20 separated by commas, then explain in two sentences what a prime number is."}}
+	opts := GenOpts{Temperature: 0, MaxTokens: 96}
+	spec, sst, err := m.Generate(t.Context(), msgs, opts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mtp := l.MTP
+	l.MTP = nil
+	plain, pst, err := m.Generate(t.Context(), msgs, opts, nil)
+	l.MTP = mtp
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("speculative: %d tokens, %d / %d drafts accepted (%.0f%%), %.1f tok/s",
+		sst.Tokens, sst.Accepted, sst.Drafted, 100*float64(sst.Accepted)/float64(max(sst.Drafted, 1)), sst.TokPerSec)
+	t.Logf("plain:       %d tokens, %.1f tok/s", pst.Tokens, pst.TokPerSec)
+	t.Logf("%q", spec)
+	if spec != plain {
+		t.Fatalf("speculative reply differs from greedy:\n%q\n%q", spec, plain)
+	}
+	if sst.Drafted == 0 || sst.Accepted*2 < sst.Drafted {
+		t.Errorf("MTP acceptance %d / %d is below 50%%: draft head miswired?", sst.Accepted, sst.Drafted)
+	}
+}

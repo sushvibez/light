@@ -15,8 +15,8 @@ import (
 // reference values from `ref_minimax.py testdata/minimax/tiny f32 --ids …`
 // (transformers 5.21, eager, CPU): lightning / softmax attention alternating
 // over 4 layers, lightning block_size 4 (the 18-token prefill crosses five
-// blocks of transformers' block algorithm, which Light evaluates in closed
-// form), residual factors ≠ 1, GQA 4 / 2 heads of 16, 4 experts top-2,
+// blocks of transformers' block algorithm; Light's own chunk length is
+// independent, see TestMiniMaxLightningChunks), residual factors ≠ 1, GQA 4 / 2 heads of 16, 4 experts top-2,
 // perturbed norms. The real MiniMax-Text-01 (456 B) is out of reach here.
 var (
 	minimaxTinyRef = []struct {
@@ -101,5 +101,44 @@ func TestMiniMaxTinyMatchesTransformers(t *testing.T) {
 	}
 	if d := maxAbsDiff(full, lastLogits(t, mg, ids, NewKVCache(mg.NumLayers()), gpu)); d > 1e-4 {
 		t.Errorf("CUDA vs CPU logits differ by %.2e", d)
+	}
+}
+
+// Lightning attention in chunks (the state carried across chunk
+// boundaries) equals one chunk over the whole prompt, for chunk lengths
+// that do and do not divide the 18-token prompt, with and without a cache.
+func TestMiniMaxLightningChunks(t *testing.T) {
+	ids := []int64{5, 17, 300, 42, 8, 499, 13, 77, 256, 3, 64, 250, 19, 6, 400, 41, 2, 90}
+	cpu := device.CPU()
+	m, err := LoadMiniMaxFromHF(minimaxTinyDir, cpu, dtype.F32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func(c int) { lightningChunk = c }(lightningChunk)
+	lightningChunk = 256
+	whole := lastLogits(t, m, ids, NewKVCache(m.NumLayers()), cpu)
+	for _, c := range []int{1, 4, 5, 7} {
+		lightningChunk = c
+		if d := maxAbsDiff(whole, lastLogits(t, m, ids, NewKVCache(m.NumLayers()), cpu)); d > 1e-5 {
+			t.Errorf("chunk %d (cache) differs from one chunk by %.2e", c, d)
+		}
+		if d := maxAbsDiff(whole, lastLogits(t, m, ids, nil, cpu)); d > 1e-5 {
+			t.Errorf("chunk %d (no cache) differs from one chunk by %.2e", c, d)
+		}
+	}
+	if !device.CUDAAvailable() {
+		return
+	}
+	gpu, err := device.CUDA(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mg, err := LoadMiniMaxFromHF(minimaxTinyDir, gpu, dtype.F32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lightningChunk = 5
+	if d := maxAbsDiff(whole, lastLogits(t, mg, ids, NewKVCache(mg.NumLayers()), gpu)); d > 1e-4 {
+		t.Errorf("CUDA chunk 5 vs CPU differ by %.2e", d)
 	}
 }

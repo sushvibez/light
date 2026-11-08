@@ -72,6 +72,11 @@ type Stats struct {
 	DecodeMS     float64 `json:"decode_ms"`
 	TokPerSec    float64 `json:"tok_per_sec"`
 	Stop         string  `json:"stop"` // "eos", "length" or "cancel"
+	// Greedy requests on a model with an MTP head (MiMo) decode
+	// speculatively: draft tokens proposed by the head, and how many the
+	// main model kept (the output is identical to plain greedy).
+	Drafted  int `json:"drafted,omitempty"`
+	Accepted int `json:"accepted,omitempty"`
 }
 
 // ErrBusy is returned when a generation is already running on the model.
@@ -320,6 +325,9 @@ func (m *Model) Generate(ctx context.Context, msgs []Message, opts GenOpts, onTo
 	if m.Diffusion {
 		return m.generateDiffusion(ctx, ids, opts, onToken, st)
 	}
+	if l, ok := m.LM.(*models.Llama); ok && l.MTP != nil && opts.Temperature == 0 {
+		return m.generateSpec(ctx, l, ids, opts, onToken, st)
+	}
 	cache := models.NewKVCache(m.LM.NumLayers())
 	defer cache.Reset()
 
@@ -332,23 +340,7 @@ func (m *Model) Generate(ctx context.Context, msgs []Message, opts GenOpts, onTo
 
 	var gen []int32
 	var out strings.Builder
-	emitted := 0
-	flush := func(final bool) {
-		text := m.Tok.Decode(gen)
-		// Hold back a trailing replacement char: the next token may complete
-		// the multi-byte sequence.
-		if !final && strings.HasSuffix(text, "�") {
-			text = strings.TrimSuffix(text, "�")
-		}
-		if len(text) > emitted {
-			delta := text[emitted:]
-			emitted = len(text)
-			out.WriteString(delta)
-			if onToken != nil {
-				onToken(delta)
-			}
-		}
-	}
+	flush := m.flusher(&gen, &out, onToken)
 
 	t1 := time.Now()
 	st.Stop = "length"
@@ -378,6 +370,74 @@ func (m *Model) Generate(ctx context.Context, msgs []Message, opts GenOpts, onTo
 	}
 	flush(true)
 	st.DecodeMS = float64(time.Since(t1).Microseconds()) / 1000
+	if st.DecodeMS > 0 {
+		st.TokPerSec = float64(st.Tokens) / (st.DecodeMS / 1000)
+	}
+	return out.String(), st, nil
+}
+
+// flusher returns a function that streams the text of *gen not yet sent
+// (to out and onToken), holding back a trailing partial UTF-8 sequence
+// unless final.
+func (m *Model) flusher(gen *[]int32, out *strings.Builder, onToken func(string)) func(final bool) {
+	emitted := 0
+	return func(final bool) {
+		text := m.Tok.Decode(*gen)
+		// Hold back a trailing replacement char: the next token may complete
+		// the multi-byte sequence.
+		if !final && strings.HasSuffix(text, "�") {
+			text = strings.TrimSuffix(text, "�")
+		}
+		if len(text) > emitted {
+			delta := text[emitted:]
+			emitted = len(text)
+			out.WriteString(delta)
+			if onToken != nil {
+				onToken(delta)
+			}
+		}
+	}
+}
+
+// generateSpec is greedy decoding through models.SpecGreedy (MTP draft
+// head): the same tokens as the plain loop, fewer main-model forwards when
+// drafts are accepted. Prefill time is measured to the first token.
+func (m *Model) generateSpec(ctx context.Context, l *models.Llama, ids []int32, opts GenOpts, onToken func(string), st Stats) (string, Stats, error) {
+	var gen []int32
+	var out strings.Builder
+	flush := m.flusher(&gen, &out, onToken)
+	t0 := time.Now()
+	var t1 time.Time
+	st.Stop = "length"
+	ss, err := models.SpecGreedy(l, toI64(ids), opts.MaxTokens, func(tok int64) bool {
+		if t1.IsZero() {
+			t1 = time.Now()
+			st.PrefillMS = float64(t1.Sub(t0).Microseconds()) / 1000
+		}
+		if ctx.Err() != nil {
+			st.Stop = "cancel"
+			return false
+		}
+		if m.eos[tok] {
+			st.Stop = "eos"
+			return false
+		}
+		gen = append(gen, int32(tok))
+		st.Tokens++
+		flush(false)
+		if st.Tokens%8 == 0 {
+			runtime.GC() // release device buffers of finished steps
+		}
+		return true
+	})
+	st.Drafted, st.Accepted = ss.Drafted, ss.Accepted
+	flush(true)
+	if err != nil {
+		return out.String(), st, fmt.Errorf("speculative decode: %w", err)
+	}
+	if !t1.IsZero() {
+		st.DecodeMS = float64(time.Since(t1).Microseconds()) / 1000
+	}
 	if st.DecodeMS > 0 {
 		st.TokPerSec = float64(st.Tokens) / (st.DecodeMS / 1000)
 	}

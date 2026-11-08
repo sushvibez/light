@@ -308,14 +308,16 @@ func (m *MiniMax) runBlock(blk *minimaxBlock, x *tensor.Tensor, B, T, prior int,
 //
 //	S_t = a · S_{t−1} + k_tᵀ v_t,   o_t = q_t · S_t,
 //
-// with q, k, v = SiLU(qkv_proj(h)) split per head. A whole call is evaluated
-// in closed form (transformers' block algorithm computes the same thing):
+// with q, k, v = SiLU(qkv_proj(h)) split per head, evaluated in chunks of
+// lightningChunk tokens (transformers' block algorithm): within a chunk in
+// closed form, the state carried from chunk to chunk,
 //
 //	o = ((Q Kᵀ) ⊙ D) V + (Q ⊙ a^(i+1)) S₀,   D[i, j] = a^(i−j) for i ≥ j,
-//	S_T = a^T S₀ + (K ⊙ a^(T−1−j))ᵀ V,
+//	S_C = a^C S₀ + (K ⊙ a^(C−1−j))ᵀ V,
 //
-// in F32. The cost is O(T²) per call, fine for decode and moderate prompts.
-// Then RMSNorm over all heads, a sigmoid output gate and out_proj.
+// in F32: O(T·C + (T/C)·d²) work and O(C²) decay tables per head, linear in
+// the prompt length. Then RMSNorm over all heads, a sigmoid output gate and
+// out_proj.
 func (m *MiniMax) lightning(blk *minimaxBlock, h *tensor.Tensor, B, T int, cache *KVCache, layer int) (*tensor.Tensor, error) {
 	cfg := m.Cfg
 	H, d := cfg.NumHeads, cfg.HeadDim
@@ -349,112 +351,49 @@ func (m *MiniMax) lightning(blk *minimaxBlock, h *tensor.Tensor, B, T int, cache
 		return nil, err
 	}
 
-	// Decay tables on the host: D (1, H, T, T), qdec (1, H, T, 1),
-	// kdec (1, H, T, 1), aT (1, H, 1, 1).
-	Dt := make([]float32, H*T*T)
-	qd := make([]float32, H*T)
-	kd := make([]float32, H*T)
-	aT := make([]float32, H)
-	for hh, s := range blk.slopes {
-		for i := range T {
-			for j := 0; j <= i; j++ {
-				Dt[(hh*T+i)*T+j] = float32(math.Exp(-s * float64(i-j)))
-			}
-			qd[hh*T+i] = float32(math.Exp(-s * float64(i+1)))
-			kd[hh*T+i] = float32(math.Exp(-s * float64(T-1-i)))
-		}
-		aT[hh] = float32(math.Exp(-s * float64(T)))
-	}
-	mk := func(data []float32, dims ...int) (*tensor.Tensor, error) { return tensor.New(data, dims, dev) }
-	Dm, err := mk(Dt, 1, H, T, T)
-	if err != nil {
-		return nil, err
-	}
-	qdec, err := mk(qd, 1, H, T, 1)
-	if err != nil {
-		return nil, err
-	}
-	kdec, err := mk(kd, 1, H, T, 1)
-	if err != nil {
-		return nil, err
-	}
-	aTt, err := mk(aT, 1, H, 1, 1)
-	if err != nil {
-		return nil, err
-	}
-
-	bmm := func(a, b *tensor.Tensor, M, K, N int) (*tensor.Tensor, error) { // (B, H, M, K) · (B, H, K, N)
-		a3, err := autograd.Reshape(a, B*H, M, K)
-		if err != nil {
-			return nil, err
-		}
-		b3, err := autograd.Reshape(b, B*H, K, N)
-		if err != nil {
-			return nil, err
-		}
-		o, err := autograd.MatMul(a3, b3)
-		if err != nil {
-			return nil, err
-		}
-		return autograd.Reshape(o, B, H, M, N)
-	}
-	tr := func(x *tensor.Tensor) (*tensor.Tensor, error) { return transposeContig(x, 2, 3) }
-
-	kT, err := tr(k)
-	if err != nil {
-		return nil, err
-	}
-	scores, err := bmm(q, kT, T, d, T) // (B, H, T, T)
-	if err != nil {
-		return nil, err
-	}
-	if scores, err = ops.Mul(scores, Dm); err != nil {
-		return nil, err
-	}
-	o, err := bmm(scores, v, T, T, d) // intra-call part
-	if err != nil {
-		return nil, err
-	}
 	var s0 *tensor.Tensor
 	if cache != nil {
 		s0 = cache.Rec[layer]
 	}
-	if s0 != nil {
-		qa, err := ops.Mul(q, qdec)
+	tables := map[int]*lightningDecay{}
+	var outs []*tensor.Tensor
+	for t0 := 0; t0 < T; t0 += lightningChunk {
+		C := min(lightningChunk, T-t0)
+		dec := tables[C]
+		if dec == nil {
+			if dec, err = newLightningDecay(blk.slopes, C, dev); err != nil {
+				return nil, err
+			}
+			tables[C] = dec
+		}
+		qc, kc, vc := q, k, v
+		if C != T {
+			if qc, err = narrowContig(q, 2, t0, C); err != nil {
+				return nil, err
+			}
+			if kc, err = narrowContig(k, 2, t0, C); err != nil {
+				return nil, err
+			}
+			if vc, err = narrowContig(v, 2, t0, C); err != nil {
+				return nil, err
+			}
+		}
+		last := t0+C >= T
+		oc, s, err := lightningBlock(qc, kc, vc, s0, dec, B, H, C, d, !last || cache != nil)
 		if err != nil {
 			return nil, err
 		}
-		inter, err := bmm(qa, s0, T, d, d)
-		if err != nil {
-			return nil, err
-		}
-		if o, err = ops.Add(o, inter); err != nil {
-			return nil, err
-		}
+		outs = append(outs, oc)
+		s0 = s
 	}
 	if cache != nil {
-		kw, err := ops.Mul(k, kdec)
-		if err != nil {
+		cache.Rec[layer] = s0
+	}
+	o := outs[0]
+	if len(outs) > 1 {
+		if o, err = ops.Concat(outs, 2); err != nil {
 			return nil, err
 		}
-		kwT, err := tr(kw)
-		if err != nil {
-			return nil, err
-		}
-		s, err := bmm(kwT, v, d, T, d)
-		if err != nil {
-			return nil, err
-		}
-		if s0 != nil {
-			decayed, err := ops.Mul(s0, aTt)
-			if err != nil {
-				return nil, err
-			}
-			if s, err = ops.Add(s, decayed); err != nil {
-				return nil, err
-			}
-		}
-		cache.Rec[layer] = s
 	}
 
 	// (B, H, T, d) → (B, T, H·d), norm, gate, out.
@@ -626,3 +565,119 @@ func (m *MiniMax) causalMask(T, prior int, dt dtype.DType, dev device.Device) (*
 }
 
 var _ CausalLM = (*MiniMax)(nil)
+
+// lightningChunk is the chunk length of lightning attention's prefill
+// (transformers' block_size is 256). A variable so tests can make chunk
+// boundaries fall inside short prompts.
+var lightningChunk = 256
+
+// lightningDecay holds the decay tables of one chunk length C on the device:
+// D (1, H, C, C), qdec a^(i+1) and kdec a^(C−1−i) (1, H, C, 1), aC (1, H, 1, 1).
+type lightningDecay struct{ D, qdec, kdec, aC *tensor.Tensor }
+
+func newLightningDecay(slopes []float64, C int, dev device.Device) (*lightningDecay, error) {
+	H := len(slopes)
+	Dt := make([]float32, H*C*C)
+	qd := make([]float32, H*C)
+	kd := make([]float32, H*C)
+	aC := make([]float32, H)
+	for hh, s := range slopes {
+		for i := range C {
+			for j := 0; j <= i; j++ {
+				Dt[(hh*C+i)*C+j] = float32(math.Exp(-s * float64(i-j)))
+			}
+			qd[hh*C+i] = float32(math.Exp(-s * float64(i+1)))
+			kd[hh*C+i] = float32(math.Exp(-s * float64(C-1-i)))
+		}
+		aC[hh] = float32(math.Exp(-s * float64(C)))
+	}
+	var dec lightningDecay
+	var err error
+	if dec.D, err = tensor.New(Dt, []int{1, H, C, C}, dev); err != nil {
+		return nil, err
+	}
+	if dec.qdec, err = tensor.New(qd, []int{1, H, C, 1}, dev); err != nil {
+		return nil, err
+	}
+	if dec.kdec, err = tensor.New(kd, []int{1, H, C, 1}, dev); err != nil {
+		return nil, err
+	}
+	if dec.aC, err = tensor.New(aC, []int{1, H, 1, 1}, dev); err != nil {
+		return nil, err
+	}
+	return &dec, nil
+}
+
+// lightningBlock evaluates one chunk of C tokens (q, k, v (B, H, C, d) F32)
+// from state s0 (B, H, d, d, nil = zero): the output, and the state after the
+// chunk when wantState.
+func lightningBlock(q, k, v, s0 *tensor.Tensor, dec *lightningDecay, B, H, C, d int, wantState bool) (o, s *tensor.Tensor, err error) {
+	bmm := func(a, b *tensor.Tensor, M, K, N int) (*tensor.Tensor, error) { // (B, H, M, K) · (B, H, K, N)
+		a3, err := autograd.Reshape(a, B*H, M, K)
+		if err != nil {
+			return nil, err
+		}
+		b3, err := autograd.Reshape(b, B*H, K, N)
+		if err != nil {
+			return nil, err
+		}
+		o, err := autograd.MatMul(a3, b3)
+		if err != nil {
+			return nil, err
+		}
+		return autograd.Reshape(o, B, H, M, N)
+	}
+	tr := func(x *tensor.Tensor) (*tensor.Tensor, error) { return transposeContig(x, 2, 3) }
+
+	kT, err := tr(k)
+	if err != nil {
+		return nil, nil, err
+	}
+	scores, err := bmm(q, kT, C, d, C) // (B, H, C, C)
+	if err != nil {
+		return nil, nil, err
+	}
+	if scores, err = ops.Mul(scores, dec.D); err != nil {
+		return nil, nil, err
+	}
+	if o, err = bmm(scores, v, C, C, d); err != nil { // intra-chunk part
+		return nil, nil, err
+	}
+	if s0 != nil {
+		qa, err := ops.Mul(q, dec.qdec)
+		if err != nil {
+			return nil, nil, err
+		}
+		inter, err := bmm(qa, s0, C, d, d)
+		if err != nil {
+			return nil, nil, err
+		}
+		if o, err = ops.Add(o, inter); err != nil {
+			return nil, nil, err
+		}
+	}
+	if !wantState {
+		return o, nil, nil
+	}
+	kw, err := ops.Mul(k, dec.kdec)
+	if err != nil {
+		return nil, nil, err
+	}
+	kwT, err := tr(kw)
+	if err != nil {
+		return nil, nil, err
+	}
+	if s, err = bmm(kwT, v, d, C, d); err != nil {
+		return nil, nil, err
+	}
+	if s0 != nil {
+		decayed, err := ops.Mul(s0, dec.aC)
+		if err != nil {
+			return nil, nil, err
+		}
+		if s, err = ops.Add(s, decayed); err != nil {
+			return nil, nil, err
+		}
+	}
+	return o, s, nil
+}

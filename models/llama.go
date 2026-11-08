@@ -282,7 +282,12 @@ type Llama struct {
 	Blocks    []*llamaBlock
 	FinalNorm *nn.RMSNorm
 	FinalLN   *nn.LayerNorm // Nemotron (Cfg.LayerNorm1P): used instead of FinalNorm
-	LMHead    *nn.Linear    // (V, D); shares storage with TokenEmb when TieEmbed.
+	// MTP is a multi-token-prediction draft head (MiMo-7B's mtp_layers.0),
+	// nil when the checkpoint has none; LastHidden is the final normed
+	// hidden state of the latest forward (B, T, D), which it consumes.
+	MTP        *MTPHead
+	LastHidden *tensor.Tensor
+	LMHead     *nn.Linear // (V, D); shares storage with TokenEmb when TieEmbed.
 
 	scale      *tensor.Tensor // (1,) F32 = 1/sqrt(HeadDim) on dev
 	scaleDev   device.Device
@@ -357,6 +362,37 @@ func NewKVCache(numLayers int) *KVCache {
 
 // Reset empties the cache (frees stored K/V and linear-attention state).
 // Call between independent prompts to reuse the same cache struct.
+// Truncate drops every cached position from n on (speculative decoding
+// rolls back a rejected draft this way). Only key / value caches can be
+// truncated; recurrent state (Conv / Rec) cannot be un-stepped.
+func (c *KVCache) Truncate(n int) error {
+	if n < 0 || n > c.Len {
+		return fmt.Errorf("KVCache.Truncate: %d outside [0, %d]", n, c.Len)
+	}
+	for i := range c.Conv {
+		if c.Conv[i] != nil || c.Rec[i] != nil {
+			return fmt.Errorf("KVCache.Truncate: layer %d carries recurrent state", i)
+		}
+	}
+	for i, k := range c.K {
+		if k == nil {
+			continue
+		}
+		if k.Dim(2) != c.Len {
+			return fmt.Errorf("KVCache.Truncate: layer %d holds %d positions of %d (sliding window)", i, k.Dim(2), c.Len)
+		}
+		var err error
+		if c.K[i], err = narrowContig(k, 2, 0, n); err != nil {
+			return err
+		}
+		if c.V[i], err = narrowContig(c.V[i], 2, 0, n); err != nil {
+			return err
+		}
+	}
+	c.Len = n
+	return nil
+}
+
 func (c *KVCache) Reset() {
 	for i := range c.K {
 		c.K[i] = nil
@@ -573,6 +609,7 @@ func (m *Llama) ForwardEmbeds(h *tensor.Tensor, cache *KVCache) (*tensor.Tensor,
 	if cache != nil && !(m.diffBlock > 0 && !m.diffStore) {
 		cache.Len = prior + T
 	}
+	m.LastHidden = h                   // the LM head's input; an MTP draft head reads it
 	logits, err := m.LMHead.Forward(h) // (B, T, V)
 	if err != nil {
 		return nil, err
