@@ -147,14 +147,26 @@ func matmulQCPU(ctx *registry.Context) error {
 	raw := w.Storage().CPUBytes()[w.DType().ByteSize(w.Offset()):]
 	rowBytes := w.DType().ByteSize(K)
 	xs := asSlice[float32](x)[x.Offset():]
+	_, fast := ggufAVX2[w.DType()]
+	fast = fast && decodeAVX2
 	rowsTimesX(xs, asSlice[float32](out), M, K, N, func(n int, dst []float32) {
 		r := raw[n*rowBytes:]
+		if fast {
+			var ds [2048]float32 // block scales (K ≤ 65536)
+			if K/32 <= len(ds) {
+				decodeRowAVX2(w.DType(), r, K, dst, ds[:])
+				return
+			}
+		}
 		for b := 0; b < K/dec.elems; b++ {
 			dec.decode(r[b*dec.bytes:], dst[b*dec.elems:])
 		}
 	})
 	return nil
 }
+
+// ggufAVX2 lists the formats decodeRowAVX2 handles.
+var ggufAVX2 = map[dtype.DType]bool{dtype.Q8_0: true, dtype.Q4_0: true, dtype.Q5_0: true, dtype.Q4_K: true, dtype.Q6_K: true}
 
 // int4MatMulCPU is ops.MatMulInt4's kernel on the CPU for any M: x (M, K)
 // F32 times quant.Int4 (codes U32 (N, K/8), scales / zeros F32 (N, K/G))
@@ -168,6 +180,10 @@ func int4MatMulCPU(ctx *registry.Context) error {
 	xs := asSlice[float32](x)[x.Offset():]
 	ng := K / G
 	rowsTimesX(xs, asSlice[float32](out), M, K, N, func(n int, dst []float32) {
+		if decodeAVX2 && G%8 == 0 {
+			int4RowAVX2(&cs[n*(K/8)], &ss[n*ng], &zs[n*ng], &dst[0], ng, G/8)
+			return
+		}
 		words := cs[n*(K/8):]
 		for g := range ng {
 			s, z := ss[n*ng+g], zs[n*ng+g]
@@ -180,4 +196,51 @@ func int4MatMulCPU(ctx *registry.Context) error {
 		}
 	})
 	return nil
+}
+
+// decodeRowAVX2 decodes a GGUF weight row of K elements with the AVX2
+// decoders (bit-identical to the Go ones); ds needs K/32 floats of scratch.
+// It reports false for formats without one.
+func decodeRowAVX2(dt dtype.DType, raw []byte, K int, dst, ds []float32) bool {
+	switch dt {
+	case dtype.Q8_0, dtype.Q4_0, dtype.Q5_0:
+		bb := map[dtype.DType]int{dtype.Q8_0: 34, dtype.Q4_0: 18, dtype.Q5_0: 22}[dt]
+		nb := K / 32
+		for b := range nb {
+			ds[b] = f16(raw[b*bb:])
+		}
+		switch dt {
+		case dtype.Q8_0:
+			q8_0RowAVX2(&raw[0], &ds[0], &dst[0], nb)
+		case dtype.Q4_0:
+			q4_0RowAVX2(&raw[0], &ds[0], &dst[0], nb)
+		default:
+			q5_0RowAVX2(&raw[0], &ds[0], &dst[0], nb)
+		}
+		return true
+	case dtype.Q4_K:
+		var sc, mn [8]float32
+		for b := 0; b < K/256; b++ {
+			blk := raw[b*144:]
+			d, dmin := f16(blk[0:2]), f16(blk[2:4])
+			for j := range 8 {
+				s, m := scaleMinK4(j, blk[4:16])
+				sc[j], mn[j] = d*float32(s), dmin*float32(m)
+			}
+			q4KBlockAVX2(&blk[16], &sc[0], &mn[0], &dst[b*256])
+		}
+		return true
+	case dtype.Q6_K:
+		var sc [16]float32
+		for b := 0; b < K/256; b++ {
+			blk := raw[b*210:]
+			d := f16(blk[208:210])
+			for j := range 16 {
+				sc[j] = d * float32(int8(blk[192+j]))
+			}
+			q6KBlockAVX2(&blk[0], &blk[128], &sc[0], &dst[b*256])
+		}
+		return true
+	}
+	return false
 }
