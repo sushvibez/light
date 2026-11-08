@@ -38,12 +38,24 @@ type Gemma3Config struct {
 	AttnLogitSoftcap   float64 // 0 = none (Gemma 3); 50 for Gemma 2
 	NoQKNorm           bool    // Gemma 2 has no q_norm / k_norm (Gemma 3 does)
 	WeightDType        dtype.DType
+
+	// Muse Glimmer (meta-models/Muse-Glimmer-30B) runs on this skeleton
+	// with the following switches; all zero for Gemma 2 / 3.
+	EmbedNorm        bool      // weightless RMSNorm after the lookup instead of the √D scale
+	LayerRopeBase    []float64 // per-layer RoPE base, 0 = NoPE; nil = RopeBase / RopeLocalBase
+	AttnOutputGate   bool      // ctx ⊙ sigmoid(gate_proj(h)) before o_proj (h = the normed layer input)
+	QScale           float64   // q multiplied after its norm (Muse Glimmer qk_scale_factor 3.87); 0 = 1
+	SiLUMLP          bool      // SiLU-gated MLP (Gemma: GELU-tanh)
+	PostNormEps      float64   // eps of the post-attention / post-FFN norms; 0 = RmsEps
+	OutputMultiplier float64   // logits scaled before the softcap; 0 = 1
+	UntiedHead       bool      // separate lm_head (Gemma ties it to the embedding)
 }
 
 type gemmaBlock struct {
 	InNorm, PostAttnNorm, PreFFNorm, PostFFNorm *nn.RMSNorm // F32 weights holding (1+w)
 	QNorm, KNorm                                *nn.RMSNorm // over HeadDim
 	QProj, KProj, VProj, OProj                  *nn.Linear
+	AttnGate                                    *nn.Linear // Muse Glimmer output gate; nil otherwise
 	GateProj, UpProj, DownProj                  *nn.Linear
 	sliding                                     bool
 }
@@ -57,6 +69,7 @@ type Gemma3 struct {
 	LMHead    *nn.Linear // tied to TokenEmb
 
 	embScale  *tensor.Tensor // (1,) √D rounded to the activation dtype
+	embNorm   *nn.RMSNorm    // weightless (ones) RMSNorm on the embedding, when Cfg.EmbedNorm
 	attnScale *tensor.Tensor // (1,) QueryPreAttnScalar^-½
 	masks     map[[3]int]*tensor.Tensor
 	masksDev  device.Device
@@ -98,6 +111,11 @@ func NewGemma3(cfg Gemma3Config, dev device.Device) (*Gemma3, error) {
 		return nil, err
 	}
 	norm := func(n int) (*nn.RMSNorm, error) { return nn.NewRMSNormWithDType(n, cfg.RmsEps, dtype.F32, dev) }
+	postEps := cfg.RmsEps
+	if cfg.PostNormEps > 0 {
+		postEps = cfg.PostNormEps
+	}
+	postNorm := func(n int) (*nn.RMSNorm, error) { return nn.NewRMSNormWithDType(n, postEps, dtype.F32, dev) }
 	lin := func(in, out int) (*nn.Linear, error) { return nn.NewLinearUninit(in, out, false, act, dev) }
 	blocks := make([]*gemmaBlock, cfg.NumLayers)
 	for i := range blocks {
@@ -110,11 +128,11 @@ func NewGemma3(cfg Gemma3Config, dev device.Device) (*Gemma3, error) {
 		}
 		b.InNorm, err = norm(D)
 		push(err)
-		b.PostAttnNorm, err = norm(D)
+		b.PostAttnNorm, err = postNorm(D)
 		push(err)
 		b.PreFFNorm, err = norm(D)
 		push(err)
-		b.PostFFNorm, err = norm(D)
+		b.PostFFNorm, err = postNorm(D)
 		push(err)
 		if !cfg.NoQKNorm {
 			b.QNorm, err = norm(HD)
@@ -130,6 +148,10 @@ func NewGemma3(cfg Gemma3Config, dev device.Device) (*Gemma3, error) {
 		push(err)
 		b.OProj, err = lin(NH*HD, D)
 		push(err)
+		if cfg.AttnOutputGate {
+			b.AttnGate, err = lin(D, NH*HD)
+			push(err)
+		}
 		b.GateProj, err = lin(D, IM)
 		push(err)
 		b.UpProj, err = lin(D, IM)
@@ -145,9 +167,20 @@ func NewGemma3(cfg Gemma3Config, dev device.Device) (*Gemma3, error) {
 	if err != nil {
 		return nil, err
 	}
-	head, err := nn.NewLinearTied(emb.Weight, false, dev)
+	var head *nn.Linear
+	if cfg.UntiedHead {
+		head, err = lin(D, cfg.VocabSize)
+	} else {
+		head, err = nn.NewLinearTied(emb.Weight, false, dev)
+	}
 	if err != nil {
 		return nil, err
+	}
+	var embNorm *nn.RMSNorm
+	if cfg.EmbedNorm {
+		if embNorm, err = norm(D); err != nil { // ones: weightless
+			return nil, err
+		}
 	}
 	scalar := func(v float64) (*tensor.Tensor, error) {
 		t, err := tensor.New([]float32{float32(v)}, []int{1}, dev)
@@ -172,7 +205,7 @@ func NewGemma3(cfg Gemma3Config, dev device.Device) (*Gemma3, error) {
 		return nil, err
 	}
 	return &Gemma3{Cfg: cfg, TokenEmb: emb, Blocks: blocks, FinalNorm: fn, LMHead: head,
-		embScale: embScale, attnScale: attnScale}, nil
+		embScale: embScale, embNorm: embNorm, attnScale: attnScale}, nil
 }
 
 func (m *Gemma3) NumLayers() int     { return m.Cfg.NumLayers }
@@ -180,7 +213,7 @@ func (m *Gemma3) VocabSize() int     { return m.Cfg.VocabSize }
 func (m *Gemma3) MaxContext() int    { return m.Cfg.MaxPosition }
 func (m *Gemma3) SlidingWindow() int { return m.Cfg.SlidingWindow }
 
-// Parameters lists every weight once (the LM head is tied).
+// Parameters lists every weight once (the LM head is tied unless UntiedHead).
 func (m *Gemma3) Parameters() []*tensor.Tensor {
 	ps := []*tensor.Tensor{m.TokenEmb.Weight}
 	for _, b := range m.Blocks {
@@ -189,9 +222,14 @@ func (m *Gemma3) Parameters() []*tensor.Tensor {
 				ps = append(ps, n.Weight)
 			}
 		}
-		for _, l := range []*nn.Linear{b.QProj, b.KProj, b.VProj, b.OProj, b.GateProj, b.UpProj, b.DownProj} {
-			ps = append(ps, l.W)
+		for _, l := range []*nn.Linear{b.QProj, b.KProj, b.VProj, b.OProj, b.AttnGate, b.GateProj, b.UpProj, b.DownProj} {
+			if l != nil {
+				ps = append(ps, l.W)
+			}
 		}
+	}
+	if m.Cfg.UntiedHead {
+		ps = append(ps, m.LMHead.W)
 	}
 	return append(ps, m.FinalNorm.Weight)
 }
@@ -230,7 +268,12 @@ func (m *Gemma3) ForwardWithCache(tokens *tensor.Tensor, cache *KVCache) (*tenso
 	if err != nil {
 		return nil, err
 	}
-	if h, err = ops.Mul(h, m.embScale); err != nil {
+	if m.embNorm != nil {
+		h, err = m.embNorm.Forward(h)
+	} else {
+		h, err = ops.Mul(h, m.embScale)
+	}
+	if err != nil {
 		return nil, err
 	}
 	posData := make([]int64, T)
@@ -261,12 +304,42 @@ func (m *Gemma3) ForwardWithCache(tokens *tensor.Tensor, cache *KVCache) (*tenso
 			return nil, err
 		}
 	}
+	if mult := m.Cfg.OutputMultiplier; mult != 0 && mult != 1 {
+		s, err := tensor.New([]float32{float32(mult)}, []int{1}, logits.Device())
+		if err != nil {
+			return nil, err
+		}
+		if logits, err = ops.Mul(logits, s); err != nil {
+			return nil, err
+		}
+	}
 	if c := m.Cfg.FinalLogitSoftcap; c > 0 {
 		if logits, err = softcap(logits, c); err != nil {
 			return nil, err
 		}
 	}
 	return logits, nil
+}
+
+// mulScalarF32 returns x · s with the product formed in F32 and rounded
+// once to x's dtype.
+func mulScalarF32(x *tensor.Tensor, s float64) (*tensor.Tensor, error) {
+	st, err := tensor.New([]float32{float32(s)}, []int{1}, x.Device())
+	if err != nil {
+		return nil, err
+	}
+	if x.DType() == dtype.F32 {
+		return ops.Mul(x, st)
+	}
+	dt := x.DType()
+	x32, err := ops.Cast(x, dtype.F32)
+	if err != nil {
+		return nil, err
+	}
+	if x32, err = ops.Mul(x32, st); err != nil {
+		return nil, err
+	}
+	return ops.Cast(x32, dt)
 }
 
 // softcap returns c·tanh(x/c).
@@ -336,17 +409,29 @@ func (m *Gemma3) runBlock(blk *gemmaBlock, x *tensor.Tensor, B, T int, pos *tens
 			return nil, err
 		}
 	}
+	if s := cfg.QScale; s != 0 && s != 1 {
+		// In F32, as transformers' q * qk_scale_factor (a BF16 scalar
+		// would round 3.87 to 3.875 and bias every score by 0.13 %).
+		if q, err = mulScalarF32(q, s); err != nil {
+			return nil, err
+		}
+	}
 	base := cfg.RopeBase
 	window := 0
 	if blk.sliding {
 		base = cfg.RopeLocalBase
 		window = cfg.SlidingWindow
 	}
-	if q, err = m.rope(q, pos, base, blk.sliding); err != nil {
-		return nil, err
+	if cfg.LayerRopeBase != nil {
+		base = cfg.LayerRopeBase[layer]
 	}
-	if k, err = m.rope(k, pos, base, blk.sliding); err != nil {
-		return nil, err
+	if base != 0 { // 0: NoPE layer (Muse Glimmer's global layers)
+		if q, err = m.rope(q, pos, base, blk.sliding); err != nil {
+			return nil, err
+		}
+		if k, err = m.rope(k, pos, base, blk.sliding); err != nil {
+			return nil, err
+		}
 	}
 
 	kvPrior := 0
@@ -435,6 +520,18 @@ func (m *Gemma3) runBlock(blk *gemmaBlock, x *tensor.Tensor, B, T int, pos *tens
 	if ctx, err = autograd.Reshape(ctx, B, T, NH*HD); err != nil {
 		return nil, err
 	}
+	if blk.AttnGate != nil {
+		gt, err := blk.AttnGate.Forward(h)
+		if err != nil {
+			return nil, err
+		}
+		if gt, err = ops.Sigmoid(gt); err != nil {
+			return nil, err
+		}
+		if ctx, err = ops.Mul(ctx, gt); err != nil {
+			return nil, err
+		}
+	}
 	o, err := blk.OProj.Forward(ctx)
 	if err != nil {
 		return nil, err
@@ -446,7 +543,8 @@ func (m *Gemma3) runBlock(blk *gemmaBlock, x *tensor.Tensor, B, T int, pos *tens
 		return nil, err
 	}
 
-	// MLP: down(gelu_tanh(gate(h)) ⊙ up(h)), post-normed before the residual.
+	// MLP: down(act(gate(h)) ⊙ up(h)) with act GELU-tanh (SiLU for Muse
+	// Glimmer), post-normed before the residual.
 	if h, err = blk.PreFFNorm.Forward(x); err != nil {
 		return nil, err
 	}
@@ -454,7 +552,12 @@ func (m *Gemma3) runBlock(blk *gemmaBlock, x *tensor.Tensor, B, T int, pos *tens
 	if err != nil {
 		return nil, err
 	}
-	if gate, err = ops.Gelu(gate); err != nil {
+	if cfg.SiLUMLP {
+		gate, err = ops.SiLU(gate)
+	} else {
+		gate, err = ops.Gelu(gate)
+	}
+	if err != nil {
 		return nil, err
 	}
 	up, err := blk.UpProj.Forward(h)
