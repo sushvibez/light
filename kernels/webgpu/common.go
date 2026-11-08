@@ -1,4 +1,4 @@
-//go:build webgpu
+//go:build !nowebgpu
 
 package webgpu
 
@@ -10,7 +10,7 @@ import (
 	"light/internal/wgpudev"
 	"light/tensor"
 
-	"github.com/cogentcore/webgpu/wgpu"
+	"light/internal/gpu"
 )
 
 const wgSize = 256
@@ -19,14 +19,14 @@ const wgSize = 256
 func dev() (*wgpudev.Device, error) { return wgpudev.Get() }
 
 // raw returns the wgpu buffer backing t's storage.
-func raw(t *tensor.Tensor) *wgpu.Buffer { return t.Storage().WebGPUBuffer().Buf }
+func raw(t *tensor.Tensor) *gpu.Buffer { return t.Storage().WebGPUBuffer().Buf }
 
 // rd / rw / uni build Binding entries.
-func rd(b *wgpu.Buffer) wgpudev.Binding { return wgpudev.Binding{Kind: wgpudev.ReadStorage, Buf: b} }
-func rw(b *wgpu.Buffer) wgpudev.Binding {
+func rd(b *gpu.Buffer) wgpudev.Binding { return wgpudev.Binding{Kind: wgpudev.ReadStorage, Buf: b} }
+func rw(b *gpu.Buffer) wgpudev.Binding {
 	return wgpudev.Binding{Kind: wgpudev.ReadWriteStorage, Buf: b}
 }
-func uni(b *wgpu.Buffer) wgpudev.Binding { return wgpudev.Binding{Kind: wgpudev.Uniform, Buf: b} }
+func uni(b *gpu.Buffer) wgpudev.Binding { return wgpudev.Binding{Kind: wgpudev.Uniform, Buf: b} }
 
 func f32bits(f float32) uint32 { return math.Float32bits(f) }
 

@@ -40,6 +40,19 @@ Google SentencePiece — https://github.com/google/sentencepiece
     Apache-2.0. tokenizer/spm_model.go reads its model protobuf and
     reproduces its unigram segmentation.
 
+gfx — https://github.com/sushvibez/gfx
+    Apache-2.0. internal/ffi and internal/gpu are vendored from its ffi and
+    gpu packages (run-time loading of native libraries without cgo, and
+    WebGPU bindings over wgpu-native's webgpu.h).
+
+purego — https://github.com/ebitengine/purego
+    Apache-2.0. Used by internal/ffi to load shared libraries on Linux and
+    macOS without cgo.
+
+wgpu-native — https://github.com/gfx-rs/wgpu-native
+    MIT / Apache-2.0. Loaded at run time by the WebGPU backend; fetched by
+    scripts/fetch-wgpu.sh, not distributed with this repository.
+
 NVIDIA CUDA Toolkit, cuBLAS, cuBLASLt and cuDNN are used through their C
 APIs under the NVIDIA Software License Agreement; they are not distributed
 with this repository.

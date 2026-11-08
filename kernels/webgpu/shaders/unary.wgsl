@@ -11,6 +11,13 @@ const Y_STRIDE: u32 = 65535u * 256u;
 const SQRT_2_OVER_PI: f32 = 0.7978845608;
 const GELU_COEFF: f32 = 0.044715;
 
+// tanh with the argument clamped to ±15, where tanh is ±1 to f32 precision.
+// The builtin is not safe everywhere: on D3D12 (HLSL tanh) some drivers
+// return NaN for large inputs (seen on Intel graphics: GPT-2's GELU).
+fn safe_tanh(x: f32) -> f32 {
+    return tanh(clamp(x, -15.0, 15.0));
+}
+
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x + gid.y * Y_STRIDE;
@@ -19,14 +26,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     switch params.x {
         case 0u:  { out[idx] = max(x, 0.0); }
         case 1u:  { out[idx] = 1.0 / (1.0 + exp(-x)); }
-        case 2u:  { out[idx] = tanh(x); }
+        case 2u:  { out[idx] = safe_tanh(x); }
         case 3u:  { out[idx] = -x; }
         case 4u:  { out[idx] = exp(x); }
         case 5u:  { out[idx] = log(x); }
         case 6u:  { out[idx] = sqrt(x); }
         case 7u:  {
             let inner = SQRT_2_OVER_PI * (x + GELU_COEFF * x * x * x);
-            out[idx] = 0.5 * x * (1.0 + tanh(inner));
+            out[idx] = 0.5 * x * (1.0 + safe_tanh(inner));
         }
         case 8u:  { out[idx] = x / (1.0 + exp(-x)); }
         case 9u:  { out[idx] = abs(x); }

@@ -10,7 +10,7 @@
 //	go run            ./examples/25_gpt2_pretrained
 //	go run            ./examples/25_gpt2_pretrained
 //	go run            ./examples/25_gpt2_pretrained -prompt "The capital of France is" -tokens 12
-//	go run -tags webgpu ./examples/25_gpt2_pretrained -device webgpu -prompt "The capital of France is" -tokens 8
+//	go run ./examples/25_gpt2_pretrained -device webgpu -prompt "The capital of France is" -tokens 8
 package main
 
 import (
@@ -47,7 +47,7 @@ func main() {
 	case "webgpu":
 		g, err := device.WebGPU(0)
 		if err != nil {
-			log.Fatalf("WebGPU unavailable (build with -tags webgpu): %v", err)
+			log.Fatalf("WebGPU unavailable (scripts/fetch-wgpu.sh fetches wgpu-native): %v", err)
 		}
 		dev = g
 	case "cpu":

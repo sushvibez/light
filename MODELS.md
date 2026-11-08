@@ -312,7 +312,7 @@ Runner-ups: Nemotron-3.5-Embed-1B (after a Ministral-3 backbone), WeVisOne-VL-2B
 | FlashAttention | Long-context decode | ✅ `ops.FlashAttention` (CUDA tiled, 16× over SDPA at S=1024) |
 | Sliding-window attention | Mistral, Gemma 2 | ✅ done 2026-10-28 (`LlamaConfig.SlidingWindow`, `SlidingLayers`; rotating KV cache) |
 | RoPE scaling (llama3) | Llama-3.1+ | ✅ `models.RopeScaling`; LongRoPE (Phi-3 / Phi-4-mini) done |
-| WebGPU device | non-NVIDIA GPUs | ✅ `-tags webgpu`; F32 only; GPT-2 verified |
+| WebGPU device | non-NVIDIA GPUs | ✅ every build (wgpu-native loaded at run time, no cgo); F32 only; GPT-2 verified |
 | Tied LM head | GPT-2, GPT-J, many transformers | ✅ done (`GPT2Config.Tied`) |
 | Sharded safetensors (`model.safetensors.index.json`) | Llama-2 7B+, GPT-2 large+, Qwen2.5-3B+ | ✅ done (`hub.DownloadModelSafetensors` + `safetensors.LoadFiles`); also reads HF Python cache layout (`refs/<rev>` + `snapshots/<sha>/`) |
 | RoPE | Llama family | ✅ done (`ops.RoPE`, CPU + CUDA) |
@@ -340,7 +340,7 @@ Runner-ups: Nemotron-3.5-Embed-1B (after a Ministral-3 backbone), WeVisOne-VL-2B
 | Llama-3.2-1B-Instruct (BF16) | prompt + decode | 1 235.81 M | ~34 tok/s | same with `-bf16` |
 | bge-small-en-v1.5 (BERT) | 10 sentences | 33.4 M | — | `examples/40_bert_embeddings`; max abs err 7.8e-7 vs PyTorch |
 | Stable Diffusion 1.5 (BF16) | 512×512, DDIM | ~1 B | — | `examples/37_sd15_txt2img` |
-| GPT-2 small on WebGPU | 1×16 | 124.44 M | ~2× slower than cuBLAS | `examples/25_gpt2_pretrained -device webgpu` (`-tags webgpu`) |
+| GPT-2 small on WebGPU | 1×16 | 124.44 M | ~2× slower than cuBLAS | `examples/25_gpt2_pretrained -device webgpu` |
 | Phi-3.5-mini-instruct (BF16) | 10-token chat + decode | 3 821.08 M | 164 ms prefill + 15 tok/s | `examples/35_qwen_inference -repo microsoft/Phi-3.5-mini-instruct -bf16` (7.6 GB GPU) |
 | Qwen2-0.5B-Instruct **GGUF Q8_0 / Q4_K_M** | 15-token chat + decode | 494.03 M | 235 ms prefill + 17 tok/s | `examples/35_qwen_inference -gguf ~/.cache/light/gguf/qwen2-0.5b-instruct-q4_k_m.gguf` (0.4 GB + F32 embedding); logits within 0.05 (Q8_0) / 0.4 (Q4_K_M) of F32 |
 | Llama-3.2-1B-Instruct **GGUF Q4_K_M** | 17-token chat + decode | 1 235.81 M | 501 ms prefill + 14 tok/s | `-gguf ~/.cache/light/gguf/llama-3.2-1b-instruct-q4_k_m.gguf -repo meta-llama/Llama-3.2-1B-Instruct`; same top-3 as F32, greedy identical |

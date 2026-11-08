@@ -1,47 +1,50 @@
-//go:build webgpu
+//go:build !nowebgpu
 
 package wgpudev
 
 import (
 	"fmt"
-	"runtime"
+	"os"
+	"path/filepath"
 	"sync"
-	"time"
 
-	"github.com/cogentcore/webgpu/wgpu"
+	"light/internal/gpu"
 )
 
 // Device is the singleton WebGPU context.
 type Device struct {
-	Instance *wgpu.Instance
-	Adapter  *wgpu.Adapter
-	Device   *wgpu.Device
-	Queue    *wgpu.Queue
+	Instance *gpu.Instance
+	Adapter  *gpu.Adapter
+	Device   *gpu.Device
+	Queue    *gpu.Queue
 
-	// AdapterName is the adapter's reported name (e.g. "NVIDIA GeForce ...").
+	// AdapterName is the adapter's reported name (e.g. "Intel(R) Arc(TM) ...").
 	AdapterName string
-	// BackendName is the wgpu backend in use (Vulkan, Metal, DX12, ...).
+	// BackendName is the wgpu backend in use (Vulkan, Metal, D3D12, ...).
 	BackendName string
+	// Library is the wgpu-native shared library that was loaded.
+	Library string
 
 	// MaxBufferSize is the granted per-buffer byte cap; allocations above it
-	// fail with a clear error instead of an opaque wgpu validation error.
+	// fail with a clear error instead of an invalid buffer.
 	MaxBufferSize uint64
 	// MaxStorageBufferBindingSize is the granted cap on a single storage
 	// binding — a buffer larger than this can be allocated but not bound.
 	MaxStorageBufferBindingSize uint64
-	// MaxWorkgroupsPerDim is the granted cap on workgroups per dispatch axis.
+	// MaxWorkgroupsPerDim is the cap on workgroups per dispatch axis
+	// (WebGPU's default, 65535).
 	MaxWorkgroupsPerDim uint32
 
 	mu        sync.Mutex // guards everything below plus submit ordering
-	shaders   map[string]*wgpu.ShaderModule
+	shaders   map[string]*gpu.ShaderModule
 	pipelines map[string]*pipelineEntry
 	pending   int
 	pool      *pool
 }
 
 type pipelineEntry struct {
-	pipeline *wgpu.ComputePipeline
-	layout   *wgpu.BindGroupLayout
+	pipeline *gpu.ComputePipeline
+	layout   *gpu.BindGroupLayout
 }
 
 // maxPendingSubmits bounds the number of queued, unpolled submissions before
@@ -50,21 +53,15 @@ type pipelineEntry struct {
 // freed buffers.
 const maxPendingSubmits = 64
 
-// requestedBufferCap is the per-buffer limit we ask the device for. Measured
-// on an RTX 5060 Ti with wgpu-native 0.23: 2 GiB is granted and both
-// allocates and binds; 4 GiB-1 is refused; >= 4 GiB allocates but cannot be
-// bound as a storage buffer. The adapter advertises a u64::MAX sentinel for
-// MaxBufferSize which the device request rejects, so an explicit value is
-// required to get past the 256 MiB WebGPU default.
-const requestedBufferCap = 2 << 30
-
 var (
 	global   *Device
 	initOnce sync.Once
 	initErr  error
 )
 
-// Get returns the singleton device, opening it on first use.
+// Get returns the singleton device, opening it on first use: wgpu-native is
+// loaded at run time (no cgo), from the first of LibraryCandidates that
+// loads.
 func Get() (*Device, error) {
 	initOnce.Do(func() {
 		global, initErr = open()
@@ -72,68 +69,69 @@ func Get() (*Device, error) {
 	return global, initErr
 }
 
-func open() (*Device, error) {
-	// A nil descriptor on purpose: cogentcore/webgpu v0.23.0 mallocs the
-	// WGPUInstanceExtras chain without zeroing it, so a non-nil descriptor
-	// hands wgpu-native garbage in `flags`/`gles3MinorVersion` and the
-	// process intermittently aborts with "Unknown gles3 minor version".
-	instance := wgpu.CreateInstance(nil)
-	if instance == nil {
-		return nil, fmt.Errorf("wgpudev: failed to create WebGPU instance")
+// libName is wgpu-native's file name on this platform.
+func libName() string { return gpu.DefaultLibNames()[0] }
+
+// LibraryCandidates lists where wgpu-native is looked for, in order:
+// $LIGHT_WGPU_LIB (a file path), next to the executable,
+// ~/.cache/light/wgpu/, then the bare name (the system search path).
+func LibraryCandidates() []string {
+	var out []string
+	if p := os.Getenv("LIGHT_WGPU_LIB"); p != "" {
+		out = append(out, p)
 	}
-	adapter, err := instance.RequestAdapter(&wgpu.RequestAdapterOptions{
-		PowerPreference: wgpu.PowerPreferenceHighPerformance,
-	})
+	if exe, err := os.Executable(); err == nil {
+		out = append(out, filepath.Join(filepath.Dir(exe), libName()))
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		out = append(out, filepath.Join(home, ".cache", "light", "wgpu", libName()))
+	}
+	return append(out, libName())
+}
+
+func open() (*Device, error) {
+	cands := LibraryCandidates()
+	var lib string
+	for _, c := range cands {
+		if c == libName() {
+			lib = c // the system search path: let the loader decide
+			break
+		}
+		if _, err := os.Stat(c); err == nil {
+			lib = c
+			break
+		}
+	}
+	instance, err := gpu.NewInstance(lib)
+	if err != nil {
+		return nil, fmt.Errorf("wgpudev: cannot load %s (looked in %v; scripts/fetch-wgpu.sh fetches it): %w", libName(), cands, err)
+	}
+	adapter, err := instance.RequestAdapter(nil)
 	if err != nil {
 		instance.Release()
 		return nil, fmt.Errorf("wgpudev: no WebGPU adapter: %w", err)
 	}
-	info := adapter.GetInfo()
-	adapterLimits := adapter.GetLimits().Limits
-
-	// Start from the WebGPU defaults and raise only what we need. Passing
-	// the raw adapter limits fails validation (several are u64::MAX
-	// sentinels), which silently leaves the 256 MiB default in place.
-	req := wgpu.DefaultLimits()
-	want := uint64(requestedBufferCap)
-	if adapterLimits.MaxStorageBufferBindingSize > 0 && adapterLimits.MaxStorageBufferBindingSize < want {
-		want = adapterLimits.MaxStorageBufferBindingSize
-	}
-	req.MaxBufferSize = want
-	req.MaxStorageBufferBindingSize = want
-	if adapterLimits.MaxComputeWorkgroupsPerDimension > 0 && adapterLimits.MaxComputeWorkgroupsPerDimension != wgpu.LimitU32Undefined {
-		req.MaxComputeWorkgroupsPerDimension = adapterLimits.MaxComputeWorkgroupsPerDimension
-	}
-
-	device, err := adapter.RequestDevice(&wgpu.DeviceDescriptor{
-		Label:          "light",
-		RequiredLimits: &wgpu.RequiredLimits{Limits: req},
-	})
+	device, err := adapter.RequestDevice()
 	if err != nil {
-		// Retry with the plain defaults so a conservative adapter still works.
-		device, err = adapter.RequestDevice(&wgpu.DeviceDescriptor{Label: "light"})
-		if err != nil {
-			adapter.Release()
-			instance.Release()
-			return nil, fmt.Errorf("wgpudev: request device: %w", err)
-		}
+		adapter.Release()
+		instance.Release()
+		return nil, fmt.Errorf("wgpudev: request device: %w", err)
 	}
-	granted := device.GetLimits().Limits
+	name, backend := adapter.Info()
+	lim := device.Limits()
 	d := &Device{
 		Instance:                    instance,
 		Adapter:                     adapter,
 		Device:                      device,
-		Queue:                       device.GetQueue(),
-		AdapterName:                 info.Name,
-		BackendName:                 info.BackendType.String(),
-		MaxBufferSize:               granted.MaxBufferSize,
-		MaxStorageBufferBindingSize: granted.MaxStorageBufferBindingSize,
-		MaxWorkgroupsPerDim:         granted.MaxComputeWorkgroupsPerDimension,
-		shaders:                     make(map[string]*wgpu.ShaderModule),
+		Queue:                       device.Queue(),
+		AdapterName:                 name,
+		BackendName:                 backend,
+		Library:                     lib,
+		MaxBufferSize:               uint64(lim.MaxBufferSize),
+		MaxStorageBufferBindingSize: uint64(lim.MaxStorageBindingSize),
+		MaxWorkgroupsPerDim:         65535,
+		shaders:                     make(map[string]*gpu.ShaderModule),
 		pipelines:                   make(map[string]*pipelineEntry),
-	}
-	if d.MaxWorkgroupsPerDim == 0 || d.MaxWorkgroupsPerDim == wgpu.LimitU32Undefined {
-		d.MaxWorkgroupsPerDim = 65535
 	}
 	d.pool = newPool(d)
 	return d, nil
@@ -154,9 +152,8 @@ func (d *Device) CheckSize(n uint64) error {
 }
 
 // submitLocked queues a command buffer and lazily flushes. Caller holds d.mu.
-func (d *Device) submitLocked(cmd *wgpu.CommandBuffer) {
-	d.Queue.Submit(cmd)
-	cmd.Release()
+func (d *Device) submitLocked(cmd *gpu.CommandBuffer) {
+	d.Queue.Submit(cmd) // releases cmd
 	d.pending++
 	if d.pending >= maxPendingSubmits {
 		d.flushLocked()
@@ -168,11 +165,7 @@ func (d *Device) flushLocked() {
 	if d.pending == 0 {
 		return
 	}
-	if !d.Device.Poll(true, nil) {
-		for !d.Device.Poll(false, nil) {
-			runtime.Gosched()
-		}
-	}
+	d.Device.Poll(true)
 	d.pending = 0
 }
 
@@ -189,18 +182,19 @@ func (d *Device) Synchronize() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.flushLocked()
-	d.Device.Poll(true, nil)
+	d.Device.Poll(true)
 }
 
 // shaderLocked returns the cached module for name, compiling code on first use.
-func (d *Device) shaderLocked(name, code string) (*wgpu.ShaderModule, error) {
+func (d *Device) shaderLocked(name, code string) (*gpu.ShaderModule, error) {
 	if sm, ok := d.shaders[name]; ok {
 		return sm, nil
 	}
-	sm, err := d.Device.CreateShaderModule(&wgpu.ShaderModuleDescriptor{
-		Label:          name,
-		WGSLDescriptor: &wgpu.ShaderModuleWGSLDescriptor{Code: code},
-	})
+	before := gpu.ErrorCount()
+	sm, err := d.Device.CreateShaderModuleWGSL(name, code)
+	if err == nil && gpu.ErrorCount() != before {
+		err = fmt.Errorf("validation failed (details on stderr)")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("wgpudev: compile shader %q: %w", name, err)
 	}
@@ -208,9 +202,10 @@ func (d *Device) shaderLocked(name, code string) (*wgpu.ShaderModule, error) {
 	return sm, nil
 }
 
-// pipelineLocked returns the cached pipeline for name, building the bind
-// group layout from the binding kinds on first use.
-func (d *Device) pipelineLocked(name, code string, kinds []BindKind) (*pipelineEntry, error) {
+// pipelineLocked returns the cached pipeline for name. The bind group layout
+// is derived from the shader (every declared binding must be used, as
+// Light's shaders do).
+func (d *Device) pipelineLocked(name, code string) (*pipelineEntry, error) {
 	if pe, ok := d.pipelines[name]; ok {
 		return pe, nil
 	}
@@ -218,54 +213,21 @@ func (d *Device) pipelineLocked(name, code string, kinds []BindKind) (*pipelineE
 	if err != nil {
 		return nil, err
 	}
-	entries := make([]wgpu.BindGroupLayoutEntry, len(kinds))
-	for i, k := range kinds {
-		var bt wgpu.BufferBindingType
-		switch k {
-		case ReadStorage:
-			bt = wgpu.BufferBindingTypeReadOnlyStorage
-		case ReadWriteStorage:
-			bt = wgpu.BufferBindingTypeStorage
-		case Uniform:
-			bt = wgpu.BufferBindingTypeUniform
-		}
-		entries[i] = wgpu.BindGroupLayoutEntry{
-			Binding:    uint32(i),
-			Visibility: wgpu.ShaderStageCompute,
-			Buffer:     wgpu.BufferBindingLayout{Type: bt},
-		}
+	before := gpu.ErrorCount()
+	cp, err := d.Device.CreateComputePipeline(sm, "main")
+	if err == nil && gpu.ErrorCount() != before {
+		err = fmt.Errorf("validation failed (details on stderr)")
 	}
-	bgl, err := d.Device.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
-		Label:   name + "_bgl",
-		Entries: entries,
-	})
 	if err != nil {
-		return nil, fmt.Errorf("wgpudev: bind group layout %q: %w", name, err)
-	}
-	pl, err := d.Device.CreatePipelineLayout(&wgpu.PipelineLayoutDescriptor{
-		Label:            name + "_layout",
-		BindGroupLayouts: []*wgpu.BindGroupLayout{bgl},
-	})
-	if err != nil {
-		bgl.Release()
-		return nil, fmt.Errorf("wgpudev: pipeline layout %q: %w", name, err)
-	}
-	defer pl.Release()
-	cp, err := d.Device.CreateComputePipeline(&wgpu.ComputePipelineDescriptor{
-		Label:   name,
-		Layout:  pl,
-		Compute: wgpu.ProgrammableStageDescriptor{Module: sm, EntryPoint: "main"},
-	})
-	if err != nil {
-		bgl.Release()
 		return nil, fmt.Errorf("wgpudev: pipeline %q: %w", name, err)
 	}
-	pe := &pipelineEntry{pipeline: cp, layout: bgl}
+	pe := &pipelineEntry{pipeline: cp, layout: cp.BindGroupLayout(0)}
 	d.pipelines[name] = pe
 	return pe, nil
 }
 
-// BindKind classifies a shader binding slot.
+// BindKind classifies a shader binding slot. With layouts derived from the
+// shader it documents intent only; the WGSL declaration decides.
 type BindKind uint8
 
 const (
@@ -278,7 +240,7 @@ const (
 // Size binds the whole buffer from Offset.
 type Binding struct {
 	Kind   BindKind
-	Buf    *wgpu.Buffer
+	Buf    *gpu.Buffer
 	Offset uint64
 	Size   uint64
 }
@@ -295,50 +257,23 @@ func (d *Device) Run(name, code string, binds []Binding, wx, wy, wz uint32) erro
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	kinds := make([]BindKind, len(binds))
-	for i, b := range binds {
-		kinds[i] = b.Kind
-	}
-	pe, err := d.pipelineLocked(name, code, kinds)
+	pe, err := d.pipelineLocked(name, code)
 	if err != nil {
 		return err
 	}
-	entries := make([]wgpu.BindGroupEntry, len(binds))
+	entries := make([]gpu.BufferBinding, len(binds))
 	for i, b := range binds {
-		size := b.Size
-		if size == 0 {
-			size = b.Buf.GetSize() - b.Offset
-		}
-		entries[i] = wgpu.BindGroupEntry{Binding: uint32(i), Buffer: b.Buf, Offset: b.Offset, Size: size}
+		entries[i] = gpu.BufferBinding{Binding: i, Buffer: b.Buf, Offset: b.Offset, Size: b.Size}
 	}
-	bg, err := d.Device.CreateBindGroup(&wgpu.BindGroupDescriptor{
-		Label:   name + "_bg",
-		Layout:  pe.layout,
-		Entries: entries,
-	})
-	if err != nil {
-		return fmt.Errorf("wgpudev: %s: bind group: %w", name, err)
-	}
+	bg := d.Device.CreateBufferBindGroup(pe.layout, entries)
 	defer bg.Release()
-	enc, err := d.Device.CreateCommandEncoder(&wgpu.CommandEncoderDescriptor{Label: name})
-	if err != nil {
-		return fmt.Errorf("wgpudev: %s: command encoder: %w", name, err)
-	}
-	defer enc.Release()
-	pass := enc.BeginComputePass(&wgpu.ComputePassDescriptor{Label: name})
+	enc := d.Device.CreateCommandEncoder()
+	pass := enc.BeginComputePass()
 	pass.SetPipeline(pe.pipeline)
-	pass.SetBindGroup(0, bg, nil)
-	pass.DispatchWorkgroups(wx, wy, wz)
-	if err := pass.End(); err != nil {
-		pass.Release()
-		return fmt.Errorf("wgpudev: %s: end pass: %w", name, err)
-	}
-	pass.Release()
-	cmd, err := enc.Finish(&wgpu.CommandBufferDescriptor{Label: name})
-	if err != nil {
-		return fmt.Errorf("wgpudev: %s: finish: %w", name, err)
-	}
-	d.submitLocked(cmd)
+	pass.SetBindGroup(0, bg)
+	pass.Dispatch(int(wx), int(wy), int(wz))
+	pass.End()
+	d.submitLocked(enc.Finish())
 	return nil
 }
 
@@ -371,58 +306,51 @@ func (d *Device) Rows(r uint64) (uint32, uint32) {
 	return uint32(maxX), uint32((r + maxX - 1) / maxX)
 }
 
-// Uniform creates a uniform buffer holding the given u32 words (padded to a
-// 16-byte multiple). The caller releases it after Run returns.
-func (d *Device) Uniform(words ...uint32) (*wgpu.Buffer, error) {
-	n := len(words)
-	for n%4 != 0 {
-		n++
+// newInit creates a buffer with the given usage holding data (padded to a
+// 16-byte multiple).
+func (d *Device) newInit(usage gpu.BufferUsage, data []byte) (*gpu.Buffer, error) {
+	n := (len(data) + 15) &^ 15
+	if n == 0 {
+		n = 16
 	}
-	data := make([]byte, 4*n)
+	buf := d.Device.CreateBuffer(usage|gpu.BufferCopyDst, n)
+	if !buf.Valid() {
+		return nil, fmt.Errorf("wgpudev: create buffer (%d bytes) failed", n)
+	}
+	padded := data
+	if len(data) != n {
+		padded = make([]byte, n)
+		copy(padded, data)
+	}
+	d.mu.Lock()
+	d.Queue.WriteBuffer(buf, 0, padded)
+	d.mu.Unlock()
+	return buf, nil
+}
+
+// Uniform creates a uniform buffer holding the given u32 words. The caller
+// releases it after Run returns.
+func (d *Device) Uniform(words ...uint32) (*gpu.Buffer, error) {
+	data := make([]byte, 4*len(words))
 	for i, w := range words {
 		data[4*i] = byte(w)
 		data[4*i+1] = byte(w >> 8)
 		data[4*i+2] = byte(w >> 16)
 		data[4*i+3] = byte(w >> 24)
 	}
-	buf, err := d.Device.CreateBufferInit(&wgpu.BufferInitDescriptor{
-		Label:    "uniform",
-		Contents: data,
-		Usage:    wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("wgpudev: uniform: %w", err)
-	}
-	return buf, nil
+	return d.newInit(gpu.BufferUniform, data)
 }
 
 // StorageInit creates a read-only storage buffer pre-filled with data (used
 // for per-dispatch metadata such as shape/stride tables). The caller
 // releases it after Run returns.
-func (d *Device) StorageInit(data []byte) (*wgpu.Buffer, error) {
-	n := len(data)
-	for n%4 != 0 || n == 0 {
-		n++
-	}
-	padded := data
-	if n != len(data) {
-		padded = make([]byte, n)
-		copy(padded, data)
-	}
-	buf, err := d.Device.CreateBufferInit(&wgpu.BufferInitDescriptor{
-		Label:    "meta",
-		Contents: padded,
-		Usage:    wgpu.BufferUsageStorage | wgpu.BufferUsageCopyDst,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("wgpudev: meta buffer: %w", err)
-	}
-	return buf, nil
+func (d *Device) StorageInit(data []byte) (*gpu.Buffer, error) {
+	return d.newInit(gpu.BufferStorage, data)
 }
 
 // Write uploads data into buf at byte offset off (queue-ordered after any
 // prior dispatch). The length is padded up to a 4-byte multiple.
-func (d *Device) Write(buf *wgpu.Buffer, off uint64, data []byte) error {
+func (d *Device) Write(buf *gpu.Buffer, off uint64, data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
@@ -433,75 +361,30 @@ func (d *Device) Write(buf *wgpu.Buffer, off uint64, data []byte) error {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if err := d.Queue.WriteBuffer(buf, off, padded); err != nil {
-		return fmt.Errorf("wgpudev: write buffer: %w", err)
-	}
+	d.Queue.WriteBuffer(buf, int(off), padded)
 	return nil
 }
 
 // Read copies n bytes from buf (at byte offset off) back to the host via a
 // MAP_READ staging buffer. It flushes every queued dispatch first.
-func (d *Device) Read(buf *wgpu.Buffer, off uint64, n int) ([]byte, error) {
+func (d *Device) Read(buf *gpu.Buffer, off uint64, n int) ([]byte, error) {
 	if n == 0 {
 		return nil, nil
 	}
-	size := uint64((n + 3) &^ 3)
+	size := (n + 3) &^ 3
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	staging, err := d.Device.CreateBuffer(&wgpu.BufferDescriptor{
-		Label: "staging_readback",
-		Size:  size,
-		Usage: wgpu.BufferUsageMapRead | wgpu.BufferUsageCopyDst,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("wgpudev: staging buffer: %w", err)
-	}
-	defer staging.Release()
-	enc, err := d.Device.CreateCommandEncoder(&wgpu.CommandEncoderDescriptor{Label: "readback"})
-	if err != nil {
-		return nil, err
-	}
-	defer enc.Release()
-	if err := enc.CopyBufferToBuffer(buf, off, staging, 0, size); err != nil {
-		return nil, fmt.Errorf("wgpudev: readback copy: %w", err)
-	}
-	cmd, err := enc.Finish(&wgpu.CommandBufferDescriptor{})
-	if err != nil {
-		return nil, err
-	}
-	d.submitLocked(cmd)
 	d.flushLocked()
-
-	done := make(chan wgpu.BufferMapAsyncStatus, 1)
-	if err := staging.MapAsync(wgpu.MapModeRead, 0, size, func(s wgpu.BufferMapAsyncStatus) { done <- s }); err != nil {
-		return nil, fmt.Errorf("wgpudev: map async: %w", err)
+	out, err := d.Device.ReadBufferAt(d.Queue, buf, off, size)
+	if err != nil {
+		return nil, fmt.Errorf("wgpudev: read: %w", err)
 	}
-	deadline := time.Now().Add(60 * time.Second)
-	for {
-		d.Device.Poll(false, nil)
-		select {
-		case s := <-done:
-			if s != wgpu.BufferMapAsyncStatusSuccess {
-				return nil, fmt.Errorf("wgpudev: map failed: %v", s)
-			}
-			out := make([]byte, n)
-			copy(out, staging.GetMappedRange(0, uint(size)))
-			if err := staging.Unmap(); err != nil {
-				return nil, err
-			}
-			return out, nil
-		default:
-			if time.Now().After(deadline) {
-				return nil, fmt.Errorf("wgpudev: map async timed out")
-			}
-			runtime.Gosched()
-		}
-	}
+	return out[:n], nil
 }
 
 // Copy enqueues a device-to-device copy of n bytes. All offsets and n must
 // be 4-byte multiples.
-func (d *Device) Copy(src *wgpu.Buffer, srcOff uint64, dst *wgpu.Buffer, dstOff uint64, n uint64) error {
+func (d *Device) Copy(src *gpu.Buffer, srcOff uint64, dst *gpu.Buffer, dstOff uint64, n uint64) error {
 	if n == 0 {
 		return nil
 	}
@@ -510,9 +393,9 @@ func (d *Device) Copy(src *wgpu.Buffer, srcOff uint64, dst *wgpu.Buffer, dstOff 
 
 // CopyRegion is one device-to-device copy for CopyMany.
 type CopyRegion struct {
-	Src    *wgpu.Buffer
+	Src    *gpu.Buffer
 	SrcOff uint64
-	Dst    *wgpu.Buffer
+	Dst    *gpu.Buffer
 	DstOff uint64
 	Size   uint64
 }
@@ -524,50 +407,25 @@ func (d *Device) CopyMany(regions []CopyRegion) error {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	enc, err := d.Device.CreateCommandEncoder(&wgpu.CommandEncoderDescriptor{Label: "copy"})
-	if err != nil {
-		return err
-	}
-	defer enc.Release()
+	enc := d.Device.CreateCommandEncoder()
 	for _, r := range regions {
-		if r.Size == 0 {
-			continue
-		}
-		if err := enc.CopyBufferToBuffer(r.Src, r.SrcOff, r.Dst, r.DstOff, r.Size); err != nil {
-			return fmt.Errorf("wgpudev: copy: %w", err)
+		if r.Size > 0 {
+			enc.CopyBufferToBuffer(r.Src, r.SrcOff, r.Dst, r.DstOff, r.Size)
 		}
 	}
-	cmd, err := enc.Finish(&wgpu.CommandBufferDescriptor{})
-	if err != nil {
-		return err
-	}
-	d.submitLocked(cmd)
+	d.submitLocked(enc.Finish())
 	return nil
 }
 
 // Clear enqueues a zero-fill of n bytes of buf at byte offset off.
-func (d *Device) Clear(buf *wgpu.Buffer, off, n uint64) error {
+func (d *Device) Clear(buf *gpu.Buffer, off, n uint64) error {
 	if n == 0 {
 		return nil
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.clearLocked(buf, off, n)
-}
-
-func (d *Device) clearLocked(buf *wgpu.Buffer, off, n uint64) error {
-	enc, err := d.Device.CreateCommandEncoder(&wgpu.CommandEncoderDescriptor{Label: "clear"})
-	if err != nil {
-		return err
-	}
-	defer enc.Release()
-	if err := enc.ClearBuffer(buf, off, n); err != nil {
-		return fmt.Errorf("wgpudev: clear: %w", err)
-	}
-	cmd, err := enc.Finish(&wgpu.CommandBufferDescriptor{})
-	if err != nil {
-		return err
-	}
-	d.submitLocked(cmd)
+	enc := d.Device.CreateCommandEncoder()
+	enc.ClearBuffer(buf, off, n)
+	d.submitLocked(enc.Finish())
 	return nil
 }

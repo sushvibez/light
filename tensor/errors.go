@@ -17,4 +17,4 @@ var errContigNoCUDA = errors.New("tensor.Contiguous: no CUDA handler registered 
 
 // errNoWebGPU is returned whenever WebGPU functionality is requested at
 // runtime but the binary was built without the "webgpu" build tag.
-var errNoWebGPU = errors.New("tensor: WebGPU support not compiled (build with -tags webgpu)")
+var errNoWebGPU = errors.New("tensor: WebGPU support not compiled (built with -tags nowebgpu)")

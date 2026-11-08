@@ -4,7 +4,7 @@
 
 **Phase-done rule:** A phase is marked *complete* only when every row in its section has CPU + CUDA implementations **and** a parity test. "CPU only" rows mean the phase is still `[~] in progress`, not done.
 
-**Kernel coverage is generated, not hand-edited.** Run `go run -tags webgpu ./scripts/opmatrix -md` and paste the table into the section below after adding kernels. Everything else in this file is maintained by hand.
+**Kernel coverage is generated, not hand-edited.** Run `go run ./scripts/opmatrix -md` and paste the table into the section below after adding kernels. Everything else in this file is maintained by hand.
 
 _Last updated: 2026-11-06 (stale open items reconciled with CHECKPOINTS.md)._
 
@@ -25,10 +25,10 @@ _Last updated: 2026-11-06 (stale open items reconciled with CHECKPOINTS.md)._
 - [x] `shape.Shape` (immutable, negative indexing)
 - [x] `shape.Strides` + contiguity check + `Permute` + `ContigWithDim0Broadcast`
 - [x] `shape.Broadcast` / `BroadcastN` / `BroadcastStrides`
-- [x] `device.Device` interface: `device.CPU()`, `device.CUDA(ordinal)`, `device.WebGPU()` (`-tags webgpu`), `device.Auto()` (CUDA → WebGPU → CPU), `IsCPU` / `IsCUDA` / `IsWebGPU`, `MustCUDA`, `CUDAAvailable`
+- [x] `device.Device` interface: `device.CPU()`, `device.CUDA(ordinal)`, `device.WebGPU()` (wgpu-native loaded at run time, no cgo), `device.Auto()` (CUDA → WebGPU → CPU), `IsCPU` / `IsCUDA` / `IsWebGPU`, `MustCUDA`, `CUDAAvailable`
 - [x] `storage.Storage` CPU + `runtime.AddCleanup` via `storage.Track[T]`
 - [x] `storage.Storage` CUDA (`cudaMalloc`/`cudaFree`, `cudaMemset` zero-init, refcount-driven cleanup)
-- [x] `storage.Storage` WebGPU (`storage.NewWebGPU`, wgpu buffers; 2 GiB per-buffer ceiling requested explicitly at device init)
+- [x] `storage.Storage` WebGPU (`storage.NewWebGPU`, wgpu buffers; the adapter's own buffer / binding limits requested at device init)
 - [x] `tensor.Tensor` constructors: `Zeros`, `Ones`, `Full[T]`, `New[T]`, `Arange`, `Rand`
 - [x] `tensor.Tensor` constructor: `RandN`
 - [x] Views: `Reshape` (with -1 infer), `Permute`, `Transpose`, `Contiguous`, `Narrow`, `Slice`, `Expand`
@@ -314,8 +314,8 @@ See `MODELS.md` for the full catalogue. Validated against reference weights:
 - [x] Op dispatch registry (`internal/registry`), `scripts/opmatrix` coverage dump
 - [x] PTX build (`scripts/build_ptx.sh`, compute_80, embedded, driver JIT); cuBLAS, cuDNN bindings
 - [x] CUDA driver-context binding per thread (`cudart.ensureContext`, fixes intermittent code 201 under parallel tests)
-- [x] CUDA default build; `-tags nocuda` opt-out; `-tags webgpu` opt-in
-- [x] WebGPU runtime (`internal/wgpudev`, 16 WGSL shaders in `kernels/webgpu`)
+- [x] CUDA default build; `-tags nocuda` opt-out; WebGPU in every build without cgo (`-tags nowebgpu` opt-out)
+- [x] WebGPU runtime (`internal/wgpudev`, 16 WGSL shaders in `kernels/webgpu`) over `internal/gpu` / `internal/ffi` (vendored from gfx): wgpu-native loaded at run time from `$LIGHT_WGPU_LIB`, next to the executable, or `~/.cache/light/wgpu/` (`scripts/fetch-wgpu.sh`); no cgo, so it builds and runs on Windows without a C toolchain (verified on Intel integrated graphics over D3D12)
 - [x] Reference harness: `scripts/verify/` (numpy + transformers + BERT reference scripts)
 - [ ] Multi-stream CUDA, CUDA graphs for decode, benchmark harness (Phase 10)
 

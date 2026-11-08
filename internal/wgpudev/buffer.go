@@ -1,4 +1,4 @@
-//go:build webgpu
+//go:build !nowebgpu
 
 package wgpudev
 
@@ -6,20 +6,20 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/cogentcore/webgpu/wgpu"
+	"light/internal/gpu"
 )
 
 // Buffer is a pooled storage buffer. Size is the caller-visible byte length;
 // the underlying wgpu buffer may be larger (size-class rounding).
 type Buffer struct {
-	Buf   *wgpu.Buffer
+	Buf   *gpu.Buffer
 	Size  uint64 // requested bytes (rounded up to a 4-byte multiple)
 	class uint64 // allocated bytes (pool size class)
 	dev   *Device
 }
 
 // Raw returns the wgpu buffer for binding.
-func (b *Buffer) Raw() *wgpu.Buffer { return b.Buf }
+func (b *Buffer) Raw() *gpu.Buffer { return b.Buf }
 
 // Alloc returns a storage buffer of at least n bytes. When zero is set the
 // contents are guaranteed to be zero (fresh buffers are zero by spec; pool
@@ -108,13 +108,9 @@ func (p *pool) get(size uint64, zero bool) (*Buffer, error) {
 		return b, nil
 	}
 	p.mu.Unlock()
-	raw, err := p.dev.Device.CreateBuffer(&wgpu.BufferDescriptor{
-		Label: "storage",
-		Size:  cls,
-		Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopySrc | wgpu.BufferUsageCopyDst,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("wgpudev: create buffer (%d bytes): %w", cls, err)
+	raw := p.dev.Device.CreateBuffer(gpu.BufferStorage|gpu.BufferCopySrc|gpu.BufferCopyDst, int(cls))
+	if !raw.Valid() {
+		return nil, fmt.Errorf("wgpudev: create buffer (%d bytes) failed", cls)
 	}
 	return &Buffer{Buf: raw, Size: size, class: cls, dev: p.dev}, nil
 }

@@ -1,4 +1,4 @@
-//go:build webgpu
+//go:build !nowebgpu
 
 package device
 

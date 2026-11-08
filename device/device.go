@@ -32,9 +32,10 @@ func (k Kind) String() string {
 // the "cuda" build tag.
 var ErrCUDANotBuilt = errors.New("device: CUDA support not compiled in (build with -tags cuda)")
 
-// ErrWebGPUNotBuilt is returned by WebGPU() when the process was built
-// without the opt-in "webgpu" build tag (which links wgpu-native).
-var ErrWebGPUNotBuilt = errors.New("device: WebGPU support not compiled in (build with -tags webgpu)")
+// ErrWebGPUNotBuilt is returned by WebGPU() when the process was built with
+// the "nowebgpu" tag. (Otherwise WebGPU is always compiled in and loads
+// wgpu-native at run time, without cgo; WebGPU(0) reports a missing library.)
+var ErrWebGPUNotBuilt = errors.New("device: WebGPU support not compiled in (built with -tags nowebgpu)")
 
 // Device identifies a computation target. Implementations are comparable by
 // Kind + Ordinal.
@@ -69,9 +70,9 @@ func IsCPU(d Device) bool { return d != nil && d.Kind() == KindCPU }
 // IsWebGPU reports whether the given device is a WebGPU device.
 func IsWebGPU(d Device) bool { return d != nil && d.Kind() == KindWebGPU }
 
-// WebGPUAvailable reports whether WebGPU support was compiled in (the
-// "webgpu" build tag). It does not probe for an adapter; call WebGPU(0) and
-// inspect the error for that.
+// WebGPUAvailable reports whether WebGPU support is compiled in (every build
+// except -tags nowebgpu). It does not load wgpu-native or probe for an
+// adapter; call WebGPU(0) and inspect the error for that.
 func WebGPUAvailable() bool { return webgpuCompiledIn }
 
 // MustCUDA returns CUDA(ordinal) or panics. Convenience for example programs
@@ -90,8 +91,8 @@ func MustCUDA(ordinal int) Device {
 func CUDAAvailable() bool { return cudaCompiledIn }
 
 // Auto returns the most capable available device: CUDA(0) if the cuda build
-// tag is present and the driver works, then WebGPU(0) if the webgpu build
-// tag is present and an adapter can be opened, otherwise CPU(). Use this in
+// tag is present and the driver works, then WebGPU(0) if wgpu-native loads
+// and an adapter can be opened, otherwise CPU(). Use this in
 // example programs and quick scripts where you want GPU when it's available
 // without hard-failing on machines without one.
 func Auto() Device {

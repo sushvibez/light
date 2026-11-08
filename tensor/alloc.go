@@ -10,8 +10,8 @@ import (
 
 // allocStorage builds a backing Storage for the given device. Dispatches to
 // CPU, CUDA or WebGPU based on the device kind; CUDA is the default and is
-// excluded only when building with `-tags nocuda`, WebGPU is opt-in via
-// `-tags webgpu`.
+// excluded only when building with `-tags nocuda`; WebGPU likewise unless
+// building with `-tags nowebgpu`.
 func allocStorage(dt dtype.DType, nelems int, dev device.Device) (*storage.Storage, error) {
 	switch dev.Kind() {
 	case device.KindCPU:

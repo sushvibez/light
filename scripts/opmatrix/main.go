@@ -3,7 +3,7 @@
 // FEATURES.md: run it after adding kernels and paste the table.
 //
 //	go run ./scripts/opmatrix              # CPU + CUDA (default build)
-//	go run -tags webgpu ./scripts/opmatrix # adds the WebGPU column
+//	go run ./scripts/opmatrix              # includes the WebGPU column
 //	go run ./scripts/opmatrix -md          # markdown table
 package main
 
@@ -17,7 +17,7 @@ import (
 	"light/device"
 	"light/dtype"
 	"light/internal/registry"
-	_ "light/ops" // links kernels/cpu, kernels/cuda (and kernels/webgpu with -tags webgpu)
+	_ "light/ops" // links kernels/cpu, kernels/cuda and kernels/webgpu
 )
 
 var kinds = []device.Kind{device.KindCPU, device.KindCUDA, device.KindWebGPU}
