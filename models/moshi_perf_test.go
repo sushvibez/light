@@ -36,7 +36,7 @@ func TestMoshikoProfile(t *testing.T) {
 	if v := os.Getenv("LIGHT_MOSHI_FRAMES"); v != "" {
 		n, _ = strconv.Atoi(v)
 	}
-	gc := os.Getenv("LIGHT_MOSHI_GC") != "0" // as MoshiGen.Step does (GCEvery 1)
+	gc := os.Getenv("LIGHT_MOSHI_GC") == "1" // as MoshiGen.Step with GCEvery 1
 	tEnc, tLM, tDep, tDec, tGC := moshiFrameLoop(t, m, mimi, audio, n, gc)
 	f := float64(n)
 	t.Logf("per frame: mimi encode %.1f ms, LM forward %.1f ms, depformer %.1f ms, mimi decode %.1f ms, gc %.1f ms, total %.1f ms (n=%d, gc %v)",

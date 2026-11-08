@@ -13,7 +13,9 @@
 # Groups: core (CUDA parity of ops / nn / quant and the tiny-model CUDA
 # branches; no downloads), int4 (real GPTQ / AWQ / act-order checkpoints,
 # ~2 GB), mimo (MiMo-7B-RL MTP speculative decoding in the engine, 15.6 GB),
-# moshi (per-stage frame profile + CPU profile, 8.2 GB + Mimi).
+# moshi (per-stage frame profile + CPU profile, 8.2 GB + Mimi), speech
+# (end-to-end speech-to-speech through the engine's OpenAI handler, same
+# checkpoints; not in the default set).
 # Everything fits an L4 (24 GB); an A100 is not needed.
 # Hugging Face downloads use $HF_TOKEN when set.
 set -uo pipefail
@@ -155,11 +157,16 @@ for g in "${SEL[@]}"; do
 	moshi)
 		fetch kyutai/moshiko-candle-q8 model.q8.gguf tokenizer_spm_32k_3.model
 		fetch kyutai/mimi
-		LIGHT_MOSHI_FRAMES=43 LIGHT_MOSHI_GC=0 run moshi-nogc ./models 'TestMoshikoProfile'
 		LIGHT_MOSHI_FRAMES=43 run moshi ./models 'TestMoshikoProfile' -cpuprofile "$LOGS/$STAMP-moshi.cpu.pprof"
 		go tool pprof -top -nodecount=40 models.test "$LOGS/$STAMP-moshi.cpu.pprof" >"$LOGS/$STAMP-moshi.pprof.txt" 2>&1 ||
 			go tool pprof -top -nodecount=40 "$LOGS/$STAMP-moshi.cpu.pprof" >"$LOGS/$STAMP-moshi.pprof.txt" 2>&1
 		head -50 "$LOGS/$STAMP-moshi.pprof.txt"
+		drop kyutai/moshiko-candle-q8 kyutai/mimi
+		;;
+	speech)
+		fetch kyutai/moshiko-candle-q8 model.q8.gguf tokenizer_spm_32k_3.model
+		fetch kyutai/mimi
+		run speech ./engine 'TestOpenAISpeechToSpeech'
 		drop kyutai/moshiko-candle-q8 kyutai/mimi
 		;;
 	*) echo "unknown group $g" ;;
