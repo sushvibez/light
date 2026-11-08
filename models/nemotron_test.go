@@ -90,17 +90,18 @@ func TestNemotronTinyMatchesTransformers(t *testing.T) {
 //
 //	python scripts/verify/ref_nemotron.py nvidia/Nemotron-4-Mini-Hindi-4B-Instruct bf16 --chat
 //
-// TODO(nemotron-4b): fill in the prompt ids, reference logits and greedy ids
-// from that run; until then the test stops after the reference-free checks.
+// (A100, on the GPU.)
 const nemotron4BRepo = "nvidia/Nemotron-4-Mini-Hindi-4B-Instruct"
 
 var (
-	nemotron4BChatIDs []int64
-	nemotron4BRef     []struct {
+	nemotron4BChatIDs = []int64{4, 24677, 1014, 7003, 1417, 1261, 51464, 15460, 252324, 1014, 5, 20165, 1014, 7450, 62777,
+		1292, 1610, 15106, 3138, 1276, 11786, 1336, 7286, 252324, 1014, 5, 210281, 1014}
+	nemotron4BRef = []struct {
 		id    int
 		logit float32
-	}
-	nemotron4BGreedy []int64
+	}{{2556, 30.875}, {40155, 22.375}, {92931, 22.0}, {48505, 21.625}, {40712, 21.125}}
+	// "The sky is blue due to the scattering of short-wavelength light by Earth'"
+	nemotron4BGreedy = []int64{2556, 11786, 1336, 7286, 3212, 1294, 1276, 43199, 1299, 3320, 252335, 154023, 3096, 1461, 10198, 252337}
 )
 
 func TestNemotron4BMatchesTransformersBF16(t *testing.T) {
@@ -132,12 +133,6 @@ func TestNemotron4BMatchesTransformersBF16(t *testing.T) {
 	}
 	t.Logf("params %.3f B", float64(m.ParamCount())/1e9)
 	ids := nemotron4BChatIDs
-	if ids == nil {
-		ids = make([]int64, 32) // a fixed sequence until the chat-template ids are recorded
-		for i := range ids {
-			ids[i] = int64(1000 + 37*i)
-		}
-	}
 	cache := NewKVCache(m.NumLayers())
 	row := lastLogits(t, m, ids, cache, dev)
 	got := top5(row)
@@ -150,9 +145,6 @@ func TestNemotron4BMatchesTransformersBF16(t *testing.T) {
 		row = lastLogits(t, m, []int64{next}, cache, dev)
 	}
 	t.Logf("greedy %v", greedy)
-	if nemotron4BRef == nil {
-		t.Skip("transformers reference values not recorded yet (see TODO(nemotron-4b))")
-	}
 	for i, w := range nemotron4BRef {
 		if i < 2 && got[i] != w.id {
 			t.Errorf("top-%d: got %d (%.3f), want %d (%.3f)", i+1, got[i], first[got[i]], w.id, w.logit)
