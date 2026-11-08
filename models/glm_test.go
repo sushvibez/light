@@ -109,17 +109,19 @@ func TestGLMTinyMatchesTransformers(t *testing.T) {
 //
 //	python scripts/verify/ref_glm.py zai-org/GLM-4-9B-0414 bf16 --chat
 //
-// TODO(glm4-9b): fill in the prompt ids, reference logits and greedy ids from
-// that run; until then the test stops after the reference-free checks.
+// (A100, on the GPU.) The chat template ends in <|assistant|>; the model
+// opens its reply with a newline, 14 logits ahead of the runner-up.
 const glm4_9BRepo = "zai-org/GLM-4-9B-0414"
 
 var (
-	glm4_9BChatIDs []int64
-	glm4_9BRef     []struct {
+	glm4_9BChatIDs = []int64{151331, 151333, 151335, 198, 2610, 525, 264, 63141, 17821, 13, 151336, 198, 840, 20726, 304,
+		825, 11646, 3170, 279, 12877, 374, 6303, 13, 151337}
+	glm4_9BRef = []struct {
 		id    int
 		logit float32
-	}
-	glm4_9BGreedy []int64
+	}{{198, 32.0}, {271, 17.75}, {785, 16.5}, {576, 13.25}, {319, 13.0}}
+	// "\nThe sky appears blue because Earth's atmosphere scatters shorter blue wavelengths of sunlight"
+	glm4_9BGreedy = []int64{198, 785, 12877, 7951, 6303, 1576, 9234, 594, 16550, 1136, 10170, 23263, 6303, 92080, 315, 38810}
 )
 
 func TestGLM4_9BMatchesTransformersBF16(t *testing.T) {
@@ -152,12 +154,6 @@ func TestGLM4_9BMatchesTransformersBF16(t *testing.T) {
 	}
 	t.Logf("params %.3f B", float64(m.ParamCount())/1e9)
 	ids := glm4_9BChatIDs
-	if ids == nil {
-		ids = make([]int64, 32) // a fixed sequence until the chat-template ids are recorded
-		for i := range ids {
-			ids[i] = int64(1000 + 37*i)
-		}
-	}
 	cache := NewKVCache(m.NumLayers())
 	row := lastLogits(t, m, ids, cache, dev)
 	got := top5(row)
@@ -170,9 +166,6 @@ func TestGLM4_9BMatchesTransformersBF16(t *testing.T) {
 		row = lastLogits(t, m, []int64{next}, cache, dev)
 	}
 	t.Logf("greedy %v", greedy)
-	if glm4_9BRef == nil {
-		t.Skip("transformers reference values not recorded yet (see TODO(glm4-9b))")
-	}
 	for i, w := range glm4_9BRef {
 		if i < 2 && got[i] != w.id {
 			t.Errorf("top-%d: got %d (%.3f), want %d (%.3f)", i+1, got[i], first[got[i]], w.id, w.logit)
