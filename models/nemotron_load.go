@@ -130,7 +130,24 @@ func LoadNemotronFromHF(repo string, dev device.Device, weightDT dtype.DType) (*
 	if err != nil {
 		return nil, err
 	}
-	// ln installs a LayerNorm1P: gamma = 1 + weight and beta = bias, F32.
+	// ln installs a LayerNorm1P: gamma = 1 + weight and beta = bias, at the
+	// activation dtype (the CUDA layernorm kernel wants gamma / beta at the
+	// input's dtype). The sum is formed in F32 and rounded once, which is
+	// exactly transformers' `self.weight + 1.0` on a BF16 parameter.
+	act := m.Cfg.WeightDType
+	if act != dtype.BF16 {
+		act = dtype.F32
+	}
+	toAct := func(t *tensor.Tensor) (*tensor.Tensor, error) {
+		if act == dtype.F32 {
+			return t.To(dev)
+		}
+		c, err := ops.Cast(t, act)
+		if err != nil {
+			return nil, err
+		}
+		return c.To(dev)
+	}
 	ln := func(gamma, beta **tensor.Tensor, prefix string) error {
 		w, ok := hf[prefix+".weight"]
 		if !ok {
@@ -147,7 +164,7 @@ func LoadNemotronFromHF(repo string, dev device.Device, weightDT dtype.DType) (*
 		if w32, err = ops.Add(w32, one); err != nil {
 			return err
 		}
-		if *gamma, err = w32.To(dev); err != nil {
+		if *gamma, err = toAct(w32); err != nil {
 			return err
 		}
 		b, ok := hf[prefix+".bias"]
@@ -158,7 +175,7 @@ func LoadNemotronFromHF(repo string, dev device.Device, weightDT dtype.DType) (*
 		if err != nil {
 			return err
 		}
-		*beta, err = b32.To(dev)
+		*beta, err = toAct(b32)
 		return err
 	}
 	if err := copyExactCast(m.TokenEmb.Weight, hf, "model.embed_tokens.weight"); err != nil {
