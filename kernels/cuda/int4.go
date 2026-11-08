@@ -39,7 +39,7 @@ func int4Suffix(dt dtype.DType) (string, error) {
 //
 //	Inputs: codes U32 (N, K/8), scales F32 (N, K/G), zeros F32 (N, K/G)
 //	Output: (N, K) F32 / BF16
-//	Attrs:  "group" int
+//	Attrs:  "group" int, optional "offset" int (elements into the output's storage)
 func int4DequantLauncher(ctx *registry.Context) error {
 	codes, s, z, out := ctx.Inputs[0], ctx.Inputs[1], ctx.Inputs[2], ctx.Output
 	N, K, G := codes.Dim(0), codes.Dim(1)*8, ctx.Attrs["group"].(int)
@@ -58,6 +58,9 @@ func int4DequantLauncher(ctx *registry.Context) error {
 		return err
 	}
 	cP, sP, zP, oP := codes.Storage().CUDAPtr(), s.Storage().CUDAPtr(), z.Storage().CUDAPtr(), out.Storage().CUDAPtr()
+	if off, _ := ctx.Attrs["offset"].(int); off > 0 { // write into a slot of a larger buffer
+		oP += uintptr(off * out.DType().Size())
+	}
 	n32, k32, g32 := int32(N), int32(K), int32(G)
 	return Launch1D(fn, uint64(N*K/8), []unsafe.Pointer{
 		unsafe.Pointer(&cP), unsafe.Pointer(&sP), unsafe.Pointer(&zP), unsafe.Pointer(&oP),

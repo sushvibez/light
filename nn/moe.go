@@ -6,6 +6,7 @@ import (
 	"light/device"
 	"light/dtype"
 	"light/ops"
+	"light/quant"
 	"light/tensor"
 )
 
@@ -38,6 +39,10 @@ type SparseMoE struct {
 	// the (T, E) F32 router logits and returns the routing (DeepSeek's
 	// group-limited and sigmoid-with-bias routers).
 	Router func(logits *tensor.Tensor) (*ops.MoERouting, error)
+	// GateUpQ4 / DownQ4 hold 4-bit experts (GPTQ / AWQ MoE checkpoints)
+	// instead of GateUp / Down: per expert (2I, H), gate rows then up rows,
+	// and (H, I). Forward expands only the routed experts (ops.MoEInt4).
+	GateUpQ4, DownQ4 []quant.Int4
 }
 
 // NewSparseMoEUninit allocates a block with zeroed expert weights at wdt;
@@ -94,8 +99,7 @@ func (m *SparseMoE) StackExperts(gate, up, down []*tensor.Tensor) error {
 
 // Forward maps (…, H) → (…, H).
 func (m *SparseMoE) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
-	H := m.GateUp.Dim(2)
-	I := m.GateUp.Dim(1) / 2
+	H := m.Gate.InFeatures()
 	if x.Dim(-1) != H {
 		return nil, fmt.Errorf("nn.SparseMoE: last dim %d != hidden %d", x.Dim(-1), H)
 	}
@@ -136,6 +140,18 @@ func (m *SparseMoE) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 	if err != nil {
 		return nil, err
 	}
+	if m.GateUpQ4 != nil {
+		act := m.Act
+		if act == nil {
+			act = ops.SiLU
+		}
+		y, err := ops.MoEInt4(flat, m.GateUpQ4, m.DownQ4, route, m.TopK, act)
+		if err != nil {
+			return nil, err
+		}
+		return y.Reshape(dims...)
+	}
+	I := m.GateUp.Dim(1) / 2
 	quantized := m.GateUp.DType().IsQuantized()
 	if quantized && flat.DType() != dtype.F32 {
 		return nil, fmt.Errorf("nn.SparseMoE: quantized experts (%v) need F32 activations, got %v", m.GateUp.DType(), flat.DType())

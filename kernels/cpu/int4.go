@@ -24,10 +24,11 @@ func int4DequantCPU(ctx *registry.Context) error {
 	ng := K / G
 	var f32 []float32
 	var b16 []uint16
+	off, _ := ctx.Attrs["offset"].(int) // write into a slot of a larger buffer
 	if out.DType() == dtype.F32 {
-		f32 = asSlice[float32](out)
+		f32 = asSlice[float32](out)[off:]
 	} else {
-		b16 = asSlice[uint16](out)
+		b16 = asSlice[uint16](out)[off:]
 	}
 	for n := range N {
 		for k := range K {

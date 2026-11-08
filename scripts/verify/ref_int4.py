@@ -41,11 +41,13 @@ def unpack_cols(x, order):
     return out.reshape(x.shape[0], x.shape[1] * 8)
 
 
-cfg_raw = json.load(open(hf_hub_download(repo, "config.json")))
+import os, tempfile
+fetch = (lambda f: os.path.join(repo, f)) if os.path.isdir(repo) else (lambda f: hf_hub_download(repo, f))
+cfg_raw = json.load(open(fetch("config.json")))
 qc = cfg_raw["quantization_config"]
 G = qc["group_size"]
 v2 = qc.get("checkpoint_format") == "gptq_v2"
-f = safe_open(hf_hub_download(repo, "model.safetensors"), "pt")
+f = safe_open(fetch("model.safetensors"), "pt")
 sd = {}
 for n in f.keys():
     if n.endswith(".qweight"):
@@ -69,21 +71,28 @@ for n in f.keys():
 
 cfg = AutoConfig.from_pretrained(repo)
 del cfg.quantization_config
-model = AutoModelForCausalLM.from_config(cfg, dtype=torch.float32, attn_implementation="eager").eval()
+probe = AutoModelForCausalLM.from_config(cfg, dtype=torch.float32)
 # Old AutoGPTQ checkpoints store a bias for every linear even where the
 # architecture has none (Llama); those must be all zeros, and are dropped.
-own = set(model.state_dict().keys())
-for k in [k for k in sd if k.endswith(".bias") and k not in own]:
+own = {k.replace(".experts.gate_up_proj", ".experts").replace(".experts.down_proj", ".experts") for k in probe.state_dict()}
+for k in [k for k in sd if k.endswith(".bias") and k not in probe.state_dict()]:
     assert torch.count_nonzero(sd[k]) == 0, f"{k} is not zero"
     del sd[k]
-missing, unexpected = model.load_state_dict(sd, strict=False)
-missing = [k for k in missing if not (k == "lm_head.weight" and cfg.tie_word_embeddings)]
-assert not missing and not unexpected, (missing, unexpected)
-if cfg.tie_word_embeddings:
-    model.tie_weights()
+del probe
+# Save the dequantized weights as a plain checkpoint and load it with
+# from_pretrained, so transformers applies its own key conversions (e.g.
+# per-expert MoE weights into its fused expert tensors).
+from safetensors.torch import save_file
+tmp = tempfile.mkdtemp()
+cfg.save_pretrained(tmp)
+save_file({k: v.contiguous() for k, v in sd.items()}, os.path.join(tmp, "model.safetensors"), metadata={"format": "pt"})
+model = AutoModelForCausalLM.from_pretrained(tmp, dtype=torch.float32, attn_implementation="eager").eval()
 
-tok = AutoTokenizer.from_pretrained(repo)
-if chat:
+ids_arg = sys.argv[sys.argv.index("--ids") + 1] if "--ids" in sys.argv else None
+tok = None if ids_arg else AutoTokenizer.from_pretrained(repo)
+if ids_arg:
+    ids = [int(x) for x in ids_arg.split(",")]
+elif chat:
     msgs = [{"role": "system", "content": "You are a concise assistant."},
             {"role": "user", "content": "Explain in one sentence why the sky is blue."}]
     ids = tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True, return_dict=False)
@@ -96,7 +105,8 @@ with torch.no_grad():
     topv, topi = logits.topk(5)
     print("F32 top5:")
     for v, i in zip(topv.tolist(), topi.tolist()):
-        print(f"  id={i:<7} {tok.decode([i])!r:<14} logit={v:.4f}")
-    out = model.generate(x, max_new_tokens=16, do_sample=False)
-    print("greedy:", repr(tok.decode(out[0, len(ids):])))
+        print(f"  id={i:<7} {(tok.decode([i]) if tok else '')!r:<14} logit={v:.4f}")
+    out = model.generate(x, max_new_tokens=16 if tok else 8, do_sample=False)
+    if tok:
+        print("greedy:", repr(tok.decode(out[0, len(ids):])))
     print("greedy ids:", out[0, len(ids):].tolist())

@@ -132,3 +132,62 @@ func TestInt4CheckpointsMatchDequantizedReference(t *testing.T) {
 		})
 	}
 }
+
+// A tiny Qwen3-MoE in GPTQ format with 4-bit attention and per-expert 4-bit
+// experts (`scripts/verify/make_int4_tiny.py qwen3moe`), against
+// transformers on the independently dequantized weights
+// (`ref_int4.py testdata/int4/tiny-qwen3moe-gptq gptq --ids …`): the MoE path
+// expands only the routed experts (ops.MoEInt4).
+func TestInt4MoETinyMatchesDequantizedReference(t *testing.T) {
+	const dir = "testdata/int4/tiny-qwen3moe-gptq"
+	ids := []int64{5, 17, 300, 42, 8, 499, 13, 77, 256, 3, 64, 250, 19, 6, 400, 41, 2, 90}
+	ref := []struct {
+		id    int
+		logit float32
+	}{{191, 0.4325}, {115, 0.3887}, {505, 0.3585}, {422, 0.3476}, {88, 0.3448}}
+	wantGreedy := []int64{191, 497, 411, 25, 268, 145, 152, 321}
+	devs := []device.Device{device.CPU()}
+	if device.CUDAAvailable() {
+		if g, err := device.CUDA(0); err == nil {
+			devs = append(devs, g)
+		}
+	}
+	var cpuRow []float32
+	for _, dev := range devs {
+		m, err := LoadCausalLMFromHF(dir, dev, dtype.F32)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := m.Blocks[0]
+		if b.MoE == nil || len(b.MoE.GateUpQ4) != 4 || b.MoE.GateUp != nil || b.QProj.W4 == nil || b.MoE.Gate.W == nil {
+			t.Fatalf("%v: 4-bit MoE not installed (experts %d, q_proj 4-bit %v)", dev, len(b.MoE.GateUpQ4), b.QProj.W4 != nil)
+		}
+		cache := NewKVCache(m.NumLayers())
+		row := lastLogits(t, m, ids, cache, dev)
+		if dev.Kind() != device.KindCPU {
+			if d := maxAbsDiff(cpuRow, row); d > 1e-4 {
+				t.Errorf("CUDA vs CPU logits differ by %.2e", d)
+			}
+			continue
+		}
+		cpuRow = slices.Clone(row)
+		got := top5(row)
+		for i, w := range ref {
+			if i < 3 && got[i] != w.id {
+				t.Errorf("top-%d: got %d (%.4f), want %d (%.4f)", i+1, got[i], row[got[i]], w.id, w.logit)
+			}
+			if d := row[w.id] - w.logit; d > 2e-4 || d < -2e-4 {
+				t.Errorf("logit[%d] = %.5f, want %.4f", w.id, row[w.id], w.logit)
+			}
+		}
+		var greedy []int64
+		for len(greedy) < len(wantGreedy) {
+			next := int64(top5(row)[0])
+			greedy = append(greedy, next)
+			row = lastLogits(t, m, []int64{next}, cache, dev)
+		}
+		if !slices.Equal(greedy, wantGreedy) {
+			t.Errorf("greedy %v, want %v", greedy, wantGreedy)
+		}
+	}
+}

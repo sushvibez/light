@@ -9,6 +9,7 @@ import (
 	"light/dtype"
 	"light/nn"
 	"light/ops"
+	"light/quant"
 	"light/tensor"
 )
 
@@ -254,6 +255,14 @@ func (b *llamaBlock) parameters() []*tensor.Tensor {
 	}
 	if b.MoE != nil {
 		ps = append(ps, b.MoE.Gate.Parameters()...)
+		if b.MoE.GateUpQ4 != nil {
+			for e := range b.MoE.GateUpQ4 {
+				for _, w := range []quant.Int4{b.MoE.GateUpQ4[e], b.MoE.DownQ4[e]} {
+					ps = append(ps, w.Codes, w.Scales, w.Zeros)
+				}
+			}
+			return ps
+		}
 		ps = append(ps, b.MoE.GateUp, b.MoE.Down)
 		return ps
 	}

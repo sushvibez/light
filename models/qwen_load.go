@@ -243,6 +243,16 @@ func mapHFToLlamaPrefix(m *Llama, hf map[string]*tensor.Tensor, prefix string) e
 			return err
 		}
 		if blk.MoE != nil {
+			if blk.MoE.GateUpQ4 != nil { // 4-bit experts already installed: only the router
+				router := p + "mlp.gate.weight"
+				if _, ok := hf[router]; !ok {
+					router = p + "mlp.router.weight"
+				}
+				if err := lin(blk.MoE.Gate, router); err != nil {
+					return err
+				}
+				continue
+			}
 			if err := mapHFMoE(blk.MoE, hf, p+"mlp."); err != nil {
 				return err
 			}

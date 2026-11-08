@@ -117,8 +117,9 @@ var (
 )
 
 type fp8ScratchKey struct {
-	dev string
-	dt  dtype.DType
+	dev  string
+	dt   dtype.DType
+	slot int // several buffers can be live at once (MoE: gate-up and down stacks)
 }
 
 // fp8ScratchView returns an (R, C) view at offset 0 of the scratch buffer
@@ -131,7 +132,12 @@ func fp8ScratchView(w *tensor.Tensor, dt dtype.DType) (*tensor.Tensor, error) {
 // dtype) buffer that quantized weights (FP8, 4-bit) are expanded into before
 // a GEMM; see fp8Scratch. Callers hold fp8ScratchMu.
 func weightScratch(dev device.Device, dt dtype.DType, R, C int) (*tensor.Tensor, error) {
-	key := fp8ScratchKey{dev.String(), dt}
+	return weightScratchSlot(dev, dt, 0, R, C)
+}
+
+// weightScratchSlot is weightScratch for buffer `slot`.
+func weightScratchSlot(dev device.Device, dt dtype.DType, slot, R, C int) (*tensor.Tensor, error) {
+	key := fp8ScratchKey{dev.String(), dt, slot}
 	buf := fp8Scratch[key]
 	if buf == nil || buf.NumElements() < R*C {
 		var err error
