@@ -246,6 +246,8 @@ func LoadChatModelFromHF(repo string, dev device.Device, weightDT dtype.DType) (
 		return LoadMuseGlimmerFromHF(repo, dev, weightDT)
 	case "deepseek_v2":
 		return LoadDeepseekV2FromHF(repo, dev, weightDT)
+	case "minimax":
+		return LoadMiniMaxFromHF(repo, dev, weightDT)
 	case "falcon", "RefinedWebModel", "RefinedWeb":
 		return LoadFalconFromHF(repo, dev, weightDT)
 	default:
