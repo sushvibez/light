@@ -244,6 +244,8 @@ func LoadChatModelFromHF(repo string, dev device.Device, weightDT dtype.DType) (
 		return LoadQwen35FromHF(repo, dev, weightDT)
 	case "muse_glimmer", "muse_glimmer_text":
 		return LoadMuseGlimmerFromHF(repo, dev, weightDT)
+	case "deepseek_v2":
+		return LoadDeepseekV2FromHF(repo, dev, weightDT)
 	case "falcon", "RefinedWebModel", "RefinedWeb":
 		return LoadFalconFromHF(repo, dev, weightDT)
 	default:

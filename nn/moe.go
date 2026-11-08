@@ -30,6 +30,10 @@ type SparseMoE struct {
 	TopK     int
 	NormTopK bool
 	Act      func(*tensor.Tensor) (*tensor.Tensor, error)
+	// RouterF32: the router runs on an F32 copy of the input with an F32
+	// Gate weight (DeepSeek computes its routing logits in F32); otherwise
+	// at the activation dtype, cast to F32 for the softmax.
+	RouterF32 bool
 }
 
 // NewSparseMoEUninit allocates a block with zeroed expert weights at wdt;
@@ -101,7 +105,13 @@ func (m *SparseMoE) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 		return nil, err
 	}
 	T := flat.Dim(0)
-	logits, err := m.Gate.Forward(flat)
+	gateIn := flat
+	if m.RouterF32 && flat.DType() != dtype.F32 {
+		if gateIn, err = ops.Cast(flat, dtype.F32); err != nil {
+			return nil, err
+		}
+	}
+	logits, err := m.Gate.Forward(gateIn)
 	if err != nil {
 		return nil, err
 	}
