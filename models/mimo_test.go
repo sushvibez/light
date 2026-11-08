@@ -136,3 +136,56 @@ func TestMiMo7BMatchesTransformersBF16(t *testing.T) {
 		t.Errorf("greedy %v diverges from transformers BF16 %v after %d tokens", greedy, mimo7BGreedy, agree)
 	}
 }
+
+// MiMo-7B-RL in F32 on CUDA (30.5 GB of weights: an 80 GB A100), against
+// transformers F32 (`ref_mimo.py XiaomiMiMo/MiMo-7B-RL f32 --chat`). With
+// k_proj biases up to 55 the attention scores carry a large common offset,
+// so BF16 runs are sensitive to rounding order; the F32 comparison tells a
+// real difference from BF16 noise. TODO(mimo-7b-f32): record the reference;
+// until then the test logs Light's F32 top-5 and stops.
+var mimo7BRefF32 []struct {
+	id    int
+	logit float32
+}
+
+func TestMiMo7BMatchesTransformersF32(t *testing.T) {
+	if os.Getenv("LIGHT_HEAVY_TESTS") == "" {
+		t.Skip("set LIGHT_HEAVY_TESTS=1 (30.5 GB F32)")
+	}
+	home, _ := os.UserHomeDir()
+	if m, _ := filepath.Glob(filepath.Join(home, ".cache/huggingface/hub/models--XiaomiMiMo--MiMo-7B-RL/snapshots/*/model*.safetensors")); len(m) == 0 {
+		t.Skip(mimo7BRepo + " not in HF cache")
+	}
+	if !device.CUDAAvailable() {
+		t.Skip("no CUDA")
+	}
+	requireHostMemGB(t, 36)
+	requireGPUMemGB(t, 0, 34)
+	releaseModelMemory(t)
+	dev, err := device.CUDA(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Setenv("HF_HUB_OFFLINE", "1")
+	m, err := LoadCausalLMFromHF(mimo7BRepo, dev, dtype.F32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := lastLogits(t, m, mimo7BChatIDs, NewKVCache(m.NumLayers()), dev)
+	got := top5(row)
+	t.Logf("F32 top-5 %v logits %.4f %.4f %.4f %.4f %.4f", got, row[got[0]], row[got[1]], row[got[2]], row[got[3]], row[got[4]])
+	for _, w := range mimo7BRef {
+		t.Logf("BF16-reference id %d: Light F32 logit %.4f (transformers BF16 %.3f)", w.id, row[w.id], w.logit)
+	}
+	if mimo7BRefF32 == nil {
+		t.Skip("transformers F32 reference not recorded yet (see TODO(mimo-7b-f32))")
+	}
+	for i, w := range mimo7BRefF32 {
+		if i < 2 && got[i] != w.id {
+			t.Errorf("top-%d: got %d (%.4f), want %d (%.4f)", i+1, got[i], row[got[i]], w.id, w.logit)
+		}
+		if d := row[w.id] - w.logit; d > 0.02 || d < -0.02 {
+			t.Errorf("logit[%d] = %.4f, want %.4f (F32 tol 0.02)", w.id, row[w.id], w.logit)
+		}
+	}
+}
