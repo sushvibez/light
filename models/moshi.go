@@ -105,6 +105,7 @@ type moshiTransformer struct {
 	Cfg      MoshiTransformerConfig
 	Layers   []*moshiLayer
 	scale    *tensor.Tensor
+	scaleF   float32 // the same 1/√headDim for AttnDecode
 	masks    map[[3]int]*tensor.Tensor
 	masksDev device.Device
 }
@@ -140,7 +141,8 @@ func newMoshiTransformer(cfg MoshiTransformerConfig, dev device.Device) (*moshiT
 		t.Layers[i] = l
 	}
 	var err error
-	if t.scale, err = tensor.New([]float32{float32(1 / math.Sqrt(float64(cfg.headDim())))}, []int{1}, dev); err != nil {
+	t.scaleF = float32(1 / math.Sqrt(float64(cfg.headDim())))
+	if t.scale, err = tensor.New([]float32{t.scaleF}, []int{1}, dev); err != nil {
 		return nil, err
 	}
 	return t, nil
@@ -281,8 +283,7 @@ func (t *moshiTransformer) mask(T, kvPrior, window int, dev device.Device) (*ten
 // (positions continue from cache.Len) and keeping the last Context keys.
 func (t *moshiTransformer) forward(x *tensor.Tensor, cache *KVCache) (*tensor.Tensor, error) {
 	cfg := t.Cfg
-	B, T, D := x.Dim(0), x.Dim(1), x.Dim(2)
-	NH, HD := cfg.NumHeads, cfg.headDim()
+	B, T := x.Dim(0), x.Dim(1)
 	dev := x.Device()
 	prior := 0
 	if cache != nil {
@@ -299,124 +300,30 @@ func (t *moshiTransformer) forward(x *tensor.Tensor, cache *KVCache) (*tensor.Te
 			return nil, err
 		}
 	}
-	// part extracts slot i of a (B, T, n, NH, HD) projection as (B, NH, T, HD).
-	part := func(p *tensor.Tensor, i int) (*tensor.Tensor, error) {
-		s, err := p.Narrow(2, i, 1)
-		if err != nil {
-			return nil, err
+	if cache != nil {
+		// One frame at a time (every Moshi step): fixed-size ring caches
+		// written in place and read by a decode-attention kernel. Several
+		// frames at once: the concatenated cache and masked attention.
+		ring := B == 1 && T == 1 && x.DType() == dtype.F32
+		if ring != cache.ring && prior > 0 {
+			if err := t.convertCache(cache, ring); err != nil {
+				return nil, err
+			}
 		}
-		if s, err = autograd.Contiguous(s); err != nil {
-			return nil, err
-		}
-		if s, err = autograd.Reshape(s, B, T, NH, HD); err != nil {
-			return nil, err
-		}
-		return headsForward(s, B, T, NH, HD)
+		cache.ring = ring
 	}
 	for li, l := range t.Layers {
 		h, err := l.Norm1.Forward(x)
 		if err != nil {
 			return nil, err
 		}
-		qkv, err := l.InProj.Forward(h)
+		var ctx *tensor.Tensor
+		if cache != nil && cache.ring {
+			ctx, err = t.ringAttention(l, li, h, pos, cache)
+		} else {
+			ctx, err = t.attention(l, li, h, pos, cache)
+		}
 		if err != nil {
-			return nil, err
-		}
-		if qkv, err = autograd.Reshape(qkv, B, T, 3, NH, HD); err != nil {
-			return nil, err
-		}
-		q, err := part(qkv, 0)
-		if err != nil {
-			return nil, err
-		}
-		k, err := part(qkv, 1)
-		if err != nil {
-			return nil, err
-		}
-		v, err := part(qkv, 2)
-		if err != nil {
-			return nil, err
-		}
-		if cfg.RoPE {
-			if q, err = ops.RoPEInterleaved(q, pos, cfg.MaxPeriod); err != nil {
-				return nil, err
-			}
-			if k, err = ops.RoPEInterleaved(k, pos, cfg.MaxPeriod); err != nil {
-				return nil, err
-			}
-		}
-		kvPrior := 0
-		if cache != nil {
-			if cache.K[li] != nil {
-				kvPrior = cache.K[li].Dim(2)
-				if k, err = ops.Concat([]*tensor.Tensor{cache.K[li], k}, 2); err != nil {
-					return nil, err
-				}
-				if v, err = ops.Concat([]*tensor.Tensor{cache.V[li], v}, 2); err != nil {
-					return nil, err
-				}
-			}
-			cache.K[li], cache.V[li] = k, v
-			if total := kvPrior + T; total > cfg.Context {
-				if cache.K[li], err = trimKV(k, total-cfg.Context, cfg.Context); err != nil {
-					return nil, err
-				}
-				if cache.V[li], err = trimKV(v, total-cfg.Context, cfg.Context); err != nil {
-					return nil, err
-				}
-			}
-		}
-		total := kvPrior + T
-		if q, err = autograd.Reshape(q, B*NH, T, HD); err != nil {
-			return nil, err
-		}
-		if k, err = autograd.Reshape(k, B*NH, total, HD); err != nil {
-			return nil, err
-		}
-		if v, err = autograd.Reshape(v, B*NH, total, HD); err != nil {
-			return nil, err
-		}
-		kT, err := autograd.Transpose(k, 1, 2)
-		if err != nil {
-			return nil, err
-		}
-		if kT, err = autograd.Contiguous(kT); err != nil {
-			return nil, err
-		}
-		scores, err := autograd.MatMul(q, kT)
-		if err != nil {
-			return nil, err
-		}
-		if scores, err = ops.Mul(scores, t.scale); err != nil {
-			return nil, err
-		}
-		if T > 1 || total > cfg.Context {
-			mask, err := t.mask(T, kvPrior, cfg.Context, dev)
-			if err != nil {
-				return nil, err
-			}
-			if scores, err = ops.Add(scores, mask); err != nil {
-				return nil, err
-			}
-		}
-		attn, err := ops.Softmax(scores, -1)
-		if err != nil {
-			return nil, err
-		}
-		ctx, err := autograd.MatMul(attn, v)
-		if err != nil {
-			return nil, err
-		}
-		if ctx, err = autograd.Reshape(ctx, B, NH, T, HD); err != nil {
-			return nil, err
-		}
-		if ctx, err = autograd.Permute(ctx, 0, 2, 1, 3); err != nil {
-			return nil, err
-		}
-		if ctx, err = autograd.Contiguous(ctx); err != nil {
-			return nil, err
-		}
-		if ctx, err = autograd.Reshape(ctx, B, T, D); err != nil {
 			return nil, err
 		}
 		o, err := l.OutProj.Forward(ctx)
@@ -774,4 +681,235 @@ func (g *MoshiGen) LastAudioTokens() []int64 {
 		}
 	}
 	return append([]int64(nil), row...)
+}
+
+// attention is one layer's self-attention over T frames with the
+// concatenated key / value cache (masked, sliding window of Context): the
+// input h (B, T, Dim) after the first norm, the output (B, T, Dim) before
+// out_proj.
+func (t *moshiTransformer) attention(l *moshiLayer, li int, h, pos *tensor.Tensor, cache *KVCache) (*tensor.Tensor, error) {
+	cfg := t.Cfg
+	B, T, D := h.Dim(0), h.Dim(1), h.Dim(2)
+	NH, HD := cfg.NumHeads, cfg.headDim()
+	dev := h.Device()
+	// part extracts slot i of a (B, T, n, NH, HD) projection as (B, NH, T, HD).
+	part := func(p *tensor.Tensor, i int) (*tensor.Tensor, error) {
+		s, err := p.Narrow(2, i, 1)
+		if err != nil {
+			return nil, err
+		}
+		if s, err = autograd.Contiguous(s); err != nil {
+			return nil, err
+		}
+		if s, err = autograd.Reshape(s, B, T, NH, HD); err != nil {
+			return nil, err
+		}
+		return headsForward(s, B, T, NH, HD)
+	}
+	qkv, err := l.InProj.Forward(h)
+	if err != nil {
+		return nil, err
+	}
+	if qkv, err = autograd.Reshape(qkv, B, T, 3, NH, HD); err != nil {
+		return nil, err
+	}
+	q, err := part(qkv, 0)
+	if err != nil {
+		return nil, err
+	}
+	k, err := part(qkv, 1)
+	if err != nil {
+		return nil, err
+	}
+	v, err := part(qkv, 2)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.RoPE {
+		if q, err = ops.RoPEInterleaved(q, pos, cfg.MaxPeriod); err != nil {
+			return nil, err
+		}
+		if k, err = ops.RoPEInterleaved(k, pos, cfg.MaxPeriod); err != nil {
+			return nil, err
+		}
+	}
+	kvPrior := 0
+	if cache != nil {
+		if cache.K[li] != nil {
+			kvPrior = cache.K[li].Dim(2)
+			if k, err = ops.Concat([]*tensor.Tensor{cache.K[li], k}, 2); err != nil {
+				return nil, err
+			}
+			if v, err = ops.Concat([]*tensor.Tensor{cache.V[li], v}, 2); err != nil {
+				return nil, err
+			}
+		}
+		cache.K[li], cache.V[li] = k, v
+		if total := kvPrior + T; total > cfg.Context {
+			if cache.K[li], err = trimKV(k, total-cfg.Context, cfg.Context); err != nil {
+				return nil, err
+			}
+			if cache.V[li], err = trimKV(v, total-cfg.Context, cfg.Context); err != nil {
+				return nil, err
+			}
+		}
+	}
+	total := kvPrior + T
+	if q, err = autograd.Reshape(q, B*NH, T, HD); err != nil {
+		return nil, err
+	}
+	if k, err = autograd.Reshape(k, B*NH, total, HD); err != nil {
+		return nil, err
+	}
+	if v, err = autograd.Reshape(v, B*NH, total, HD); err != nil {
+		return nil, err
+	}
+	kT, err := autograd.Transpose(k, 1, 2)
+	if err != nil {
+		return nil, err
+	}
+	if kT, err = autograd.Contiguous(kT); err != nil {
+		return nil, err
+	}
+	scores, err := autograd.MatMul(q, kT)
+	if err != nil {
+		return nil, err
+	}
+	if scores, err = ops.Mul(scores, t.scale); err != nil {
+		return nil, err
+	}
+	if T > 1 || total > cfg.Context {
+		mask, err := t.mask(T, kvPrior, cfg.Context, dev)
+		if err != nil {
+			return nil, err
+		}
+		if scores, err = ops.Add(scores, mask); err != nil {
+			return nil, err
+		}
+	}
+	attn, err := ops.Softmax(scores, -1)
+	if err != nil {
+		return nil, err
+	}
+	ctx, err := autograd.MatMul(attn, v)
+	if err != nil {
+		return nil, err
+	}
+	if ctx, err = autograd.Reshape(ctx, B, NH, T, HD); err != nil {
+		return nil, err
+	}
+	if ctx, err = autograd.Permute(ctx, 0, 2, 1, 3); err != nil {
+		return nil, err
+	}
+	if ctx, err = autograd.Contiguous(ctx); err != nil {
+		return nil, err
+	}
+	if ctx, err = autograd.Reshape(ctx, B, T, D); err != nil {
+		return nil, err
+	}
+	return ctx, nil
+}
+
+// ringAttention is one layer's self-attention for a single frame (B = T = 1)
+// against ring caches of Context slots: the frame's k / v are written at
+// slot Len mod Context and the query attends every valid slot, which is the
+// same sliding window of Context positions (current one included) the
+// masked path keeps.
+func (t *moshiTransformer) ringAttention(l *moshiLayer, li int, h, pos *tensor.Tensor, cache *KVCache) (*tensor.Tensor, error) {
+	cfg := t.Cfg
+	NH, HD, Cap := cfg.NumHeads, cfg.headDim(), cfg.Context
+	dev := h.Device()
+	qkv, err := l.InProj.Forward(h)
+	if err != nil {
+		return nil, err
+	}
+	if qkv, err = autograd.Reshape(qkv, 1, 3*NH, 1, HD); err != nil { // [q heads | k heads | v heads]
+		return nil, err
+	}
+	qk, err := qkv.Narrow(1, 0, 2*NH)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.RoPE {
+		if qk, err = ops.RoPEInterleaved(qk, pos, cfg.MaxPeriod); err != nil {
+			return nil, err
+		}
+	}
+	q, err := qk.Narrow(1, 0, NH)
+	if err != nil {
+		return nil, err
+	}
+	k, err := qk.Narrow(1, NH, NH)
+	if err != nil {
+		return nil, err
+	}
+	v, err := qkv.Narrow(1, 2*NH, NH)
+	if err != nil {
+		return nil, err
+	}
+	if cache.K[li] == nil {
+		if cache.K[li], err = tensor.Zeros(dtype.F32, []int{1, NH, Cap, HD}, dev); err != nil {
+			return nil, err
+		}
+		if cache.V[li], err = tensor.Zeros(dtype.F32, []int{1, NH, Cap, HD}, dev); err != nil {
+			return nil, err
+		}
+	}
+	if err := ops.KVRingWrite(cache.K[li], k, cache.Len); err != nil {
+		return nil, err
+	}
+	if err := ops.KVRingWrite(cache.V[li], v, cache.Len); err != nil {
+		return nil, err
+	}
+	ctx, err := ops.AttnDecode(q, cache.K[li], cache.V[li], min(cache.Len+1, Cap), t.scaleF)
+	if err != nil {
+		return nil, err
+	}
+	return autograd.Reshape(ctx, 1, 1, NH*HD) // (1, NH, 1, HD) and (1, 1, NH·HD) share a layout
+}
+
+// convertCache switches every layer of cache between the concatenated
+// layout (B, NH, L, HD), L = min(Len, Context) positions in time order, and
+// ring buffers (B, NH, Context, HD) holding position p at slot p mod
+// Context.
+func (t *moshiTransformer) convertCache(cache *KVCache, toRing bool) error {
+	Cap := t.Cfg.Context
+	for li := range cache.K {
+		for _, kv := range []*[]*tensor.Tensor{&cache.K, &cache.V} {
+			x := (*kv)[li]
+			if x == nil {
+				continue
+			}
+			if toRing {
+				L := x.Dim(2)
+				r, err := tensor.Zeros(dtype.F32, []int{x.Dim(0), x.Dim(1), Cap, x.Dim(3)}, x.Device())
+				if err != nil {
+					return err
+				}
+				if err := ops.KVRingWrite(r, x, cache.Len-L); err != nil {
+					return err
+				}
+				(*kv)[li] = r
+				continue
+			}
+			L := min(cache.Len, Cap)
+			s0 := (cache.Len - L) % Cap
+			first := min(L, Cap-s0)
+			a, err := trimKV(x, s0, first)
+			if err != nil {
+				return err
+			}
+			if first < L {
+				b, err := trimKV(x, 0, L-first)
+				if err != nil {
+					return err
+				}
+				if a, err = ops.Concat([]*tensor.Tensor{a, b}, 2); err != nil {
+					return err
+				}
+			}
+			(*kv)[li] = a
+		}
+	}
+	return nil
 }

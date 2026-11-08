@@ -348,6 +348,9 @@ type KVCache struct {
 	Conv []*tensor.Tensor
 	Rec  []*tensor.Tensor
 	Len  int
+	// ring marks K / V as fixed-size ring buffers (Moshi's one-frame decode
+	// path) rather than position-ordered concatenations.
+	ring bool
 }
 
 // NewKVCache allocates a fresh cache for a model with `numLayers` blocks.
@@ -360,14 +363,15 @@ func NewKVCache(numLayers int) *KVCache {
 	}
 }
 
-// Reset empties the cache (frees stored K/V and linear-attention state).
-// Call between independent prompts to reuse the same cache struct.
 // Truncate drops every cached position from n on (speculative decoding
 // rolls back a rejected draft this way). Only key / value caches can be
 // truncated; recurrent state (Conv / Rec) cannot be un-stepped.
 func (c *KVCache) Truncate(n int) error {
 	if n < 0 || n > c.Len {
 		return fmt.Errorf("KVCache.Truncate: %d outside [0, %d]", n, c.Len)
+	}
+	if c.ring {
+		return fmt.Errorf("KVCache.Truncate: ring-buffer cache")
 	}
 	for i := range c.Conv {
 		if c.Conv[i] != nil || c.Rec[i] != nil {
@@ -393,6 +397,8 @@ func (c *KVCache) Truncate(n int) error {
 	return nil
 }
 
+// Reset empties the cache (frees stored K/V and linear-attention state).
+// Call between independent prompts to reuse the same cache struct.
 func (c *KVCache) Reset() {
 	for i := range c.K {
 		c.K[i] = nil
@@ -403,6 +409,7 @@ func (c *KVCache) Reset() {
 		c.Rec[i] = nil
 	}
 	c.Len = 0
+	c.ring = false
 }
 
 // NewLlama constructs a fresh model with the given config on dev. Loaders

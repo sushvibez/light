@@ -424,3 +424,63 @@ func TestMoshikoConverse(t *testing.T) {
 		}
 	}
 }
+
+// Mixed call sizes switch the cache between its two layouts: a 3-frame
+// prefill (concatenated), single frames (converted to rings, which wrap
+// past the tiny model's context), a 2-frame call (back to concatenated),
+// then single frames again. Every frame's logits equal the full forward.
+func TestMoshiTinyRingCacheTransitions(t *testing.T) {
+	cpu := device.CPU()
+	m := newTinyMoshi(t, cpu, 1)
+	cfg := m.Cfg
+	const T = 13
+	if cfg.Transformer.Context >= 7 {
+		t.Fatalf("tiny context %d: the ring would not wrap", cfg.Transformer.Context)
+	}
+	text, audio := moshiTinyInputs(t, cfg, T, cpu)
+	full, _, err := m.Forward(text, audio, NewKVCache(cfg.Transformer.NumLayers))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fullRow := tensor.MustSlice[float32](full)
+	V := cfg.TextOutVocab
+	devs := []device.Device{cpu}
+	if device.CUDAAvailable() {
+		gpu, err := device.CUDA(0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		devs = append(devs, gpu)
+	}
+	for _, dev := range devs {
+		md := m
+		if dev != cpu {
+			md = newTinyMoshi(t, dev, 1) // same seeded weights
+		}
+		text, audio := moshiTinyInputs(t, cfg, T, dev)
+		cache := NewKVCache(cfg.Transformer.NumLayers)
+		at := 0
+		for _, n := range []int{3, 1, 1, 1, 1, 2, 1, 1, 1, 1} {
+			tt, _ := text.Narrow(1, at, n)
+			tt, _ = tt.Contiguous()
+			aa := make([]*tensor.Tensor, len(audio))
+			for k := range audio {
+				aa[k], _ = audio[k].Narrow(1, at, n)
+				aa[k], _ = aa[k].Contiguous()
+			}
+			out, _, err := md.Forward(tt, aa, cache)
+			if err != nil {
+				t.Fatal(err)
+			}
+			oc, _ := out.To(cpu)
+			got := tensor.MustSlice[float32](oc)
+			if d := maxAbsDiff(got, fullRow[at*V:(at+n)*V]); d > 1e-4 {
+				t.Errorf("%v: frames %d..%d (call of %d): logits differ from full CPU by %.2e", dev.Kind(), at, at+n-1, n, d)
+			}
+			if cache.ring != (n == 1) {
+				t.Errorf("%v: after a call of %d frames ring = %v", dev.Kind(), n, cache.ring)
+			}
+			at += n
+		}
+	}
+}
