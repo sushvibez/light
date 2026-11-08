@@ -56,7 +56,19 @@ else:
         ids = tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True, return_dict=False)
     else:
         ids = tok("The capital of France is Paris. The capital of Germany is Berlin. The capital of Italy is").input_ids
-model = AutoModelForCausalLM.from_pretrained(repo, dtype=dt, attn_implementation="eager").eval()
+# Fine-grained FP8 checkpoints (Qwen3.5-27B-FP8) are always dequantized on
+# load: w · weight_scale_inv per block, rounded to dt. Those are exactly the
+# weights Light computes with, on any GPU. (Left alone, transformers keeps
+# FP8 on sm_89+ and runs FP8 GEMMs with per-token activation quantization —
+# a different computation — and needs the optional `kernels` package.)
+from transformers import AutoConfig, FineGrainedFP8Config
+extra = {}
+qc = getattr(AutoConfig.from_pretrained(repo), "quantization_config", None)
+if qc is not None and (qc.get("quant_method") if isinstance(qc, dict) else getattr(qc, "quant_method", None)) == "fp8":
+    block = qc.get("weight_block_size") if isinstance(qc, dict) else qc.weight_block_size
+    extra["quantization_config"] = FineGrainedFP8Config(weight_block_size=tuple(block), dequantize=True)
+    print("fp8 checkpoint: dequantizing to", dt)
+model = AutoModelForCausalLM.from_pretrained(repo, dtype=dt, attn_implementation="eager", **extra).eval()
 # Load on the CPU first and move to CUDA only when the weights fit with room
 # for activations (Qwen3.5-27B BF16 is 54 GB: too big for a 40 GB A100, so
 # its reference runs on the CPU; Colab High-RAM has enough). --cpu forces it.
