@@ -155,6 +155,7 @@ for g in "${SEL[@]}"; do
 	moshi)
 		fetch kyutai/moshiko-candle-q8 model.q8.gguf tokenizer_spm_32k_3.model
 		fetch kyutai/mimi
+		LIGHT_MOSHI_FRAMES=43 LIGHT_MOSHI_GC=0 run moshi-nogc ./models 'TestMoshikoProfile'
 		LIGHT_MOSHI_FRAMES=43 run moshi ./models 'TestMoshikoProfile' -cpuprofile "$LOGS/$STAMP-moshi.cpu.pprof"
 		go tool pprof -top -nodecount=40 models.test "$LOGS/$STAMP-moshi.cpu.pprof" >"$LOGS/$STAMP-moshi.pprof.txt" 2>&1 ||
 			go tool pprof -top -nodecount=40 "$LOGS/$STAMP-moshi.cpu.pprof" >"$LOGS/$STAMP-moshi.pprof.txt" 2>&1
