@@ -216,7 +216,7 @@ _Last updated: 2026-11-06 (stale open items reconciled with CHECKPOINTS.md)._
 - [x] `nn`: ELU, LeakyReLU, Mish, HardSwish, HardSigmoid, GELU, ReLU6, PReLU, SwiGLU modules; `nn.LSTM` / `nn.GRU` (torch layout, match torch to 1e-5, trainable); `nn.ConvTranspose2d`
 - [x] Gemma 3 text decoder (`models.Gemma3`): (1+w) RMSNorm, QK-norm, GELU-tanh MLP, local/global layer pattern, logit softcap; `models.CausalLM` interface shared with `models.Llama`
 - [x] MoE gate / experts (`nn.SparseMoE`, `ops.MoEGemm` incl. quantized experts; Qwen3-MoE, 2026-10-28)
-- [x] Chat engine (`engine/`): catalog of HF-cache + GGUF models, chat templates (the model's own Jinja `chat_template`, else built-in ChatML, Llama-3, Phi-3, Mistral, Gemma), streaming generation, OpenAI-compatible `/v1/chat/completions`, `/v1/audio/transcriptions`, `/v1/embeddings`, speech-to-speech `/v1/audio/conversations` (`cmd/light-serve`), Wails v3 + React desktop app (`studio/`)
+- [x] Chat engine (`engine/`): catalog of HF-cache + GGUF models, chat templates (the model's own Jinja `chat_template`, else built-in ChatML, Llama-3, Phi-3, Mistral, Gemma), streaming generation, OpenAI-compatible `/v1/chat/completions`, `/v1/audio/transcriptions`, `/v1/embeddings`, speech-to-speech `/v1/audio/conversations` (`light serve`), the `light` CLI (`cmd/light`: `list`, `pull`, `run` interactive / one-shot chat, `info`, `rm`, `serve`), Wails v3 + React desktop app (`studio/`)
 
 ## Autograd
 

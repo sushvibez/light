@@ -473,6 +473,10 @@ func toI64(ids []int32) []int64 {
 }
 
 // ggufDir is where the catalog looks for GGUF files by default.
+// GGUFDir is where the catalog looks for GGUF files: $LIGHT_GGUF_DIR, or
+// ~/.cache/light/gguf.
+func GGUFDir() string { return ggufDir() }
+
 func ggufDir() string {
 	if v := os.Getenv("LIGHT_GGUF_DIR"); v != "" {
 		return v

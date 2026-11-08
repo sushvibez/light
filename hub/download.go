@@ -51,6 +51,10 @@ func CacheDir() (string, error) {
 // configuration. Existing files in our older `snapshots/main/...` layout
 // are still honored as a fallback.
 func Download(repo, revision, filename string) (string, error) {
+	return download(repo, revision, filename, nil)
+}
+
+func download(repo, revision, filename string, progress Progress) (string, error) {
 	if repo == "" || filename == "" {
 		return "", fmt.Errorf("hub.Download: repo and filename are required")
 	}
@@ -102,7 +106,7 @@ func Download(repo, revision, filename string) (string, error) {
 			return "", err
 		}
 		url := fmt.Sprintf("%s/%s/resolve/%s/%s", Endpoint(), repo, revision, filename)
-		if dlErr := fetch(url, legacy); dlErr != nil {
+		if dlErr := fetchWith(url, legacy, progress); dlErr != nil {
 			return "", fmt.Errorf("resolve sha + fetch failed: sha-resolve: %v; fetch: %w", err, dlErr)
 		}
 		return legacy, nil
@@ -129,7 +133,7 @@ func Download(repo, revision, filename string) (string, error) {
 		return localPath, nil
 	}
 	url := fmt.Sprintf("%s/%s/resolve/%s/%s", Endpoint(), repo, revision, filename)
-	if err := fetch(url, localPath); err != nil {
+	if err := fetchWith(url, localPath, progress); err != nil {
 		return "", err
 	}
 	return localPath, nil
@@ -220,11 +224,12 @@ func resolveCommitSHA(repo, revision string) (string, error) {
 	return info.SHA, nil
 }
 
-// fetch streams `url` to `dst` (with `.part` suffix during download). Honours
-// HuggingFace LFS redirects (the resolve endpoint 302s to a CDN URL). An
-// existing .part is resumed with a Range request (multi-GB checkpoints over
-// flaky links); a server answering 200 instead of 206 restarts it.
-func fetch(url, dst string) error {
+// fetchWith streams `url` to `dst` (with `.part` suffix during download),
+// reporting progress when non-nil. Honours HuggingFace LFS redirects (the
+// resolve endpoint 302s to a CDN URL). An existing .part is resumed with a
+// Range request (multi-GB checkpoints over flaky links); a server answering
+// 200 instead of 206 restarts it.
+func fetchWith(url, dst string, progress Progress) error {
 	tmp := dst + ".part"
 	var have int64
 	if st, err := os.Stat(tmp); err == nil {
@@ -235,10 +240,7 @@ func fetch(url, dst string) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", "light/0.1 (+https://github.com/sushvibez/light)")
-	if tok := os.Getenv("HF_TOKEN"); tok != "" {
-		req.Header.Set("Authorization", "Bearer "+tok)
-	}
+	setHeaders(req)
 	if have > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", have))
 	}
@@ -261,7 +263,20 @@ func fetch(url, dst string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, resp.Body); err != nil {
+	var w io.Writer = out
+	if progress != nil {
+		start := int64(0)
+		if flags&os.O_APPEND != 0 {
+			start = have
+		}
+		total := int64(-1)
+		if resp.ContentLength >= 0 {
+			total = start + resp.ContentLength
+		}
+		w = &progressWriter{w: out, done: start, total: max(total, 0), report: progress}
+		progress(start, max(total, 0))
+	}
+	if _, err := io.Copy(w, resp.Body); err != nil {
 		_ = out.Close()
 		return fmt.Errorf("hub.Download: copy: %w (partial file kept at %s for resume)", err, tmp)
 	}

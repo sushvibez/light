@@ -7,8 +7,8 @@ PyTorch checkpoints, HF-compatible tokenizers, and ports of the transformer,
 vision, diffusion and speech models that Candle ships, each verified against
 the reference implementation on real weights.
 
-It also includes an inference engine with an OpenAI-compatible HTTP API
-(`cmd/light-serve`) and a desktop app (`studio/`, Wails v3 + React) for
+It also includes an inference engine with a command-line tool (`cmd/light`:
+pull, chat, and an OpenAI-compatible HTTP API) and a desktop app (`studio/`, Wails v3 + React) for
 chat, speech-to-text, embeddings and full-duplex speech-to-speech (Moshi).
 
 ## What is in the box
@@ -50,8 +50,13 @@ go test ./tensor ./ops ./nn            # CPU + CUDA parity suites
 go run ./examples/25_gpt2_pretrained   # real GPT-2 weights, greedy decode
 go run ./examples/41_whisper           # speech-to-text on the test clip
 
-# OpenAI-compatible server over everything in your HF cache / GGUF dir
-go run ./cmd/light-serve -addr :8129
+# The light CLI: download, chat, serve
+go install ./cmd/light
+light pull Qwen/Qwen2.5-0.5B-Instruct  # or: light pull <org/repo-GGUF> <file.gguf>
+light list                             # models in your HF cache / GGUF dir
+light run qwen2.5-0.5b-instruct        # interactive chat (/help for commands)
+light run qwen2.5-0.5b-instruct "Why is the sky blue?"
+light serve -addr :8129                # OpenAI-compatible API
 curl localhost:8129/v1/models
 
 # Desktop app

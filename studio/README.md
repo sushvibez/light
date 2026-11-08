@@ -1,7 +1,7 @@
 # Light Studio
 
 Desktop AI studio (Wails v3 + React) that runs Light's models natively, in
-process, on the local GPU. It is the same engine as `cmd/light-serve`; the app
+process, on the local GPU. It is the same engine as `light serve` (`cmd/light`); the app
 also exposes it as an OpenAI-compatible API on `http://127.0.0.1:8129/v1`
 (override with `LIGHT_API_ADDR`).
 
