@@ -22,7 +22,7 @@ chat template and decodes 16 greedy tokens. Runs on CUDA when the weights
 fit, else on the CPU (--cpu forces it).
 """
 import json, os, sys, torch
-from transformers import AutoTokenizer, Qwen2Config, Qwen2ForCausalLM
+from transformers import Qwen2Config, Qwen2ForCausalLM, Qwen2TokenizerFast
 
 if sys.argv[1] == "--make-tiny":
     from safetensors.torch import load_file, save_file
@@ -80,7 +80,9 @@ raw = json.load(open(cfg_path))
 for k in ("model_type", "architectures", "auto_map", "num_nextn_predict_layers"):
     raw.pop(k, None)
 cfg = Qwen2Config(**raw)
-tok = None if ids is not None else AutoTokenizer.from_pretrained(repo)
+# Not AutoTokenizer: it reads config.json's auto_map and asks to run the
+# repo's configuration_mimo.py. The tokenizer files are plain Qwen2 ones.
+tok = None if ids is not None else Qwen2TokenizerFast.from_pretrained(repo)
 model = Qwen2ForCausalLM.from_pretrained(repo, config=cfg, dtype=dt, attn_implementation="eager").eval()
 dev = "cpu"
 if torch.cuda.is_available() and "--cpu" not in sys.argv:
