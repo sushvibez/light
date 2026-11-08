@@ -44,6 +44,8 @@ type LlamaConfig struct {
 	SlidingLayers      []bool  // optional per-layer switch (len NumLayers); nil = every layer uses SlidingWindow. Gemma alternates local/global layers.
 	QKNorm             bool    // Qwen3: RMSNorm over the head dim of Q and K (per layer weights) before RoPE
 	PostNorms          bool    // GLM-4-0414: RMSNorm on the attention and MLP outputs before each residual add
+	LayerNorm1P        bool    // Nemotron: LayerNorm (mean-centred, with bias) instead of RMSNorm; loaders store gamma as 1 + w
+	ReLU2MLP           bool    // Nemotron: non-gated MLP down(relu(up(x))²); GateProj is nil
 	// Mixture-of-experts FFN (Qwen3-MoE / Mixtral / DeepSeek-style). NumExperts
 	// > 0 turns the FFN of every layer selected by DecoderSparseStep /
 	// MLPOnlyLayers into an nn.SparseMoE with NumExpertsPerTok routed experts
@@ -121,8 +123,9 @@ func Qwen2_1_5B() LlamaConfig {
 type llamaBlock struct {
 	N1                         *nn.RMSNorm
 	QProj, KProj, VProj, OProj *nn.Linear
-	QNorm, KNorm               *nn.RMSNorm // Qwen3 QK-norm (HeadDim); nil otherwise
-	PostAttnNorm, PostMLPNorm  *nn.RMSNorm // GLM-4-0414 post-norms (Cfg.PostNorms); nil otherwise
+	QNorm, KNorm               *nn.RMSNorm   // Qwen3 QK-norm (HeadDim); nil otherwise
+	PostAttnNorm, PostMLPNorm  *nn.RMSNorm   // GLM-4-0414 post-norms (Cfg.PostNorms); nil otherwise
+	LN1, LN2                   *nn.LayerNorm // Nemotron (Cfg.LayerNorm1P): used instead of N1 / N2
 	N2                         *nn.RMSNorm
 	GateProj, UpProj, DownProj *nn.Linear    // dense SwiGLU MLP; nil on MoE layers
 	MoE                        *nn.SparseMoE // routed-expert FFN; nil on dense layers
@@ -190,8 +193,10 @@ func newLlamaBlock(cfg LlamaConfig, layer int, dev device.Device) (*llamaBlock, 
 		}
 		blk.MoE = moe
 	} else {
-		if blk.GateProj, err = mkLinear(D, IM, false, wdt, dev); err != nil {
-			return nil, err
+		if !cfg.ReLU2MLP {
+			if blk.GateProj, err = mkLinear(D, IM, false, wdt, dev); err != nil {
+				return nil, err
+			}
 		}
 		if blk.UpProj, err = mkLinear(D, IM, false, wdt, dev); err != nil {
 			return nil, err
@@ -205,6 +210,14 @@ func newLlamaBlock(cfg LlamaConfig, layer int, dev device.Device) (*llamaBlock, 
 			return nil, err
 		}
 		if blk.KNorm, err = nn.NewRMSNormWithDType(HD, cfg.RmsEps, wdt, dev); err != nil {
+			return nil, err
+		}
+	}
+	if cfg.LayerNorm1P {
+		if blk.LN1, err = nn.NewLayerNormWithDType(D, cfg.RmsEps, dtype.F32, dev); err != nil {
+			return nil, err
+		}
+		if blk.LN2, err = nn.NewLayerNormWithDType(D, cfg.RmsEps, dtype.F32, dev); err != nil {
 			return nil, err
 		}
 	}
@@ -235,12 +248,18 @@ func (b *llamaBlock) parameters() []*tensor.Tensor {
 		ps = append(ps, b.PostAttnNorm.Parameters()...)
 		ps = append(ps, b.PostMLPNorm.Parameters()...)
 	}
+	if b.LN1 != nil {
+		ps = append(ps, b.LN1.Parameters()...)
+		ps = append(ps, b.LN2.Parameters()...)
+	}
 	if b.MoE != nil {
 		ps = append(ps, b.MoE.Gate.Parameters()...)
 		ps = append(ps, b.MoE.GateUp, b.MoE.Down)
 		return ps
 	}
-	ps = append(ps, b.GateProj.Parameters()...)
+	if b.GateProj != nil {
+		ps = append(ps, b.GateProj.Parameters()...)
+	}
 	ps = append(ps, b.UpProj.Parameters()...)
 	ps = append(ps, b.DownProj.Parameters()...)
 	return ps
@@ -253,7 +272,8 @@ type Llama struct {
 	TokenEmb  *nn.Embedding
 	Blocks    []*llamaBlock
 	FinalNorm *nn.RMSNorm
-	LMHead    *nn.Linear // (V, D); shares storage with TokenEmb when TieEmbed.
+	FinalLN   *nn.LayerNorm // Nemotron (Cfg.LayerNorm1P): used instead of FinalNorm
+	LMHead    *nn.Linear    // (V, D); shares storage with TokenEmb when TieEmbed.
 
 	scale      *tensor.Tensor // (1,) F32 = 1/sqrt(HeadDim) on dev
 	scaleDev   device.Device
@@ -384,6 +404,12 @@ func NewLlama(cfg LlamaConfig, dev device.Device) (*Llama, error) {
 	if rmsDT == dtype.F16 {
 		rmsDT = dtype.F32
 	}
+	var finalLN *nn.LayerNorm
+	if cfg.LayerNorm1P {
+		if finalLN, err = nn.NewLayerNormWithDType(cfg.HiddenSize, cfg.RmsEps, dtype.F32, dev); err != nil {
+			return nil, err
+		}
+	}
 	fn, err := nn.NewRMSNormWithDType(cfg.HiddenSize, cfg.RmsEps, rmsDT, dev)
 	if err != nil {
 		return nil, err
@@ -422,7 +448,7 @@ func NewLlama(cfg LlamaConfig, dev device.Device) (*Llama, error) {
 		}
 	}
 	return &Llama{
-		Cfg: cfg, TokenEmb: tokEmb, Blocks: blocks, FinalNorm: fn, LMHead: head,
+		Cfg: cfg, TokenEmb: tokEmb, Blocks: blocks, FinalNorm: fn, FinalLN: finalLN, LMHead: head,
 		scale: scaleT, scaleDev: dev,
 	}, nil
 }
@@ -435,7 +461,11 @@ func (m *Llama) Parameters() []*tensor.Tensor {
 	for _, b := range m.Blocks {
 		ps = append(ps, b.parameters()...)
 	}
-	ps = append(ps, m.FinalNorm.Parameters()...)
+	if m.FinalLN != nil {
+		ps = append(ps, m.FinalLN.Parameters()...)
+	} else {
+		ps = append(ps, m.FinalNorm.Parameters()...)
+	}
 	if !m.Cfg.TieEmbed {
 		ps = append(ps, m.LMHead.Parameters()...)
 	}
@@ -523,7 +553,11 @@ func (m *Llama) ForwardEmbeds(h *tensor.Tensor, cache *KVCache) (*tensor.Tensor,
 			return nil, err
 		}
 	}
-	h, err = m.FinalNorm.Forward(h)
+	if m.FinalLN != nil {
+		h, err = m.FinalLN.Forward(h)
+	} else {
+		h, err = m.FinalNorm.Forward(h)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -552,7 +586,13 @@ func (m *Llama) runBlock(blk *llamaBlock, x *tensor.Tensor, B, T, prior int, dev
 	NH, KH, HD := cfg.NumHeads, cfg.NumKVHeads, cfg.HeadDim
 	g := NH / KH
 
-	h, err := blk.N1.Forward(x)
+	var h *tensor.Tensor
+	var err error
+	if blk.LN1 != nil {
+		h, err = blk.LN1.Forward(x)
+	} else {
+		h, err = blk.N1.Forward(x)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -740,7 +780,11 @@ attend:
 	}
 
 	// SwiGLU MLP, or the routed-expert FFN on MoE layers.
-	h, err = blk.N2.Forward(x)
+	if blk.LN2 != nil {
+		h, err = blk.LN2.Forward(x)
+	} else {
+		h, err = blk.N2.Forward(x)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -753,6 +797,23 @@ attend:
 			if mlpOut, err = blk.PostMLPNorm.Forward(mlpOut); err != nil {
 				return nil, err
 			}
+		}
+		return autograd.Add(x, mlpOut)
+	}
+	if blk.GateProj == nil { // Nemotron: down(relu(up(h))²)
+		up, err := blk.UpProj.Forward(h)
+		if err != nil {
+			return nil, err
+		}
+		if up, err = ops.Relu(up); err != nil {
+			return nil, err
+		}
+		if up, err = ops.Sqr(up); err != nil {
+			return nil, err
+		}
+		mlpOut, err := blk.DownProj.Forward(up)
+		if err != nil {
+			return nil, err
 		}
 		return autograd.Add(x, mlpOut)
 	}
