@@ -120,18 +120,19 @@ func TestDeepseekV2TinyMatchesTransformers(t *testing.T) {
 //
 //	python scripts/verify/ref_deepseek_v2.py deepseek-ai/DeepSeek-V2-Lite-Chat bf16 --chat
 //
-// TODO(deepseek-v2-lite): fill in the prompt ids, reference logits and greedy
-// ids from that run; until then the test stops after the reference-free
-// checks.
+// (A100 80 GB, on the GPU.) Logits near 32-64 are 0.25 apart in BF16, so the
+// 0.75 tolerance is three steps.
 const deepseekV2LiteRepo = "deepseek-ai/DeepSeek-V2-Lite-Chat"
 
 var (
-	deepseekV2LiteChatIDs []int64
-	deepseekV2LiteRef     []struct {
+	deepseekV2LiteChatIDs = []int64{100000, 2054, 418, 245, 46019, 20308, 13, 185, 185, 5726, 25, 79352, 279, 634, 4976,
+		2643, 254, 9539, 317, 5501, 13, 185, 185, 77398, 25}
+	deepseekV2LiteRef = []struct {
 		id    int
 		logit float32
-	}
-	deepseekV2LiteGreedy []int64
+	}{{429, 46.5}, {5071, 38.0}, {2473, 37.5}, {10780, 37.0}, {10397, 36.5}}
+	// " The sky appears blue because molecules in the Earth's atmosphere scatter sunlight in all"
+	deepseekV2LiteGreedy = []int64{429, 9539, 6266, 5501, 1373, 27788, 279, 254, 11687, 6, 82, 13510, 33072, 29626, 279, 521}
 )
 
 func TestDeepseekV2LiteMatchesTransformersBF16(t *testing.T) {
@@ -165,12 +166,6 @@ func TestDeepseekV2LiteMatchesTransformersBF16(t *testing.T) {
 	}
 	t.Logf("params %.3f B, softmax scale %.5f", float64(m.ParamCount())/1e9, c.softmaxScale())
 	ids := deepseekV2LiteChatIDs
-	if ids == nil {
-		ids = make([]int64, 32) // a fixed sequence until the chat-template ids are recorded
-		for i := range ids {
-			ids[i] = int64(1000 + 37*i)
-		}
-	}
 	cache := NewKVCache(m.NumLayers())
 	row := lastLogits(t, m, ids, cache, dev)
 	got := top5(row)
@@ -183,9 +178,6 @@ func TestDeepseekV2LiteMatchesTransformersBF16(t *testing.T) {
 		row = lastLogits(t, m, []int64{next}, cache, dev)
 	}
 	t.Logf("greedy %v", greedy)
-	if deepseekV2LiteRef == nil {
-		t.Skip("transformers reference values not recorded yet (see TODO(deepseek-v2-lite))")
-	}
 	for i, w := range deepseekV2LiteRef {
 		if i < 2 && got[i] != w.id {
 			t.Errorf("top-%d: got %d (%.3f), want %d (%.3f)", i+1, got[i], first[got[i]], w.id, w.logit)
