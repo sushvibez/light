@@ -5,6 +5,7 @@ package wgpudev
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"path/filepath"
 	"sync"
 
@@ -40,7 +41,36 @@ type Device struct {
 	pipelines map[string]*pipelineEntry
 	pending   int
 	pool      *pool
+
+	// The open batch: dispatches, copies and clears recorded into one
+	// command encoder (and a compute pass while dispatching) and submitted
+	// together. Per-dispatch parameters live in ring slots whose bytes are
+	// staged on the host and uploaded once, right before the submit.
+	enc     *gpu.CommandEncoder
+	pass    *gpu.ComputePass
+	batchN  int
+	gen     uint64 // batch generation; Params of an older batch are re-staged
+	bgs     []*gpu.BindGroup
+	ring    *gpu.Buffer
+	stage   []byte
+	Submits uint64 // command buffers submitted (for tests and profiling)
 }
+
+// Batching limits: dispatches per command buffer, and the parameter ring
+// (256-byte slots: WebGPU's default uniform / storage offset alignment).
+const (
+	slotAlign = 256
+	ringBytes = 1 << 20
+)
+
+// maxBatch is the number of dispatches per command buffer
+// ($LIGHT_WGPU_BATCH overrides, for experiments).
+var maxBatch = func() int {
+	if n, err := strconv.Atoi(os.Getenv("LIGHT_WGPU_BATCH")); err == nil && n > 0 {
+		return n
+	}
+	return 256
+}()
 
 type pipelineEntry struct {
 	pipeline *gpu.ComputePipeline
@@ -134,6 +164,10 @@ func open() (*Device, error) {
 		pipelines:                   make(map[string]*pipelineEntry),
 	}
 	d.pool = newPool(d)
+	d.ring = device.CreateBuffer(gpu.BufferUniform|gpu.BufferStorage|gpu.BufferCopyDst, ringBytes)
+	if !d.ring.Valid() {
+		return nil, fmt.Errorf("wgpudev: create parameter ring failed")
+	}
 	return d, nil
 }
 
@@ -151,17 +185,55 @@ func (d *Device) CheckSize(n uint64) error {
 	return nil
 }
 
-// submitLocked queues a command buffer and lazily flushes. Caller holds d.mu.
-func (d *Device) submitLocked(cmd *gpu.CommandBuffer) {
-	d.Queue.Submit(cmd) // releases cmd
+// encoderLocked returns the open batch's encoder, starting a batch if
+// none is open. Caller holds d.mu.
+func (d *Device) encoderLocked() *gpu.CommandEncoder {
+	if d.enc == nil {
+		d.enc = d.Device.CreateCommandEncoder()
+	}
+	return d.enc
+}
+
+// endPassLocked closes the open compute pass (copies and clears are
+// recorded outside passes). Caller holds d.mu.
+func (d *Device) endPassLocked() {
+	if d.pass != nil {
+		d.pass.End()
+		d.pass = nil
+	}
+}
+
+// submitLocked uploads the batch's staged parameters and submits it,
+// polling the device every maxPendingSubmits batches. Caller holds d.mu.
+func (d *Device) submitLocked() {
+	if d.enc == nil {
+		return
+	}
+	d.endPassLocked()
+	if len(d.stage) > 0 {
+		d.Queue.WriteBuffer(d.ring, 0, d.stage) // ordered before this submit, after the previous one
+		d.stage = d.stage[:0]
+	}
+	d.Queue.Submit(d.enc.Finish()) // releases the command buffer
+	d.enc, d.batchN = nil, 0
+	d.gen++
+	d.Submits++
+	for _, bg := range d.bgs {
+		bg.Release()
+	}
+	d.bgs = d.bgs[:0]
 	d.pending++
 	if d.pending >= maxPendingSubmits {
 		d.flushLocked()
 	}
 }
 
-// flushLocked blocks until all queued work has completed. Caller holds d.mu.
+// flushLocked submits the open batch and blocks until all queued work has
+// completed. Caller holds d.mu.
 func (d *Device) flushLocked() {
+	if d.enc != nil {
+		d.submitLocked()
+	}
 	if d.pending == 0 {
 		return
 	}
@@ -183,6 +255,13 @@ func (d *Device) Synchronize() {
 	defer d.mu.Unlock()
 	d.flushLocked()
 	d.Device.Poll(true)
+}
+
+// Submit sends the open batch to the GPU without waiting for it.
+func (d *Device) Submit() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.submitLocked()
 }
 
 // shaderLocked returns the cached module for name, compiling code on first use.
@@ -237,12 +316,53 @@ const (
 )
 
 // Binding is one bind-group slot for Run. Offset/Size are in bytes; a zero
-// Size binds the whole buffer from Offset.
+// Size binds the whole buffer from Offset. Param, when set, binds a
+// per-dispatch parameter slot instead of Buf.
 type Binding struct {
 	Kind   BindKind
 	Buf    *gpu.Buffer
 	Offset uint64
 	Size   uint64
+	Param  *Param
+}
+
+// Param is a per-dispatch parameter block (uniform words or a metadata
+// table) in a slot of the batch's parameter ring. It keeps its bytes, so a
+// batch submitted between creating it and the Run that binds it only costs
+// a re-stage into the new batch.
+type Param struct {
+	data []byte
+	off  uint64
+	gen  uint64
+}
+
+// Release is a no-op (slots are recycled per batch); it keeps the
+// create / defer-Release shape of real buffers at call sites.
+func (p *Param) Release() {}
+
+// stageLocked places data in a ring slot of the open batch, submitting the
+// batch first when the ring is full. Caller holds d.mu.
+func (d *Device) stageLocked(data []byte) (off uint64) {
+	n := (len(data) + slotAlign - 1) / slotAlign * slotAlign
+	if n == 0 {
+		n = slotAlign
+	}
+	if len(d.stage)+n > ringBytes {
+		d.submitLocked()
+	}
+	off = uint64(len(d.stage))
+	d.stage = append(d.stage, data...)
+	d.stage = append(d.stage, make([]byte, n-len(data))...)
+	return off
+}
+
+func (d *Device) newParam(data []byte) *Param {
+	if len(data)%16 != 0 { // uniform blocks are vec4 multiples
+		data = append(data, make([]byte, 16-len(data)%16)...)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return &Param{data: data, off: d.stageLocked(data), gen: d.gen}
 }
 
 // Run dispatches the compute shader `code` (cached under `name`, entry point
@@ -261,19 +381,41 @@ func (d *Device) Run(name, code string, binds []Binding, wx, wy, wz uint32) erro
 	if err != nil {
 		return err
 	}
+	// Re-stage parameters created in an already submitted batch. Staging
+	// can itself submit (ring full), so repeat until all are current.
+	for again := true; again; {
+		again = false
+		gen := d.gen
+		for _, b := range binds {
+			if p := b.Param; p != nil && p.gen != gen {
+				p.off, p.gen = d.stageLocked(p.data), d.gen
+			}
+		}
+		for _, b := range binds {
+			if b.Param != nil && b.Param.gen != d.gen {
+				again = true
+			}
+		}
+	}
 	entries := make([]gpu.BufferBinding, len(binds))
 	for i, b := range binds {
+		if b.Param != nil {
+			entries[i] = gpu.BufferBinding{Binding: i, Buffer: d.ring, Offset: b.Param.off, Size: uint64(len(b.Param.data))}
+			continue
+		}
 		entries[i] = gpu.BufferBinding{Binding: i, Buffer: b.Buf, Offset: b.Offset, Size: b.Size}
 	}
 	bg := d.Device.CreateBufferBindGroup(pe.layout, entries)
-	defer bg.Release()
-	enc := d.Device.CreateCommandEncoder()
-	pass := enc.BeginComputePass()
-	pass.SetPipeline(pe.pipeline)
-	pass.SetBindGroup(0, bg)
-	pass.Dispatch(int(wx), int(wy), int(wz))
-	pass.End()
-	d.submitLocked(enc.Finish())
+	d.bgs = append(d.bgs, bg) // released after the batch is submitted
+	if d.pass == nil {
+		d.pass = d.encoderLocked().BeginComputePass()
+	}
+	d.pass.SetPipeline(pe.pipeline)
+	d.pass.SetBindGroup(0, bg)
+	d.pass.Dispatch(int(wx), int(wy), int(wz))
+	if d.batchN++; d.batchN >= maxBatch {
+		d.submitLocked()
+	}
 	return nil
 }
 
@@ -328,9 +470,9 @@ func (d *Device) newInit(usage gpu.BufferUsage, data []byte) (*gpu.Buffer, error
 	return buf, nil
 }
 
-// Uniform creates a uniform buffer holding the given u32 words. The caller
-// releases it after Run returns.
-func (d *Device) Uniform(words ...uint32) (*gpu.Buffer, error) {
+// Uniform returns a per-dispatch uniform block holding the given u32
+// words, in the open batch's parameter ring.
+func (d *Device) Uniform(words ...uint32) (*Param, error) {
 	data := make([]byte, 4*len(words))
 	for i, w := range words {
 		data[4*i] = byte(w)
@@ -338,12 +480,17 @@ func (d *Device) Uniform(words ...uint32) (*gpu.Buffer, error) {
 		data[4*i+2] = byte(w >> 16)
 		data[4*i+3] = byte(w >> 24)
 	}
-	return d.newInit(gpu.BufferUniform, data)
+	return d.newParam(data), nil
 }
 
-// StorageInit creates a read-only storage buffer pre-filled with data (used
-// for per-dispatch metadata such as shape/stride tables). The caller
-// releases it after Run returns.
+// StorageTemp is Uniform for a read-only storage table (per-dispatch
+// shape / stride metadata).
+func (d *Device) StorageTemp(data []byte) (*Param, error) {
+	return d.newParam(append([]byte(nil), data...)), nil
+}
+
+// StorageInit creates a persistent read-only storage buffer pre-filled with
+// data (cached tables); the caller owns and releases it.
 func (d *Device) StorageInit(data []byte) (*gpu.Buffer, error) {
 	return d.newInit(gpu.BufferStorage, data)
 }
@@ -361,6 +508,7 @@ func (d *Device) Write(buf *gpu.Buffer, off uint64, data []byte) error {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.submitLocked() // recorded work comes before this write on the queue
 	d.Queue.WriteBuffer(buf, int(off), padded)
 	return nil
 }
@@ -407,13 +555,13 @@ func (d *Device) CopyMany(regions []CopyRegion) error {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	enc := d.Device.CreateCommandEncoder()
+	d.endPassLocked()
+	enc := d.encoderLocked()
 	for _, r := range regions {
 		if r.Size > 0 {
 			enc.CopyBufferToBuffer(r.Src, r.SrcOff, r.Dst, r.DstOff, r.Size)
 		}
 	}
-	d.submitLocked(enc.Finish())
 	return nil
 }
 
@@ -424,8 +572,7 @@ func (d *Device) Clear(buf *gpu.Buffer, off, n uint64) error {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	enc := d.Device.CreateCommandEncoder()
-	enc.ClearBuffer(buf, off, n)
-	d.submitLocked(enc.Finish())
+	d.endPassLocked()
+	d.encoderLocked().ClearBuffer(buf, off, n)
 	return nil
 }

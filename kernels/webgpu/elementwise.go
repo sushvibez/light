@@ -61,7 +61,7 @@ func makeBinary(op string, code uint32) registry.Kernel {
 		}
 		dims := out.Shape().Dims()
 		rank := len(dims)
-		meta, err := d.StorageInit(i32Bytes(dims, aStr.Slice(), bStr.Slice()))
+		meta, err := d.StorageTemp(i32Bytes(dims, aStr.Slice(), bStr.Slice()))
 		if err != nil {
 			return err
 		}
@@ -77,7 +77,7 @@ func makeBinary(op string, code uint32) registry.Kernel {
 		}
 		defer params2.Release()
 		return run1D(d, "binary_strided", []wgpudev.Binding{
-			rd(raw(a)), rd(raw(b)), rw(raw(out)), rd(meta), uni(params), uni(params2),
+			rd(raw(a)), rd(raw(b)), rw(raw(out)), rdp(meta), uni(params), uni(params2),
 		}, n)
 	}
 }

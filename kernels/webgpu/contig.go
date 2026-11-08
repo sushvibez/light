@@ -56,7 +56,7 @@ func copyStridedToContig(dst, src *tensor.Tensor) error {
 	default:
 		return fmt.Errorf("webgpu Contiguous: dtype %v (%d-byte) not supported; only 4- and 8-byte element types", src.DType(), src.DType().Size())
 	}
-	meta, err := d.StorageInit(i32Bytes(dims, str))
+	meta, err := d.StorageTemp(i32Bytes(dims, str))
 	if err != nil {
 		return err
 	}
@@ -66,7 +66,7 @@ func copyStridedToContig(dst, src *tensor.Tensor) error {
 		return err
 	}
 	defer params.Release()
-	return run1D(d, "copy_strided", []wgpudev.Binding{rd(raw(src)), rw(raw(dst)), rd(meta), uni(params)}, n)
+	return run1D(d, "copy_strided", []wgpudev.Binding{rd(raw(src)), rw(raw(dst)), rdp(meta), uni(params)}, n)
 }
 
 // copyDeviceToDevice is a whole-buffer copy between two contiguous tensors.

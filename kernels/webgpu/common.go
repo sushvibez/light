@@ -26,7 +26,12 @@ func rd(b *gpu.Buffer) wgpudev.Binding { return wgpudev.Binding{Kind: wgpudev.Re
 func rw(b *gpu.Buffer) wgpudev.Binding {
 	return wgpudev.Binding{Kind: wgpudev.ReadWriteStorage, Buf: b}
 }
-func uni(b *gpu.Buffer) wgpudev.Binding { return wgpudev.Binding{Kind: wgpudev.Uniform, Buf: b} }
+func uni(p *wgpudev.Param) wgpudev.Binding { return wgpudev.Binding{Kind: wgpudev.Uniform, Param: p} }
+
+// rdp binds a per-dispatch read-only storage table (StorageTemp).
+func rdp(p *wgpudev.Param) wgpudev.Binding {
+	return wgpudev.Binding{Kind: wgpudev.ReadStorage, Param: p}
+}
 
 func f32bits(f float32) uint32 { return math.Float32bits(f) }
 
