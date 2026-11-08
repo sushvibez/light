@@ -5,8 +5,8 @@ package wgpudev
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"path/filepath"
+	"strconv"
 	"sync"
 
 	"light/internal/gpu"
