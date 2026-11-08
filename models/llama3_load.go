@@ -367,8 +367,10 @@ func LoadCausalLMFromHF(repo string, dev device.Device, weightDT dtype.DType) (*
 		return loadQwen2(repo, dev, weightDT)
 	case "phi3":
 		return LoadPhi3FromHF(repo, dev, weightDT)
+	case "glm", "glm4":
+		return LoadGLMFromHF(repo, dev, weightDT)
 	default:
-		return nil, fmt.Errorf("LoadCausalLMFromHF: model_type %q not supported (llama, mistral, qwen2, qwen3, qwen3_moe, mellum, sdar, phi3)", hf.ModelType)
+		return nil, fmt.Errorf("LoadCausalLMFromHF: model_type %q not supported (llama, mistral, qwen2, qwen3, qwen3_moe, mellum, sdar, phi3, glm, glm4)", hf.ModelType)
 	}
 }
 

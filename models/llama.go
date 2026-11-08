@@ -43,6 +43,7 @@ type LlamaConfig struct {
 	SlidingWindow      int     // Mistral/Gemma-style sliding-window attention: each query sees at most this many keys back. 0 = full causal.
 	SlidingLayers      []bool  // optional per-layer switch (len NumLayers); nil = every layer uses SlidingWindow. Gemma alternates local/global layers.
 	QKNorm             bool    // Qwen3: RMSNorm over the head dim of Q and K (per layer weights) before RoPE
+	PostNorms          bool    // GLM-4-0414: RMSNorm on the attention and MLP outputs before each residual add
 	// Mixture-of-experts FFN (Qwen3-MoE / Mixtral / DeepSeek-style). NumExperts
 	// > 0 turns the FFN of every layer selected by DecoderSparseStep /
 	// MLPOnlyLayers into an nn.SparseMoE with NumExpertsPerTok routed experts
@@ -121,6 +122,7 @@ type llamaBlock struct {
 	N1                         *nn.RMSNorm
 	QProj, KProj, VProj, OProj *nn.Linear
 	QNorm, KNorm               *nn.RMSNorm // Qwen3 QK-norm (HeadDim); nil otherwise
+	PostAttnNorm, PostMLPNorm  *nn.RMSNorm // GLM-4-0414 post-norms (Cfg.PostNorms); nil otherwise
 	N2                         *nn.RMSNorm
 	GateProj, UpProj, DownProj *nn.Linear    // dense SwiGLU MLP; nil on MoE layers
 	MoE                        *nn.SparseMoE // routed-expert FFN; nil on dense layers
@@ -206,6 +208,14 @@ func newLlamaBlock(cfg LlamaConfig, layer int, dev device.Device) (*llamaBlock, 
 			return nil, err
 		}
 	}
+	if cfg.PostNorms {
+		if blk.PostAttnNorm, err = nn.NewRMSNormWithDType(D, cfg.RmsEps, wdt, dev); err != nil {
+			return nil, err
+		}
+		if blk.PostMLPNorm, err = nn.NewRMSNormWithDType(D, cfg.RmsEps, wdt, dev); err != nil {
+			return nil, err
+		}
+	}
 	return blk, nil
 }
 
@@ -221,6 +231,10 @@ func (b *llamaBlock) parameters() []*tensor.Tensor {
 		ps = append(ps, b.KNorm.Parameters()...)
 	}
 	ps = append(ps, b.N2.Parameters()...)
+	if b.PostAttnNorm != nil {
+		ps = append(ps, b.PostAttnNorm.Parameters()...)
+		ps = append(ps, b.PostMLPNorm.Parameters()...)
+	}
 	if b.MoE != nil {
 		ps = append(ps, b.MoE.Gate.Parameters()...)
 		ps = append(ps, b.MoE.GateUp, b.MoE.Down)
@@ -715,6 +729,11 @@ attend:
 	if err != nil {
 		return nil, err
 	}
+	if blk.PostAttnNorm != nil {
+		if attnOut, err = blk.PostAttnNorm.Forward(attnOut); err != nil {
+			return nil, err
+		}
+	}
 	x, err = autograd.Add(x, attnOut)
 	if err != nil {
 		return nil, err
@@ -729,6 +748,11 @@ attend:
 		mlpOut, err := blk.MoE.Forward(h)
 		if err != nil {
 			return nil, err
+		}
+		if blk.PostMLPNorm != nil {
+			if mlpOut, err = blk.PostMLPNorm.Forward(mlpOut); err != nil {
+				return nil, err
+			}
 		}
 		return autograd.Add(x, mlpOut)
 	}
@@ -751,6 +775,11 @@ attend:
 	mlpOut, err := blk.DownProj.Forward(mlpIn)
 	if err != nil {
 		return nil, err
+	}
+	if blk.PostMLPNorm != nil {
+		if mlpOut, err = blk.PostMLPNorm.Forward(mlpOut); err != nil {
+			return nil, err
+		}
 	}
 	return autograd.Add(x, mlpOut)
 }
