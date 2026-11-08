@@ -96,18 +96,18 @@ func TestQwen35FP8TinyMatchesTransformers(t *testing.T) {
 //
 //	python scripts/verify/ref_qwen35.py Qwen/Qwen3.5-27B-FP8 bf16 --chat
 //
-// TODO(qwen35-27b-fp8): fill in the reference values (and the prompt ids if
-// they differ from the 9B's); until then the test stops after the
-// reference-free checks.
+// (A100 80 GB: the dequantized model ran on the GPU.) The prompt ids are the
+// 9B's: same tokenizer and template.
 const qwen3527BFP8Repo = "Qwen/Qwen3.5-27B-FP8"
 
 var (
 	qwen3527BFP8ChatIDs = qwen359BChatIDs
-	qwen3527BFP8Ref     []struct {
+	qwen3527BFP8Ref     = []struct {
 		id    int
 		logit float32
-	}
-	qwen3527BFP8Greedy []int64
+	}{{90700, 29.375}, {760, 21.375}, {31248, 17.875}, {79420, 17.375}, {50534, 15.875}}
+	// "Thinking Process:\n\n1.  **Analyze the Request:**\n    *" (as the 9B)
+	qwen3527BFP8Greedy = []int64{90700, 8340, 25, 271, 16, 13, 220, 2972, 2014, 53983, 279, 5952, 64700, 198, 262, 348}
 )
 
 func TestQwen3527BFP8MatchesTransformers(t *testing.T) {
@@ -159,9 +159,6 @@ func TestQwen3527BFP8MatchesTransformers(t *testing.T) {
 	}
 	t.Logf("greedy %v", greedy)
 
-	if qwen3527BFP8Ref == nil {
-		t.Skip("transformers reference values not recorded yet (see TODO(qwen35-27b-fp8))")
-	}
 	for i, w := range qwen3527BFP8Ref {
 		if i < 2 && got[i] != w.id {
 			t.Errorf("top-%d: got %d (%.3f), want %d (%.3f)", i+1, got[i], first[got[i]], w.id, w.logit)
