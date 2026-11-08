@@ -71,7 +71,7 @@ func LoadLlamaGGUF(path string, dev device.Device) (*Llama, error) {
 		// exists; otherwise (CPU, or a format that would dequantize on every
 		// call) it gets a one-time F32 copy.
 		headW := emb
-		if emb.DType().IsQuantized() && !(device.IsCUDA(dev) && ops.MatMulQFused(emb.DType())) {
+		if emb.DType().IsQuantized() && !ops.MatMulQFusedOn(dev.Kind(), emb.DType()) {
 			if headW, err = quant.Dequantize(emb); err != nil {
 				return nil, fmt.Errorf("token_embd: %w", err)
 			}

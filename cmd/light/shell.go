@@ -46,7 +46,7 @@ func init() {
 		{"rm", "<name>", "delete a model from disk", (*shell).cmdRm},
 		{"clear", "", "forget the conversation", (*shell).cmdClear},
 		{"system", "[text]", "set the system prompt (and clear); no text shows it", (*shell).cmdSystem},
-		{"set", "[key value]", "settings: temp, top-p, top-k, max-tokens, seed, device, dtype", (*shell).cmdSet},
+		{"set", "[key value]", "settings: temp, top-p, top-k, max-tokens, seed, device (gpu|webgpu|cpu), dtype", (*shell).cmdSet},
 		{"verbose", "", "toggle timing after each reply", (*shell).cmdVerbose},
 		{"serve", "[addr | stop]", "serve the OpenAI API in the background (default 127.0.0.1:8129)", (*shell).cmdServe},
 		{"unload", "", "free the loaded model", (*shell).cmdUnload},
@@ -334,8 +334,8 @@ func (s *shell) cmdSet(args []string) error {
 		}
 		o.Seed = n
 	case "device":
-		if v != "gpu" && v != "cpu" && v != "auto" {
-			return errors.New("device: gpu, cpu or auto")
+		if v != "gpu" && v != "webgpu" && v != "cpu" && v != "auto" {
+			return errors.New("device: gpu (CUDA), webgpu, cpu or auto")
 		}
 		s.mf.device = strings.TrimPrefix(v, "auto")
 		fmt.Fprintln(os.Stderr, "(applies to the next /model)")

@@ -37,6 +37,9 @@ func int4Devices() []device.Device {
 			devs = append(devs, g)
 		}
 	}
+	if g, err := device.WebGPU(0); err == nil { // F32 only
+		devs = append(devs, g)
+	}
 	return devs
 }
 
@@ -51,6 +54,9 @@ func TestDequantizeInt4(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, dt := range []dtype.DType{dtype.F32, dtype.BF16} {
+			if dt != dtype.F32 && device.IsWebGPU(dev) {
+				continue
+			}
 			out, err := ops.DequantizeInt4(w, dt)
 			if err != nil {
 				t.Fatal(err)
@@ -98,6 +104,9 @@ func TestMatMulInt4(t *testing.T) {
 				}
 			}
 			for _, dt := range []dtype.DType{dtype.F32, dtype.BF16} {
+				if dt != dtype.F32 && device.IsWebGPU(dev) {
+					continue
+				}
 				x, _ := tensor.New(xs, []int{M, K}, dev)
 				if dt != dtype.F32 {
 					x, _ = ops.Cast(x, dt)

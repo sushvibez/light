@@ -94,8 +94,10 @@ func pickDevice(name string) (device.Device, error) {
 		return nil, errors.New("engine: CUDA not available in this build")
 	case "cpu":
 		return device.CPU(), nil
+	case "webgpu", "wgpu":
+		return device.WebGPU(0) // any GPU through wgpu-native (Intel, AMD, Apple, NVIDIA); F32
 	}
-	return nil, fmt.Errorf("engine: unknown device %q", name)
+	return nil, fmt.Errorf("engine: unknown device %q (gpu, webgpu or cpu)", name)
 }
 
 // Load reads the tokenizer and weights for spec. GGUF weights take

@@ -19,7 +19,7 @@ import (
 type modelFlags struct{ device, dtype string }
 
 func (f *modelFlags) register(fs *flag.FlagSet) {
-	fs.StringVar(&f.device, "device", "", "gpu or cpu (default: the GPU when this build has CUDA and one is present)")
+	fs.StringVar(&f.device, "device", "", "gpu (CUDA), webgpu (any GPU through wgpu-native) or cpu (default: CUDA when present, else cpu)")
 	fs.StringVar(&f.dtype, "dtype", "", "f32 or bf16 for safetensors weights (default: bf16 on the GPU, f32 on the CPU up to 6 GB)")
 }
 
@@ -35,8 +35,8 @@ func (f *modelFlags) spec(e engine.Entry) engine.Spec {
 	switch {
 	case f.dtype != "":
 		s.DType = f.dtype
-	case s.Device == "cpu" && (e.Kind == "safetensors" || e.Kind == "pytorch") && e.SizeBytes <= 6<<30:
-		s.DType = "f32"
+	case (s.Device == "cpu" || s.Device == "webgpu") && (e.Kind == "safetensors" || e.Kind == "pytorch") && e.SizeBytes <= 6<<30:
+		s.DType = "f32" // WebGPU is F32-only; the CPU BF16 path is slow
 	}
 	return s
 }

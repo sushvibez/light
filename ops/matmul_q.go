@@ -83,7 +83,10 @@ func matMulQFallback(x, w *tensor.Tensor) (*tensor.Tensor, error) {
 // MatMulQFused reports whether a fused dequant-matmul kernel exists on CUDA
 // for the format, i.e. whether a weight in that format can stay quantized
 // at no per-call dequantization cost.
-func MatMulQFused(dt dtype.DType) bool {
-	_, err := registry.Lookup(registry.Key{Op: "matmul_q", Dev: device.KindCUDA, DType: dt})
+func MatMulQFused(dt dtype.DType) bool { return MatMulQFusedOn(device.KindCUDA, dt) }
+
+// MatMulQFusedOn is MatMulQFused for any device kind (CUDA, WebGPU).
+func MatMulQFusedOn(kind device.Kind, dt dtype.DType) bool {
+	_, err := registry.Lookup(registry.Key{Op: "matmul_q", Dev: kind, DType: dt})
 	return err == nil
 }

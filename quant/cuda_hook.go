@@ -2,9 +2,11 @@ package quant
 
 import (
 	"errors"
+	"fmt"
 
 	"light/device"
 	"light/dtype"
+	"light/internal/registry"
 	"light/tensor"
 )
 
@@ -24,6 +26,9 @@ func RegisterCUDADequant(fn CUDADequantFunc) { cudaDequantHook = fn }
 // Returns (nil, false, nil) when the source is CPU (caller keeps its CPU
 // path). Returns (out, true, nil) on success, or (nil, true, err) on failure.
 func dispatchCUDA(src *tensor.Tensor) (*tensor.Tensor, bool, error) {
+	if device.IsWebGPU(src.Device()) {
+		return dispatchRegistry(src)
+	}
 	if !device.IsCUDA(src.Device()) {
 		return nil, false, nil
 	}
@@ -35,6 +40,24 @@ func dispatchCUDA(src *tensor.Tensor) (*tensor.Tensor, bool, error) {
 		return nil, true, err
 	}
 	if err := cudaDequantHook(src, out); err != nil {
+		return nil, true, err
+	}
+	return out, true, nil
+}
+
+// dispatchRegistry dequantizes on a device whose kernels register a
+// "dequant" op per format (WebGPU), reporting handled = true either way so
+// the host-byte fallback never runs on device memory.
+func dispatchRegistry(src *tensor.Tensor) (*tensor.Tensor, bool, error) {
+	k, err := registry.Lookup(registry.Key{Op: "dequant", Dev: src.Device().Kind(), DType: src.DType()})
+	if err != nil {
+		return nil, true, fmt.Errorf("quant: no %v dequant kernel on %v: %w", src.DType(), src.Device(), err)
+	}
+	out, err := tensor.Zeros(dtype.F32, src.Shape().Dims(), src.Device())
+	if err != nil {
+		return nil, true, err
+	}
+	if err := k(&registry.Context{Inputs: []*tensor.Tensor{src}, Output: out}); err != nil {
 		return nil, true, err
 	}
 	return out, true, nil

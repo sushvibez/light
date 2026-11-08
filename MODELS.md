@@ -312,7 +312,7 @@ Runner-ups: Nemotron-3.5-Embed-1B (after a Ministral-3 backbone), WeVisOne-VL-2B
 | FlashAttention | Long-context decode | ✅ `ops.FlashAttention` (CUDA tiled, 16× over SDPA at S=1024) |
 | Sliding-window attention | Mistral, Gemma 2 | ✅ done 2026-10-28 (`LlamaConfig.SlidingWindow`, `SlidingLayers`; rotating KV cache) |
 | RoPE scaling (llama3) | Llama-3.1+ | ✅ `models.RopeScaling`; LongRoPE (Phi-3 / Phi-4-mini) done |
-| WebGPU device | non-NVIDIA GPUs | ✅ every build (wgpu-native loaded at run time, no cgo); F32 only; GPT-2 verified |
+| WebGPU device | non-NVIDIA GPUs | ✅ every build (wgpu-native loaded at run time, no cgo); F32 activations; GPT-2 and Qwen2.5-0.5B (F32, GPTQ, AWQ, Q4_K_M GGUF) verified against the CPU on Intel integrated graphics; `light run -device webgpu` |
 | Tied LM head | GPT-2, GPT-J, many transformers | ✅ done (`GPT2Config.Tied`) |
 | Sharded safetensors (`model.safetensors.index.json`) | Llama-2 7B+, GPT-2 large+, Qwen2.5-3B+ | ✅ done (`hub.DownloadModelSafetensors` + `safetensors.LoadFiles`); also reads HF Python cache layout (`refs/<rev>` + `snapshots/<sha>/`) |
 | RoPE | Llama family | ✅ done (`ops.RoPE`, CPU + CUDA) |

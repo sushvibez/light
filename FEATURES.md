@@ -43,7 +43,7 @@ _Last updated: 2026-11-06 (stale open items reconciled with CHECKPOINTS.md)._
 
 **CUDA parity:** every op runs on the device. `sort` has bitonic kernels (F32/F64/I32/I64); `topk` lowers to sort + narrow; `einsum` F32 runs fully on CUDA (diagonals via `AsStrided`, N operands pairwise, pairs via batched matmul; F64 einsum still falls back to the host); `lpnorm` lowers to abs/pow/sum. The three rows without a CUDA kernel entry are these lowered ops, not gaps. `matmul_q` is CUDA-only by design (CPU dequantizes).
 
-**WebGPU gaps:** no F16/BF16/F64 arithmetic; no `rope`, `conv1d`, `gather`, `cumsum`, compare, `groupnorm`, `where`, `flash_attention`.
+**WebGPU gaps:** no F16/BF16/F64 arithmetic; no `conv1d`, `gather`, `cumsum`, compare, `groupnorm`, `where`, `flash_attention`. LLM inference works for Llama-family checkpoints in F32, GPTQ / AWQ 4-bit and GGUF (Q4_0 / Q5_0 / Q8_0 / Q4_K / Q6_K): `rope` / `rope_i` / `rope_scaled`, `int4_dequant` / `int4_gemv`, `matmul_q` (fused decode GEMV) / `dequant` / quantized `index_select`.
 
 | Op | CPU | CUDA | WebGPU |
 |----|-----|------|--------|
