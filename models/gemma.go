@@ -49,6 +49,10 @@ type Gemma3Config struct {
 	PostNormEps      float64   // eps of the post-attention / post-FFN norms; 0 = RmsEps
 	OutputMultiplier float64   // logits scaled before the softcap; 0 = 1
 	UntiedHead       bool      // separate lm_head (Gemma ties it to the embedding)
+
+	// lazyWeights: allocate no Linear or embedding weights (the GGUF loader
+	// installs its block-quantized tensors).
+	lazyWeights bool
 }
 
 type gemmaBlock struct {
@@ -106,9 +110,12 @@ func NewGemma3(cfg Gemma3Config, dev device.Device) (*Gemma3, error) {
 	}
 	act := cfg.activationDType()
 	D, NH, KH, HD, IM := cfg.HiddenSize, cfg.NumHeads, cfg.NumKVHeads, cfg.HeadDim, cfg.IntermediateSize
-	emb, err := nn.NewEmbeddingUninit(cfg.VocabSize, D, act, dev)
-	if err != nil {
-		return nil, err
+	var emb *nn.Embedding
+	var err error
+	if !cfg.lazyWeights {
+		if emb, err = nn.NewEmbeddingUninit(cfg.VocabSize, D, act, dev); err != nil {
+			return nil, err
+		}
 	}
 	norm := func(n int) (*nn.RMSNorm, error) { return nn.NewRMSNormWithDType(n, cfg.RmsEps, dtype.F32, dev) }
 	postEps := cfg.RmsEps
@@ -116,7 +123,12 @@ func NewGemma3(cfg Gemma3Config, dev device.Device) (*Gemma3, error) {
 		postEps = cfg.PostNormEps
 	}
 	postNorm := func(n int) (*nn.RMSNorm, error) { return nn.NewRMSNormWithDType(n, postEps, dtype.F32, dev) }
-	lin := func(in, out int) (*nn.Linear, error) { return nn.NewLinearUninit(in, out, false, act, dev) }
+	lin := func(in, out int) (*nn.Linear, error) {
+		if cfg.lazyWeights {
+			return nn.NewLinearPlaceholder(in, out, false, dev)
+		}
+		return nn.NewLinearUninit(in, out, false, act, dev)
+	}
 	blocks := make([]*gemmaBlock, cfg.NumLayers)
 	for i := range blocks {
 		b := &gemmaBlock{sliding: cfg.isSliding(i)}
@@ -168,7 +180,7 @@ func NewGemma3(cfg Gemma3Config, dev device.Device) (*Gemma3, error) {
 		return nil, err
 	}
 	var head *nn.Linear
-	if cfg.UntiedHead {
+	if cfg.UntiedHead || cfg.lazyWeights {
 		head, err = lin(D, cfg.VocabSize)
 	} else {
 		head, err = nn.NewLinearTied(emb.Weight, false, dev)
