@@ -2,6 +2,7 @@ package models
 
 import (
 	"os"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -35,15 +36,17 @@ func TestMoshikoProfile(t *testing.T) {
 	if v := os.Getenv("LIGHT_MOSHI_FRAMES"); v != "" {
 		n, _ = strconv.Atoi(v)
 	}
-	tEnc, tLM, tDep, tDec := moshiFrameLoop(t, m, mimi, audio, n)
-	t.Logf("per frame: mimi encode %.1f ms, LM forward %.1f ms, depformer %.1f ms, mimi decode %.1f ms (n=%d)",
-		ms(tEnc)/float64(n), ms(tLM)/float64(n), ms(tDep)/float64(n), ms(tDec)/float64(n), n)
+	gc := os.Getenv("LIGHT_MOSHI_GC") != "0" // as MoshiGen.Step does (GCEvery 1)
+	tEnc, tLM, tDep, tDec, tGC := moshiFrameLoop(t, m, mimi, audio, n, gc)
+	f := float64(n)
+	t.Logf("per frame: mimi encode %.1f ms, LM forward %.1f ms, depformer %.1f ms, mimi decode %.1f ms, gc %.1f ms, total %.1f ms (n=%d, gc %v)",
+		ms(tEnc)/f, ms(tLM)/f, ms(tDep)/f, ms(tDec)/f, ms(tGC)/f, ms(tEnc+tLM+tDep+tDec+tGC)/f, n, gc)
 }
 
 // moshiFrameLoop runs n frames (cycling through the clip) and returns the
 // time spent in each stage; kept as its own function so pprof -focus can
 // isolate it from model loading.
-func moshiFrameLoop(t *testing.T, m *Moshi, mimi *Mimi, audio *tensor.Tensor, n int) (tEnc, tLM, tDep, tDec time.Duration) {
+func moshiFrameLoop(t *testing.T, m *Moshi, mimi *Mimi, audio *tensor.Tensor, n int, gc bool) (tEnc, tLM, tDep, tDec, tGC time.Duration) {
 	dev := audio.Device()
 	hop := mimi.Cfg.HopLength()
 	frames := audio.Dim(2) / hop
@@ -52,6 +55,11 @@ func moshiFrameLoop(t *testing.T, m *Moshi, mimi *Mimi, audio *tensor.Tensor, n 
 	prev := m.Cfg.TextStartToken()
 	sync := func() { x, _ := tensor.New([]float32{1}, []int{1}, dev); _, _ = x.To(device.CPU()) }
 	for step := 0; step < n; step++ {
+		if gc {
+			tg := time.Now()
+			runtime.GC()
+			tGC += time.Since(tg)
+		}
 		chunk, _ := audio.Narrow(2, (step%frames)*hop, hop)
 		chunk, _ = chunk.Contiguous()
 		t0 := time.Now()

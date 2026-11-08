@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"runtime"
 	"sort"
 
 	"light/autograd"
@@ -559,6 +560,14 @@ type MoshiGen struct {
 	TextLogits []float32   // text logits of the last Step
 	LastCodes  []int64     // depformer codes sampled at the last Step
 	LastRows   [][]float32 // depformer logit rows of the last Step, per slice
+	// GCEvery runs a garbage collection every that many CUDA steps (0:
+	// never). Device buffers return to the allocator's pool only through
+	// cleanups that run after a GC, and a frame allocates ~2000 short-lived
+	// buffers while barely growing the Go heap, so without this the GC
+	// rarely runs, most allocations miss the pool (cudaMalloc), and the
+	// eventual bulk release overflows the cap into cudaFree, which
+	// synchronises the device. NewMoshiGen sets 1.
+	GCEvery int
 }
 
 const moshiUngenerated = int64(-1)
@@ -572,7 +581,7 @@ func NewMoshiGen(m *Moshi, textSampler, audioSampler func([]float32) int) *Moshi
 		audioSampler = Argmax
 	}
 	return &MoshiGen{Model: m, Cache: NewKVCache(m.Cfg.Transformer.NumLayers), DepCache: m.NewDepformerCache(),
-		TextSampler: textSampler, AudioSampler: audioSampler, AcousticDelay: 2}
+		TextSampler: textSampler, AudioSampler: audioSampler, AcousticDelay: 2, GCEvery: 1}
 }
 
 // Step feeds one frame: textIn is the previous text token (TextStartToken
@@ -582,6 +591,9 @@ func NewMoshiGen(m *Moshi, textSampler, audioSampler func([]float32) int) *Moshi
 func (g *MoshiGen) Step(textIn int64, userCodes []int64) (int64, error) {
 	m, cfg := g.Model, g.Model.Cfg
 	dev := m.OutNorm.Weight.Device()
+	if g.GCEvery > 0 && g.step%g.GCEvery == 0 && dev.Kind() == device.KindCUDA {
+		runtime.GC() // recycle the previous frames' device buffers (see GCEvery)
+	}
 	total, gen := cfg.AudioCodebooks, cfg.DepQ
 	pad := cfg.AudioPadToken()
 	for len(g.audio) <= g.step+g.AcousticDelay+1 {
