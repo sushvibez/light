@@ -115,19 +115,23 @@ func rowBuf(k int) *[]float32 {
 	return p
 }
 
-// rowsTimesX computes out[i, n] = x_i · row_n for n in [0, N), decoding row n
-// into a buffer with decodeRow; parallel over n.
+// rowsTimesX computes out[i, n] = x_i · row_n for n in [0, N), decoding the
+// weight rows with decodeRow; parallel over n. Each worker decodes
+// tileRows rows into a buffer, then multiplies all M activation rows by
+// them with 4 × 3 register tiles (simd.MatTB), so prefill shares both the
+// decode and every weight load across rows.
 func rowsTimesX(x, out []float32, M, K, N int, decodeRow func(n int, dst []float32)) {
 	grain := max(1, 16384/(K+1))
 	parallel.For(N, grain, func(lo, hi int) {
-		bp := rowBuf(K)
+		bp := rowBuf(tileRows * K)
 		defer rowBufs.Put(bp)
-		row := *bp
-		for n := lo; n < hi; n++ {
-			decodeRow(n, row)
-			for i := range M {
-				out[i*N+n] = simd.Dot(x[i*K:i*K+K], row)
+		rows := *bp
+		for n0 := lo; n0 < hi; n0 += tileRows {
+			n1 := min(n0+tileRows, hi)
+			for n := n0; n < n1; n++ {
+				decodeRow(n, rows[(n-n0)*K:(n-n0+1)*K])
 			}
+			simd.MatTB(x, K, rows, K, out[n0:], N, M, n1-n0, K)
 		}
 	})
 }

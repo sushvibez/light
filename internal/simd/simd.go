@@ -52,3 +52,36 @@ func axpyGo(alpha float32, x, y []float32) {
 		y[i] += alpha * v
 	}
 }
+
+// MatTB computes out[i·ldo + j] = Σ_t a[i·lda + t] · w[j·ldw + t] for
+// i < m, j < n, t < k: a block of x · Wᵀ (rows of A against rows of W).
+// On AVX2 it runs 4 × 3 register tiles, loading each A and W vector once
+// per 12 multiply-adds; edges and k % 8 tails use Dot.
+func MatTB(a []float32, lda int, w []float32, ldw int, out []float32, ldo, m, n, k int) {
+	i := 0
+	if useAVX2 && k%8 == 0 && k > 0 {
+		var t [12]float32
+		for ; i+4 <= m; i += 4 {
+			j := 0
+			for ; j+3 <= n; j += 3 {
+				_ = a[(i+3)*lda+k-1]
+				_ = w[(j+2)*ldw+k-1]
+				dot4x3AVX2(&a[i*lda], lda, &w[j*ldw], ldw, k, &t[0])
+				for r := range 4 {
+					o := out[(i+r)*ldo+j:]
+					o[0], o[1], o[2] = t[3*r], t[3*r+1], t[3*r+2]
+				}
+			}
+			for ; j < n; j++ {
+				for r := range 4 {
+					out[(i+r)*ldo+j] = Dot(a[(i+r)*lda:(i+r)*lda+k], w[j*ldw:])
+				}
+			}
+		}
+	}
+	for ; i < m; i++ {
+		for j := range n {
+			out[i*ldo+j] = Dot(a[i*lda:i*lda+k], w[j*ldw:])
+		}
+	}
+}

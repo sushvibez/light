@@ -5,6 +5,9 @@ import (
 	"light/internal/simd"
 )
 
+// tileRows is the weight-row block the x · Wᵀ paths keep hot in cache.
+const tileRows = 48
+
 // matmulF32Fast handles the F32 layouts models produce, in parallel over
 // output columns with SIMD inner loops; it reports false for any other
 // stride pattern (the caller then runs the generic loop).
@@ -25,14 +28,21 @@ func matmulF32Fast(aS []float32, aOff int, aStr []int, bS []float32, bOff int, b
 	aRow := func(i int) []float32 { return aS[aOff+i*aStr[0]:][:K] }
 	switch {
 	case (bStr[0] == 1 || K == 1) && (bStr[1] == K || N == 1):
-		// out[i, j] = a_i · w_j with w_j = b[:, j], contiguous.
+		// out[i, j] = a_i · w_j with w_j = b[:, j], contiguous: 4 × 3
+		// register tiles (simd.MatTB) over sub-blocks of tileRows weight
+		// rows, which stay in cache while the A rows stream past.
 		grain := max(1, 32768/(K*M+1))
+		lda, ldw := aStr[0], bStr[1]
+		if M == 1 {
+			lda = K
+		}
+		if N == 1 {
+			ldw = K
+		}
 		parallel.For(N, grain, func(lo, hi int) {
-			for j := lo; j < hi; j++ {
-				w := bS[bOff+j*bStr[1]:][:K]
-				for i := range M {
-					out[i*N+j] = simd.Dot(aRow(i), w)
-				}
+			for j0 := lo; j0 < hi; j0 += tileRows {
+				j1 := min(j0+tileRows, hi)
+				simd.MatTB(aS[aOff:], lda, bS[bOff+j0*ldw:], ldw, out[j0:], N, M, j1-j0, K)
 			}
 		})
 		return true

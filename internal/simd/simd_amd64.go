@@ -8,6 +8,9 @@ func dotAVX2(a, b *float32, n int) float32
 //go:noescape
 func axpyAVX2(alpha float32, x, y *float32, n int)
 
+//go:noescape
+func dot4x3AVX2(a *float32, lda int, w *float32, ldw int, k int, out *float32)
+
 func cpuid(leaf, sub uint32) (eax, ebx, ecx, edx uint32)
 func xgetbv() (eax, edx uint32)
 
