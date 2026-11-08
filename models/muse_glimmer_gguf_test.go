@@ -211,20 +211,25 @@ func TestMuseGlimmerGGUFTiny(t *testing.T) {
 //	python scripts/verify/ref_muse_glimmer.py meta-models/Muse-Glimmer-30B bf16 --chat
 //
 // Q4 against BF16, so the bar is loose: reference top-1, logits within 1.5,
-// greedy agreeing on a prefix. TODO(muse-glimmer-30b): fill in the prompt
-// ids, reference logits and greedy ids from that run; until then the test
-// stops after the reference-free checks.
+// greedy agreeing on a prefix. Reference from an A100 80 GB (BF16 on the
+// GPU). The chat template renders a harmony-style prompt (default system
+// block included) ending in an assistant header; the model answers
+// " to=self<|message|>" and echoes the question — odd, but it is what the
+// checkpoint does, and Light must do the same.
 //
 // colab-download: unsloth/Muse-Glimmer-30B-GGUF Muse-Glimmer-30B-UD-Q4_K_XL.gguf
 const museGlimmer30BGGUF = "Muse-Glimmer-30B-UD-Q4_K_XL.gguf"
 
 var (
-	museGlimmer30BChatIDs []int64
-	museGlimmer30BRef     []struct {
+	museGlimmer30BChatIDs = []int64{200000, 200022, 15651, 200023, 4662, 583, 262, 81080, 43910, 1574, 34956, 300, 9762, 38,
+		2244, 1574, 15, 14757, 73965, 38, 392, 2540, 706, 392, 1556, 4205, 200008, 200022, 1556, 200023, 51015, 310, 1085,
+		17705, 5959, 290, 21752, 373, 10950, 26, 200008, 200022, 140680}
+	museGlimmer30BRef = []struct {
 		id    int
 		logit float32
-	}
-	museGlimmer30BGreedy []int64
+	}{{328, 18.125}, {5445, -0.2598}, {13532, -1.6094}, {5740, -2.9688}, {34158, -3.2031}}
+	// " to=self<|message|>Explain in one sentence why the sky is blue.\n\nExplain in one"
+	museGlimmer30BGreedy = []int64{328, 19669, 200023, 51015, 310, 1085, 17705, 5959, 290, 21752, 373, 10950, 1574, 51015, 310, 1085}
 )
 
 func TestMuseGlimmer30BGGUFMatchesTransformers(t *testing.T) {
@@ -262,17 +267,6 @@ func TestMuseGlimmer30BGGUFMatchesTransformers(t *testing.T) {
 		t.Fatalf("config %+v", c)
 	}
 	t.Logf("attn_q %v, ffn_down %v, lm head %v", m.Blocks[0].QProj.W.DType(), m.Blocks[0].DownProj.W.DType(), m.LMHead.W.DType())
-	if museGlimmer30BChatIDs == nil {
-		// A fixed id sequence until the chat-template ids are recorded.
-		ids := make([]int64, 32)
-		for i := range ids {
-			ids[i] = int64(1000 + 37*i)
-		}
-		row := lastLogits(t, m, ids, NewKVCache(m.NumLayers()), dev)
-		got := top5(row)
-		t.Logf("top-5 %v logits %.3f %.3f %.3f %.3f %.3f", got, row[got[0]], row[got[1]], row[got[2]], row[got[3]], row[got[4]])
-		t.Skip("transformers reference values not recorded yet (see TODO(muse-glimmer-30b))")
-	}
 	cache := NewKVCache(m.NumLayers())
 	row := lastLogits(t, m, museGlimmer30BChatIDs, cache, dev)
 	got := top5(row)
