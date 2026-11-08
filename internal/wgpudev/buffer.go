@@ -57,6 +57,7 @@ type pool struct {
 	dev        *Device
 	buckets    map[uint64][]*Buffer
 	pooledByte uint64
+	liveByte   uint64 // bytes of device buffers created and not yet released
 }
 
 const (
@@ -112,6 +113,9 @@ func (p *pool) get(size uint64, zero bool) (*Buffer, error) {
 	if !raw.Valid() {
 		return nil, fmt.Errorf("wgpudev: create buffer (%d bytes) failed", cls)
 	}
+	p.mu.Lock()
+	p.liveByte += cls
+	p.mu.Unlock()
 	return &Buffer{Buf: raw, Size: size, class: cls, dev: p.dev}, nil
 }
 
@@ -124,6 +128,7 @@ func (p *pool) put(b *Buffer) {
 		p.mu.Unlock()
 		return
 	}
+	p.liveByte -= b.class
 	p.mu.Unlock()
 	b.Buf.Release()
 	b.Buf = nil
@@ -147,6 +152,7 @@ func (d *Device) PoolClear() {
 	d.pool.mu.Lock()
 	buckets := d.pool.buckets
 	d.pool.buckets = make(map[uint64][]*Buffer)
+	d.pool.liveByte -= d.pool.pooledByte
 	d.pool.pooledByte = 0
 	d.pool.mu.Unlock()
 	for _, l := range buckets {
@@ -155,4 +161,12 @@ func (d *Device) PoolClear() {
 			b.Buf = nil
 		}
 	}
+}
+
+// AllocatedBytes reports the device memory held by storage buffers (in use
+// or pooled for reuse).
+func (d *Device) AllocatedBytes() uint64 {
+	d.pool.mu.Lock()
+	defer d.pool.mu.Unlock()
+	return d.pool.liveByte
 }

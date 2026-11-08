@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -131,5 +133,43 @@ func TestShellCommands(t *testing.T) {
 	}
 	if rest, _ := io.ReadAll(s.in); string(rest) != "/help" {
 		t.Errorf("/exit did not stop the loop; left %q", rest)
+	}
+}
+
+// The perf table keeps one row per (model, device) for this host, updates
+// it from loads and replies, and prints it.
+func TestPerfTable(t *testing.T) {
+	t.Setenv("LIGHT_PERF_FILE", filepath.Join(t.TempDir(), "perf.json"))
+	updatePerf(func(h *perfHost) {
+		e := entryFor(h, "Qwen/Qwen2.5-0.5B-Instruct", "webgpu")
+		e.DType, e.LoadS, e.RAMMB, e.GPUMB = "f32", 3.0, 3800, 1960
+		h.GPUs["webgpu"] = "Test Adapter (d3d12)"
+	})
+	updatePerf(func(h *perfHost) {
+		e := entryFor(h, "Qwen/Qwen2.5-0.5B-Instruct", "webgpu")
+		e.PromptTokens, e.PrefillTPS, e.DecodeTPS = 71, 128, 11.3
+	})
+	updatePerf(func(h *perfHost) { entryFor(h, "Qwen/Qwen2.5-0.5B-Instruct", "cpu").DecodeTPS = 2.2 })
+	key, _ := thisHost()
+	h := loadPerfFile().Hosts[key]
+	if h == nil || len(h.Entries) != 2 {
+		t.Fatalf("host record %+v", h)
+	}
+	if e := h.Entries["Qwen/Qwen2.5-0.5B-Instruct|webgpu"]; e.LoadS != 3.0 || e.DecodeTPS != 11.3 || e.PromptTokens != 71 {
+		t.Errorf("webgpu row %+v", e)
+	}
+	out, err := os.CreateTemp(t.TempDir(), "perf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := printPerf(out, "qwen"); err != nil {
+		t.Fatal(err)
+	}
+	out.Close()
+	b, _ := os.ReadFile(out.Name())
+	for _, want := range []string{"Test Adapter (d3d12)", "3800 MB", "1960 MB", "128 (71)", "11.3", "2.2"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("table lacks %q:\n%s", want, b)
+		}
 	}
 }

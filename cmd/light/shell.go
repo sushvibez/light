@@ -48,6 +48,10 @@ func init() {
 		{"system", "[text]", "set the system prompt (and clear); no text shows it", (*shell).cmdSystem},
 		{"set", "[key value]", "settings: temp, top-p, top-k, max-tokens, seed, device (gpu|webgpu|cpu), dtype", (*shell).cmdSet},
 		{"verbose", "", "toggle timing after each reply", (*shell).cmdVerbose},
+		{"perf", "[model]", "this host's measured RAM / GPU memory / prefill / decode per model and device", func(s *shell, a []string) error {
+			return printPerf(os.Stderr, strings.Join(a, " "))
+		}},
+		{"bench", "[model] [devices]", "measure a model on cpu, webgpu and gpu (default: the loaded one, every device)", (*shell).cmdBench},
 		{"serve", "[addr | stop]", "serve the OpenAI API in the background (default 127.0.0.1:8129)", (*shell).cmdServe},
 		{"unload", "", "free the loaded model", (*shell).cmdUnload},
 		{"help", "", "this list", (*shell).cmdHelp},
@@ -208,11 +212,12 @@ func (s *shell) cmdModel(args []string) error {
 func (s *shell) load(e engine.Entry) error {
 	spec := s.mf.spec(e)
 	fmt.Fprintf(os.Stderr, "loading %s (%s, %s) …\n", e.Spec.ID, orAuto(spec.Device), orAuto(spec.DType))
-	m, err := s.rt.Load(spec)
+	m, err := loadMeasured(s.rt, spec)
 	if err != nil {
 		return err
 	}
 	s.model = &e
+	s.onStats = func(st engine.Stats) { recordReply(m, st, "run") }
 	s.cmdClear(nil)
 	fmt.Fprintf(os.Stderr, "%s ready (%s template, %.1f s)\n", m.Spec.ID, m.Template.Source, m.LoadTime.Seconds())
 	return nil
@@ -401,4 +406,48 @@ func (s *shell) cmdUnload([]string) error {
 	fmt.Fprintf(os.Stderr, "(unloaded %s)\n", s.model.Spec.ID)
 	s.model = nil
 	return nil
+}
+
+// cmdBench measures a model (default: the loaded one) on the host's
+// devices. The loaded model is released first and loaded again after, so
+// the benchmark has the memory to itself.
+func (s *shell) cmdBench(args []string) error {
+	var devs []string
+	var name []string
+	for _, a := range args {
+		if strings.Contains(a, ",") || a == "cpu" || a == "webgpu" || a == "gpu" {
+			devs = append(devs, strings.Split(a, ",")...)
+		} else {
+			name = append(name, a)
+		}
+	}
+	entries, err := catalog()
+	if err != nil {
+		return err
+	}
+	var e engine.Entry
+	switch {
+	case len(name) > 0:
+		if e, err = resolve(entries, strings.Join(name, " "), chatKinds); err != nil {
+			return err
+		}
+	case s.model != nil:
+		e = *s.model
+	default:
+		return errors.New("usage: /bench [model] [cpu,webgpu,gpu] (no model loaded)")
+	}
+	if len(devs) == 0 {
+		devs = availableDevices()
+	}
+	reload := s.model
+	if reload != nil {
+		_ = s.cmdUnload(nil)
+	}
+	err = benchModel(e, devs, 32, modelFlags{dtype: s.mf.dtype})
+	if reload != nil {
+		if lerr := s.load(*reload); lerr != nil && err == nil {
+			err = lerr
+		}
+	}
+	return err
 }

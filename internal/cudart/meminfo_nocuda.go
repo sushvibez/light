@@ -11,3 +11,6 @@ var ErrNotBuilt = errors.New("cudart: CUDA support not compiled in (built with -
 
 // MemInfo reports free/total device memory; always fails in nocuda builds.
 func MemInfo() (free, total uintptr, err error) { return 0, 0, ErrNotBuilt }
+
+// DeviceName reports the CUDA device's name; always fails in nocuda builds.
+func DeviceName(ordinal int) (string, error) { return "", ErrNotBuilt }

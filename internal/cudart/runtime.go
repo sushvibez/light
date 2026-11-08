@@ -245,3 +245,9 @@ func driverError(rc C.CUresult, op string) error {
 	}
 	return fmt.Errorf("cudart: %s: %s (code %d)", op, name, int(rc))
 }
+
+// DeviceName reports device ordinal's name (e.g. "NVIDIA L4").
+func DeviceName(ordinal int) (string, error) {
+	p, err := GetDeviceProperties(ordinal)
+	return p.Name, err
+}

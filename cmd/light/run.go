@@ -92,15 +92,16 @@ func cmdRun(args []string) error {
 	rt := engine.NewRuntime()
 	opts := engine.GenOpts{MaxTokens: *maxTok, Temperature: float32(*temp), TopP: float32(*topP), TopK: *topK, Seed: *seed}
 	if oneShot {
-		if _, err := rt.Load(mf.spec(e)); err != nil {
+		m, err := loadMeasured(rt, mf.spec(e))
+		if err != nil {
 			return err
 		}
 		var msgs []engine.Message
 		if *system != "" {
 			msgs = append(msgs, engine.Message{Role: "system", Content: *system})
 		}
-		c := &chat{rt: rt, opts: opts, verbose: *verbose}
-		_, err := c.reply(append(msgs, engine.Message{Role: "user", Content: prompt}))
+		c := &chat{rt: rt, opts: opts, verbose: *verbose, onStats: func(st engine.Stats) { recordReply(m, st, "run") }}
+		_, err = c.reply(append(msgs, engine.Message{Role: "user", Content: prompt}))
 		return err
 	}
 	sh := newShell(rt, mf, opts, *system, *verbose)
@@ -126,6 +127,7 @@ func cmdShell() error {
 type chat struct {
 	rt      *engine.Runtime
 	opts    engine.GenOpts
+	onStats func(engine.Stats) // called after each completed reply (the perf table)
 	verbose bool
 
 	mu     sync.Mutex
@@ -153,6 +155,9 @@ func (c *chat) reply(msgs []engine.Message) (string, error) {
 	out.Flush()
 	if err != nil {
 		return text, err
+	}
+	if c.onStats != nil && st.Stop != "cancel" {
+		c.onStats(st)
 	}
 	if st.Stop == "cancel" {
 		fmt.Fprintln(os.Stderr, "[stopped]")
