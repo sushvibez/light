@@ -70,6 +70,12 @@ for n in f.keys():
 cfg = AutoConfig.from_pretrained(repo)
 del cfg.quantization_config
 model = AutoModelForCausalLM.from_config(cfg, dtype=torch.float32, attn_implementation="eager").eval()
+# Old AutoGPTQ checkpoints store a bias for every linear even where the
+# architecture has none (Llama); those must be all zeros, and are dropped.
+own = set(model.state_dict().keys())
+for k in [k for k in sd if k.endswith(".bias") and k not in own]:
+    assert torch.count_nonzero(sd[k]) == 0, f"{k} is not zero"
+    del sd[k]
 missing, unexpected = model.load_state_dict(sd, strict=False)
 missing = [k for k in missing if not (k == "lm_head.weight" and cfg.tie_word_embeddings)]
 assert not missing and not unexpected, (missing, unexpected)

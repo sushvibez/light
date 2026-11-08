@@ -67,6 +67,13 @@ func MatMulInt4(x *tensor.Tensor, w quant.Int4) (*tensor.Tensor, error) {
 	if err != nil {
 		return nil, err
 	}
+	if w.Perm != nil {
+		// Act-order GPTQ: the weight's K axis is stored sorted by group;
+		// gather x's columns into the same order (x[:, Perm]).
+		if xc, err = gatherColumns(xc, w.Perm); err != nil {
+			return nil, err
+		}
+	}
 	if M <= int4GEMVMaxM && w.K()%32 == 0 && w.Group%32 == 0 {
 		if k, err := registry.Lookup(registry.Key{Op: "int4_gemv", Dev: x.Device().Kind(), DType: x.DType()}); err == nil {
 			out, err := tensor.Zeros(x.DType(), []int{M, N}, x.Device())
@@ -107,4 +114,24 @@ func MatMulInt4(x *tensor.Tensor, w quant.Int4) (*tensor.Tensor, error) {
 		return nil, err
 	}
 	return gemm(dq)
+}
+
+// gatherColumns returns x[:, idx] for a rank-2 x and an I64 index vector.
+func gatherColumns(x, idx *tensor.Tensor) (*tensor.Tensor, error) {
+	xt, err := x.Transpose(0, 1)
+	if err != nil {
+		return nil, err
+	}
+	if xt, err = xt.Contiguous(); err != nil {
+		return nil, err
+	}
+	g, err := IndexSelect(xt, idx)
+	if err != nil {
+		return nil, err
+	}
+	gt, err := g.Transpose(0, 1)
+	if err != nil {
+		return nil, err
+	}
+	return gt.Contiguous()
 }

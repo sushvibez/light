@@ -27,7 +27,7 @@ type int4Config struct {
 
 // fetchInt4Config returns the repo's 4-bit quantization config, nil when
 // the checkpoint is not GPTQ / AWQ, or an error for variants Light does not
-// read (other bit widths, act-order GPTQ, AWQ GEMV / exllama layouts).
+// read (other bit widths, AWQ GEMV / exllama layouts).
 func fetchInt4Config(repo string) (*int4Config, error) {
 	path, err := hub.Download(repo, "main", "config.json")
 	if err != nil {
@@ -52,9 +52,6 @@ func fetchInt4Config(repo string) (*int4Config, error) {
 	}
 	switch q.QuantMethod {
 	case "gptq":
-		if q.DescAct {
-			return nil, fmt.Errorf("gptq: desc_act (act-order) checkpoints not supported yet")
-		}
 		if f := q.CheckpointFormat; f != "" && f != "gptq" && f != "gptq_v2" {
 			return nil, fmt.Errorf("gptq: checkpoint_format %q not supported", f)
 		}
@@ -129,13 +126,31 @@ func installInt4(lin map[string]*nn.Linear, hf map[string]*tensor.Tensor, q *int
 		if err != nil {
 			return fmt.Errorf("%s: %w", mod, err)
 		}
-		for _, p := range []**tensor.Tensor{&w.Codes, &w.Scales, &w.Zeros} {
+		ts := []**tensor.Tensor{&w.Codes, &w.Scales, &w.Zeros}
+		if w.Perm != nil {
+			ts = append(ts, &w.Perm)
+		}
+		for _, p := range ts {
 			if *p, err = (*p).To(dev); err != nil {
 				return err
 			}
 		}
 		if err := l.SetInt4(w); err != nil {
 			return fmt.Errorf("%s: %w", mod, err)
+		}
+		// Old AutoGPTQ checkpoints store a bias for every linear, also where
+		// the architecture has none; it must be all zeros then.
+		if b, ok := hf[mod+".bias"]; ok && l.B == nil {
+			b32, err := ops.Cast(b, dtype.F32)
+			if err != nil {
+				return err
+			}
+			for _, v := range tensor.MustSlice[float32](b32) {
+				if v != 0 {
+					return fmt.Errorf("%s: non-zero bias on a layer without one", mod)
+				}
+			}
+			delete(hf, mod+".bias")
 		}
 	}
 	return nil

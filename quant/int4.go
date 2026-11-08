@@ -2,6 +2,7 @@ package quant
 
 import (
 	"fmt"
+	"sort"
 
 	"light/device"
 	"light/dtype"
@@ -21,6 +22,11 @@ import (
 type Int4 struct {
 	Codes, Scales, Zeros *tensor.Tensor
 	Group                int
+	// Perm, for act-order GPTQ (desc_act), lists the original input index of
+	// each canonical column k (I64 (K,)): the weight's K axis is stored sorted
+	// by group, and the activation's columns must be gathered the same way
+	// (x[:, Perm]) before multiplying. nil when the groups are already in order.
+	Perm *tensor.Tensor
 }
 
 // N, K return the dequantized weight's shape.
@@ -112,14 +118,35 @@ func FromGPTQ(qweight, qzeros, scales, gIdx *tensor.Tensor, group int, v2 bool) 
 		return Int4{}, fmt.Errorf("quant.FromGPTQ: qweight %v, qzeros %v, scales %v, group %d inconsistent",
 			qweight.Shape(), qzeros.Shape(), scales.Shape(), group)
 	}
+	// Act-order (desc_act) checkpoints assign input rows to groups out of
+	// order: sort K by group (stably) so each group is contiguous again, and
+	// remember the order so the activation can be gathered to match.
+	var perm []int
 	if gIdx != nil {
 		gi, err := u32s(gIdx, "g_idx")
 		if err != nil {
 			return Int4{}, err
 		}
+		if len(gi) != K {
+			return Int4{}, fmt.Errorf("quant.FromGPTQ: g_idx has %d entries for K %d", len(gi), K)
+		}
+		ordered := true
 		for k, g := range gi {
 			if int(g) != k/group {
-				return Int4{}, fmt.Errorf("quant.FromGPTQ: g_idx[%d] = %d, want %d: act-order (desc_act) checkpoints are not supported yet", k, g, k/group)
+				ordered = false
+				break
+			}
+		}
+		if !ordered {
+			perm = make([]int, K)
+			for k := range perm {
+				perm[k] = k
+			}
+			sort.SliceStable(perm, func(a, b int) bool { return gi[perm[a]] < gi[perm[b]] })
+			for kk, k := range perm {
+				if int(gi[k]) != kk/group {
+					return Int4{}, fmt.Errorf("quant.FromGPTQ: g_idx groups are not all of size %d", group)
+				}
 			}
 		}
 	}
@@ -146,7 +173,22 @@ func FromGPTQ(qweight, qzeros, scales, gIdx *tensor.Tensor, group int, v2 bool) 
 			}
 		}
 	}
-	return build(N, K, group, func(n, k int) uint8 { return nibble(qw[(k/8)*N+n], k%8) }, scT, zT)
+	src := func(k int) int { return k }
+	if perm != nil {
+		src = func(k int) int { return perm[k] }
+	}
+	w, err := build(N, K, group, func(n, k int) uint8 { r := src(k); return nibble(qw[(r/8)*N+n], r%8) }, scT, zT)
+	if err != nil || perm == nil {
+		return w, err
+	}
+	p := make([]int64, K)
+	for i, k := range perm {
+		p[i] = int64(k)
+	}
+	if w.Perm, err = tensor.New(p, []int{K}, device.CPU()); err != nil {
+		return Int4{}, err
+	}
+	return w, nil
 }
 
 // awqOrder is AutoAWQ's packing order: nibble i of a word holds column

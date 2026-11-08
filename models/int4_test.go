@@ -21,26 +21,40 @@ import (
 // F32 agrees to float rounding.
 var int4Cases = []struct {
 	repo string
+	ids  []int64 // nil = int4ChatIDs (Qwen2.5)
 	ref  []struct {
 		id    int
 		logit float32
 	}
 	greedy []int64
 }{
-	{"Qwen/Qwen2.5-0.5B-Instruct-GPTQ-Int4",
+	{"Qwen/Qwen2.5-0.5B-Instruct-GPTQ-Int4", nil,
 		[]struct {
 			id    int
 			logit float32
 		}{{785, 22.6532}, {4498, 16.2008}, {2121, 15.4965}, {641, 15.4459}, {1249, 15.4160}},
 		// "The sky is blue because it reflects sunlight, which scatters colors of the Earth"
 		[]int64{785, 12884, 374, 6303, 1576, 432, 25963, 39020, 11, 892, 1136, 10175, 7987, 315, 279, 9237}},
-	{"Qwen/Qwen2.5-0.5B-Instruct-AWQ",
+	{"Qwen/Qwen2.5-0.5B-Instruct-AWQ", nil,
 		[]struct {
 			id    int
 			logit float32
 		}{{785, 21.8347}, {4498, 15.3062}, {10331, 14.7970}, {69769, 14.7519}, {2121, 14.4423}},
 		// "The sky appears blue because it reflects sunlight, which is a mixture of all colors"
 		[]int64{785, 12884, 7952, 6303, 1576, 432, 25963, 39020, 11, 892, 374, 264, 20980, 315, 678, 7987}},
+	// Act-order GPTQ (desc_act true, TheBloke's AutoGPTQ export with
+	// all-zero biases on every linear): the loader sorts K by group and the
+	// matmul gathers x's columns to match.
+	{"TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ",
+		[]int64{529, 29989, 5205, 29989, 29958, 13, 3492, 526, 263, 3022, 895, 20255, 29889, 2, 13, 29966, 29989, 1792,
+			29989, 29958, 13, 9544, 7420, 297, 697, 10541, 2020, 278, 14744, 338, 7254, 29889, 2, 13, 29966, 29989, 465,
+			22137, 29989, 29958, 13},
+		[]struct {
+			id    int
+			logit float32
+		}{{1576, 18.1317}, {797, 16.5232}, {29903, 15.2174}, {6716, 13.7784}, {11008, 12.8105}},
+		// "The sky is blue because it is a color that is created by the reflection of"
+		[]int64{1576, 14744, 338, 7254, 1363, 372, 338, 263, 2927, 393, 338, 2825, 491, 278, 17842, 310}},
 }
 
 var int4ChatIDs = []int64{151644, 8948, 198, 2610, 525, 264, 63594, 17847, 13, 151645, 198, 151644, 872, 198, 840,
@@ -74,7 +88,11 @@ func TestInt4CheckpointsMatchDequantizedReference(t *testing.T) {
 						t.Fatalf("%v %v: projections not loaded as 4-bit", dev, dt)
 					}
 					cache := NewKVCache(m.NumLayers())
-					row := lastLogits(t, m, int4ChatIDs, cache, dev)
+					ids := tc.ids
+					if ids == nil {
+						ids = int4ChatIDs
+					}
+					row := lastLogits(t, m, ids, cache, dev)
 					got := top5(row)
 					tol := float32(1e-3)
 					if dt == dtype.BF16 {
