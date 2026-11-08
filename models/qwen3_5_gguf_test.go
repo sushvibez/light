@@ -285,20 +285,20 @@ func cfgRot(t *testing.T) int {
 //
 // Q4_K_M is not BF16, so the comparison is loose: the reference top-1, the
 // reference logits within 1.5, and the greedy continuation agreeing on a
-// prefix. TODO(qwen35-27b): fill in qwen3527BRef / qwen3527BGreedy (and the
-// prompt ids, if the 27B renders a different prompt from the 9B); until then
-// the test stops after the reference-free checks.
+// prefix. Reference from an A100 80 GB (BF16 on the GPU); the prompt ids are
+// the 9B's (same tokenizer and template).
 //
 // colab-download: unsloth/Qwen3.5-27B-GGUF Qwen3.5-27B-Q4_K_M.gguf
 const qwen3527BGGUF = "Qwen3.5-27B-Q4_K_M.gguf"
 
 var (
 	qwen3527BChatIDs = qwen359BChatIDs
-	qwen3527BRef     []struct {
+	qwen3527BRef     = []struct {
 		id    int
 		logit float32
-	}
-	qwen3527BGreedy []int64
+	}{{90700, 29.625}, {760, 21.75}, {31248, 17.625}, {79420, 17.25}, {50534, 15.9375}}
+	// "Thinking Process:\n\n1.  **Analyze the Request:**\n    *"
+	qwen3527BGreedy = []int64{90700, 8340, 25, 271, 16, 13, 220, 2972, 2014, 53983, 279, 5952, 64700, 198, 262, 348}
 )
 
 func TestQwen3527BGGUFMatchesTransformers(t *testing.T) {
@@ -360,9 +360,6 @@ func TestQwen3527BGGUFMatchesTransformers(t *testing.T) {
 	}
 	t.Logf("greedy %v", greedy)
 
-	if qwen3527BRef == nil {
-		t.Skip("transformers reference values not recorded yet (see TODO(qwen35-27b))")
-	}
 	if got[0] != qwen3527BRef[0].id {
 		t.Errorf("top-1 %d (%.3f), want %d (%.3f)", got[0], first[got[0]], qwen3527BRef[0].id, qwen3527BRef[0].logit)
 	}
