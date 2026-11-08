@@ -8,6 +8,7 @@ import (
 
 	"light/device"
 	"light/dtype"
+	"light/tensor"
 )
 
 // Tiny-random Nemotron written by `scripts/verify/ref_nemotron.py
@@ -56,6 +57,21 @@ func TestNemotronTinyMatchesTransformers(t *testing.T) {
 	if !slices.Equal(greedy, nemotronTinyGreedy) {
 		t.Errorf("greedy %v, want %v", greedy, nemotronTinyGreedy)
 	}
+	// BF16: the LayerNorm parameters must sit at the activation dtype (the
+	// CUDA kernel requires it), and the logits stay within BF16 noise.
+	mb, err := LoadCausalLMFromHF("testdata/nemotron/tiny", cpu, dtype.BF16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range []*tensor.Tensor{mb.Blocks[0].LN1.Gamma, mb.Blocks[0].LN2.Beta, mb.FinalLN.Gamma} {
+		if g.DType() != dtype.BF16 {
+			t.Fatalf("BF16 model has a %v LayerNorm parameter", g.DType())
+		}
+	}
+	if d := maxAbsDiff(full, lastLogits(t, mb, ids, NewKVCache(mb.NumLayers()), cpu)); d > 0.05 {
+		t.Errorf("BF16 vs F32 logits differ by %.3f", d)
+	}
+
 	cache = NewKVCache(m.NumLayers())
 	lastLogits(t, m, ids[:5], cache, cpu)
 	var chunked []float32

@@ -17,6 +17,9 @@ func init() {
 	reg("rmsnorm", dtype.BF16, rmsnormBF16)
 	reg("layernorm", dtype.F32, layernormF32)
 	reg("layernorm", dtype.F64, layernormF64)
+	// BF16 activations with BF16 gamma / beta (Nemotron): computed in F32,
+	// rounded once, as the CUDA kernel does.
+	reg("layernorm", dtype.BF16, viaF32(layernormF32))
 }
 
 // rmsnormF32: y = x * rsqrt(mean(x²) + eps) * weight, along the last axis.
