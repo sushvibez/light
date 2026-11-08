@@ -44,9 +44,6 @@ NVIDIA CUDA Toolkit, cuBLAS, cuBLASLt and cuDNN are used through their C
 APIs under the NVIDIA Software License Agreement; they are not distributed
 with this repository.
 
-Wails (https://wails.io, MIT) and React (MIT) are used by the Studio
-desktop app under studio/.
-
 ================================================================================
 Test assets
 ================================================================================

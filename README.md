@@ -7,9 +7,11 @@ PyTorch checkpoints, HF-compatible tokenizers, and ports of the transformer,
 vision, diffusion and speech models that Candle ships, each verified against
 the reference implementation on real weights.
 
-It also includes an inference engine with a command-line tool (`cmd/light`:
-pull, chat, and an OpenAI-compatible HTTP API) and a desktop app (`studio/`, Wails v3 + React) for
-chat, speech-to-text, embeddings and full-duplex speech-to-speech (Moshi).
+It also includes an inference engine for chat, speech-to-text, embeddings
+and full-duplex speech-to-speech (Moshi), with a command-line tool
+(`cmd/light`: pull, chat, and an OpenAI-compatible HTTP API). The desktop
+app, Light Studio (Wails v3 + React), lives in its own repository,
+`light-studio`, and builds against a checkout of this one.
 
 ## What is in the box
 
@@ -59,8 +61,6 @@ light run qwen2.5-0.5b-instruct "Why is the sky blue?"
 light serve -addr :8129                # OpenAI-compatible API
 curl localhost:8129/v1/models
 
-# Desktop app
-cd studio && task dev                  # needs wails3 + task
 ```
 
 Models are pulled from the Hugging Face Hub into the standard
