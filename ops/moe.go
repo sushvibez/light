@@ -3,6 +3,7 @@ package ops
 import (
 	"fmt"
 
+	"light/device"
 	"light/dtype"
 	"light/internal/registry"
 	"light/quant"
@@ -67,6 +68,34 @@ func MoERoute(probs *tensor.Tensor, topk int, normalize bool) (*MoERouting, erro
 		return nil, err
 	}
 	return &MoERouting{TopKIDs: idsC, Weights: weights, SortedPairs: sortedPairs, SortedExpts: sortedExpts}, nil
+}
+
+// MoERouteFromIDs builds a routing from an explicit top-k selection:
+// ids (T·topk) expert per (token, slot) and their weights, row-major by
+// token. Routers that choose experts by other rules than softmax top-k
+// (DeepSeek's group-limited / biased sigmoid routers) produce these and get
+// the same expert-sorted pairs MoERoute gives.
+func MoERouteFromIDs(ids []int64, weights []float32, T, topk int, dev device.Device) (*MoERouting, error) {
+	if len(ids) != T*topk || len(weights) != T*topk {
+		return nil, fmt.Errorf("moe_route: %d ids / %d weights for %d × %d", len(ids), len(weights), T, topk)
+	}
+	idT, err := tensor.New(ids, []int{T, topk}, dev)
+	if err != nil {
+		return nil, err
+	}
+	w, err := tensor.New(weights, []int{T * topk}, dev)
+	if err != nil {
+		return nil, err
+	}
+	flat, err := idT.Reshape(T * topk)
+	if err != nil {
+		return nil, err
+	}
+	sortedExpts, sortedPairs, err := Sort(flat, false)
+	if err != nil {
+		return nil, err
+	}
+	return &MoERouting{TopKIDs: idT, Weights: w, SortedPairs: sortedPairs, SortedExpts: sortedExpts}, nil
 }
 
 // MoEGemm is the grouped expert matmul (Candle `moe_gemm`):

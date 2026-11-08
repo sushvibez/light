@@ -34,6 +34,10 @@ type SparseMoE struct {
 	// Gate weight (DeepSeek computes its routing logits in F32); otherwise
 	// at the activation dtype, cast to F32 for the softmax.
 	RouterF32 bool
+	// Router, when set, replaces the softmax + top-k selection: it receives
+	// the (T, E) F32 router logits and returns the routing (DeepSeek's
+	// group-limited and sigmoid-with-bias routers).
+	Router func(logits *tensor.Tensor) (*ops.MoERouting, error)
 }
 
 // NewSparseMoEUninit allocates a block with zeroed expert weights at wdt;
@@ -120,11 +124,15 @@ func (m *SparseMoE) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 			return nil, err
 		}
 	}
-	probs, err := ops.Softmax(logits, -1)
-	if err != nil {
-		return nil, err
+	var route *ops.MoERouting
+	if m.Router != nil {
+		route, err = m.Router(logits)
+	} else {
+		var probs *tensor.Tensor
+		if probs, err = ops.Softmax(logits, -1); err == nil {
+			route, err = ops.MoERoute(probs, m.TopK, m.NormTopK)
+		}
 	}
-	route, err := ops.MoERoute(probs, m.TopK, m.NormTopK)
 	if err != nil {
 		return nil, err
 	}

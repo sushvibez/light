@@ -43,6 +43,8 @@ type deepseekV2HFConfig struct {
 	RopeScaling         *hfRopeParams `json:"rope_scaling"`
 	RopeParameters      *hfRopeParams `json:"rope_parameters"`
 	RmsNormEps          float64       `json:"rms_norm_eps"`
+	ModelType           string        `json:"model_type"`
+	RopeInterleave      *bool         `json:"rope_interleave"`
 	MaxPosition         int           `json:"max_position_embeddings"`
 	TieWordEmbeddings   bool          `json:"tie_word_embeddings"`
 }
@@ -66,18 +68,26 @@ func fetchDeepseekV2Config(repo string) (DeepseekV2Config, error) {
 	if hf.AttentionBias {
 		return DeepseekV2Config{}, fmt.Errorf("deepseek_v2: attention_bias not supported")
 	}
-	if s := hf.ScoringFunc; s != "" && s != "softmax" {
-		return DeepseekV2Config{}, fmt.Errorf("deepseek_v2: scoring_func %q not supported (softmax)", s)
-	}
-	switch hf.TopkMethod {
-	case "", "greedy":
-	case "group_limited_greedy":
-		// The group restriction is a no-op when every group may be chosen.
-		if hf.NGroup > 1 && hf.TopkGroup < hf.NGroup {
-			return DeepseekV2Config{}, fmt.Errorf("deepseek_v2: group_limited_greedy routing (n_group %d, topk_group %d) not supported yet", hf.NGroup, hf.TopkGroup)
+	v3 := hf.ModelType == "deepseek_v3"
+	var groupLimited bool
+	if v3 {
+		// transformers' DeepseekV3TopkRouter: sigmoid scores, correction
+		// bias, sum-of-top-2 group selection (scoring_func / topk_method in
+		// the original configs are "sigmoid" / "noaux_tc").
+		if s := hf.ScoringFunc; s != "" && s != "sigmoid" {
+			return DeepseekV2Config{}, fmt.Errorf("deepseek_v3: scoring_func %q not supported (sigmoid)", s)
 		}
-	default:
-		return DeepseekV2Config{}, fmt.Errorf("deepseek_v2: topk_method %q not supported", hf.TopkMethod)
+	} else {
+		if s := hf.ScoringFunc; s != "" && s != "softmax" {
+			return DeepseekV2Config{}, fmt.Errorf("deepseek_v2: scoring_func %q not supported (softmax)", s)
+		}
+		switch hf.TopkMethod {
+		case "", "greedy":
+		case "group_limited_greedy":
+			groupLimited = hf.NGroup > 1 && hf.TopkGroup < hf.NGroup // otherwise a no-op
+		default:
+			return DeepseekV2Config{}, fmt.Errorf("deepseek_v2: topk_method %q not supported", hf.TopkMethod)
+		}
 	}
 	rp := hf.RopeParameters
 	if rp == nil {
@@ -101,7 +111,13 @@ func fetchDeepseekV2Config(repo string) (DeepseekV2Config, error) {
 		MoEIntermediate: hf.MoEIntermediateSize, TopK: hf.NumExpertsPerTok, FirstKDense: hf.FirstKDenseReplace,
 		MoELayerFreq: hf.MoELayerFreq, NormTopK: hf.NormTopKProb, RoutedScale: hf.RoutedScaling,
 		RopeBase: base, RopeScaling: scaling, RmsEps: hf.RmsNormEps, MaxPosition: hf.MaxPosition,
-		TieEmbed: hf.TieWordEmbeddings,
+		TieEmbed:     hf.TieWordEmbeddings,
+		GroupLimited: groupLimited, Sigmoid: v3, NGroup: hf.NGroup, TopKGroup: hf.TopkGroup,
+		RopeInterleave: !v3 || hf.RopeInterleave == nil || *hf.RopeInterleave,
+	}
+	if !v3 {
+		// DeepseekV2TopkRouter never renormalises (norm_topk_prob is unused).
+		cfg.NormTopK = false
 	}
 	if hf.QLoraRank != nil {
 		cfg.QLoraRank = *hf.QLoraRank
@@ -212,11 +228,13 @@ func LoadDeepseekV2FromHF(repo string, dev device.Device, weightDT dtype.DType) 
 		if cfg.QLoraRank > 0 {
 			qName = sa + "q_b_proj.weight"
 		}
-		if err := reorder(qName, dq, cfg.QKNopeDim); err != nil {
-			return nil, err
-		}
-		if err := reorder(sa+"kv_a_proj_with_mqa.weight", R+dr, R); err != nil {
-			return nil, err
+		if cfg.RopeInterleave {
+			if err := reorder(qName, dq, cfg.QKNopeDim); err != nil {
+				return nil, err
+			}
+			if err := reorder(sa+"kv_a_proj_with_mqa.weight", R+dr, R); err != nil {
+				return nil, err
+			}
 		}
 		type pair struct {
 			dst  *tensor.Tensor
@@ -260,6 +278,20 @@ func LoadDeepseekV2FromHF(repo string, dev device.Device, weightDT dtype.DType) 
 			return nil, fmt.Errorf("%sgate.weight: %w", mlp, err)
 		}
 		b.MoE.RouterF32 = true
+		if cfg.Sigmoid || cfg.GroupLimited {
+			var bias []float32
+			if cfg.Sigmoid {
+				bt, err := toDev(mlp+"gate.e_score_correction_bias", dtype.F32)
+				if err != nil {
+					return nil, err
+				}
+				if bt, err = bt.To(device.CPU()); err != nil {
+					return nil, err
+				}
+				bias = tensor.MustSlice[float32](bt)
+			}
+			b.MoE.Router = deepseekRouter(cfg.TopK, cfg.NGroup, cfg.TopKGroup, cfg.Sigmoid, bias, cfg.NormTopK)
+		}
 		E := cfg.NumExperts
 		gate, up, down := make([]*tensor.Tensor, E), make([]*tensor.Tensor, E), make([]*tensor.Tensor, E)
 		for e := range E {

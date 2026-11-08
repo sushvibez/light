@@ -34,6 +34,16 @@ type DeepseekV2Config struct {
 	MoEIntermediate, NumExperts, TopK, NumShared, FirstKDense, MoELayerFreq int
 	NormTopK                                                                bool
 	RoutedScale                                                             float64
+	// Expert selection beyond softmax top-k (see deepseekRouter): V2's
+	// group-limited routing (GroupLimited), V3's sigmoid scores with a
+	// per-expert correction bias (Sigmoid); both keep TopKGroup of NGroup
+	// expert groups.
+	GroupLimited, Sigmoid bool
+	NGroup, TopKGroup     int
+	// RopeInterleave: the checkpoint's rope dims rotate in interleaved pairs
+	// (always for V2; V3's rope_interleave, default true); the loader then
+	// reorders them to rotate-half order.
+	RopeInterleave bool
 
 	RopeBase    float64
 	RopeScaling *RopeScaling // YaRN (V2: factor 40, mscale_all_dim 0.707); nil = plain RoPE

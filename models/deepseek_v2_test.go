@@ -195,3 +195,99 @@ func TestDeepseekV2LiteMatchesTransformersBF16(t *testing.T) {
 		t.Errorf("greedy %v diverges from transformers BF16 %v after %d tokens", greedy, deepseekV2LiteGreedy, agree)
 	}
 }
+
+// Routing variants (`ref_deepseek_v2.py --make-tiny group|v3|v3-rot`):
+// V2 group-limited routing (4 groups, 2 kept), and DeepSeek-V3's sigmoid
+// router with a perturbed e_score_correction_bias, sum-of-top-2 group
+// selection, renormalised top-3 and routed scale 2.5, with interleaved
+// (rope_interleave true) and rotate-half (false) rope rows.
+var deepseekRoutingCases = []struct {
+	dir                    string
+	v3, interleave, groups bool
+	ref                    []struct {
+		id    int
+		logit float32
+	}
+	greedy []int64
+}{
+	{"testdata/deepseek_v2/tiny-group", false, true, true,
+		[]struct {
+			id    int
+			logit float32
+		}{{325, 0.5220}, {425, 0.3839}, {256, 0.3738}, {150, 0.3696}, {411, 0.3478}},
+		[]int64{325, 198, 175, 503, 390, 107, 358, 305}},
+	{"testdata/deepseek_v2/tiny-v3", true, true, true,
+		[]struct {
+			id    int
+			logit float32
+		}{{48, 0.5493}, {434, 0.4241}, {395, 0.4121}, {257, 0.4118}, {105, 0.3684}},
+		[]int64{48, 466, 355, 379, 13, 105, 13, 105}},
+	{"testdata/deepseek_v2/tiny-v3-rot", true, false, true,
+		[]struct {
+			id    int
+			logit float32
+		}{{48, 0.5491}, {434, 0.4239}, {395, 0.4126}, {257, 0.4122}, {105, 0.3686}},
+		[]int64{48, 466, 39, 13, 434, 385, 160, 501}},
+}
+
+func TestDeepseekRoutingVariantsMatchTransformers(t *testing.T) {
+	for _, tc := range deepseekRoutingCases {
+		t.Run(tc.dir, func(t *testing.T) {
+			devs := []device.Device{device.CPU()}
+			if device.CUDAAvailable() {
+				if g, err := device.CUDA(0); err == nil {
+					devs = append(devs, g)
+				}
+			}
+			var cpuFull []float32
+			for _, dev := range devs {
+				m, err := LoadDeepseekV2FromHF(tc.dir, dev, dtype.F32)
+				if err != nil {
+					t.Fatal(err)
+				}
+				c := m.Cfg
+				if c.Sigmoid != tc.v3 || c.RopeInterleave != tc.interleave || c.GroupLimited == tc.v3 ||
+					c.NGroup != 4 || c.TopKGroup != 2 || m.Blocks[1].MoE.Router == nil {
+					t.Fatalf("config %+v", c)
+				}
+				full := lastLogits(t, m, deepseekTinyIDs, NewKVCache(m.NumLayers()), dev)
+				if dev.Kind() != device.KindCPU {
+					if d := maxAbsDiff(cpuFull, full); d > 1e-4 {
+						t.Errorf("CUDA vs CPU logits differ by %.2e", d)
+					}
+					continue
+				}
+				cpuFull = full
+				got := top5(full)
+				for i, w := range tc.ref {
+					if i < 2 && got[i] != w.id {
+						t.Errorf("top-%d: got %d (%.4f), want %d (%.4f)", i+1, got[i], full[got[i]], w.id, w.logit)
+					}
+					if d := full[w.id] - w.logit; d > 2e-4 || d < -2e-4 {
+						t.Errorf("logit[%d] = %.5f, want %.4f", w.id, full[w.id], w.logit)
+					}
+				}
+				cache := NewKVCache(m.NumLayers())
+				step := lastLogits(t, m, deepseekTinyIDs, cache, dev)
+				var greedy []int64
+				for len(greedy) < len(tc.greedy) {
+					next := int64(top5(step)[0])
+					greedy = append(greedy, next)
+					step = lastLogits(t, m, []int64{next}, cache, dev)
+				}
+				if !slices.Equal(greedy, tc.greedy) {
+					t.Errorf("greedy %v, want %v", greedy, tc.greedy)
+				}
+				cache = NewKVCache(m.NumLayers())
+				lastLogits(t, m, deepseekTinyIDs[:5], cache, dev)
+				var chunked []float32
+				for i := 5; i < len(deepseekTinyIDs); i++ {
+					chunked = lastLogits(t, m, deepseekTinyIDs[i:i+1], cache, dev)
+				}
+				if d := maxAbsDiff(full, chunked); d > 1e-5 {
+					t.Errorf("chunked vs single-shot differ by %.2e", d)
+				}
+			}
+		})
+	}
+}
