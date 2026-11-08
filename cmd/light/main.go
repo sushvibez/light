@@ -2,6 +2,7 @@
 // model in the terminal, manage the models on disk, and serve them through
 // an OpenAI-compatible API.
 //
+//	light                              interactive shell: chat, /model, /pull, /help …
 //	light list                         models on disk (HF cache + GGUF dir)
 //	light pull Qwen/Qwen2.5-0.5B-Instruct
 //	light pull unsloth/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf
@@ -39,7 +40,7 @@ func init() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: light <command> [arguments]\n\ncommands:")
+	fmt.Fprintln(os.Stderr, "usage: light                      interactive shell (/help inside)\n       light <command> [arguments]\n\ncommands:")
 	for _, c := range commands {
 		fmt.Fprintf(os.Stderr, "  %-6s %-30s %s\n", c.name, c.args, c.help)
 	}
@@ -47,6 +48,15 @@ func usage() {
 }
 
 func main() {
+	if len(os.Args) == 1 {
+		if st, err := os.Stdin.Stat(); err == nil && st.Mode()&os.ModeCharDevice != 0 {
+			if err := cmdShell(); err != nil {
+				fmt.Fprintln(os.Stderr, "light:", err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
 	if len(os.Args) < 2 || os.Args[1] == "-h" || os.Args[1] == "--help" || os.Args[1] == "help" {
 		usage()
 		if len(os.Args) < 2 {

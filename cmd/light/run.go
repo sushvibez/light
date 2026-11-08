@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"strings"
 	"sync"
 
@@ -91,26 +90,36 @@ func cmdRun(args []string) error {
 	oneShot := prompt != ""
 
 	rt := engine.NewRuntime()
-	if !oneShot {
-		fmt.Fprintf(os.Stderr, "loading %s …\n", e.Spec.ID)
-	}
-	m, err := rt.Load(mf.spec(e))
-	if err != nil {
-		return err
-	}
 	opts := engine.GenOpts{MaxTokens: *maxTok, Temperature: float32(*temp), TopP: float32(*topP), TopK: *topK, Seed: *seed}
-	var msgs []engine.Message
-	if *system != "" {
-		msgs = append(msgs, engine.Message{Role: "system", Content: *system})
-	}
-	c := &chat{rt: rt, opts: opts, verbose: *verbose}
 	if oneShot {
+		if _, err := rt.Load(mf.spec(e)); err != nil {
+			return err
+		}
+		var msgs []engine.Message
+		if *system != "" {
+			msgs = append(msgs, engine.Message{Role: "system", Content: *system})
+		}
+		c := &chat{rt: rt, opts: opts, verbose: *verbose}
 		_, err := c.reply(append(msgs, engine.Message{Role: "user", Content: prompt}))
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "%s ready (%s template, %.1f s). /help for commands, Ctrl-D to quit.\n",
-		m.Spec.ID, m.Template.Source, m.LoadTime.Seconds())
-	return c.loop(msgs, *system)
+	sh := newShell(rt, mf, opts, *system, *verbose)
+	if err := sh.load(e); err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "/help for commands, Ctrl-D to quit.")
+	return sh.run()
+}
+
+// defaultOpts are `light run`'s flag defaults, used by the bare shell.
+var defaultOpts = engine.GenOpts{MaxTokens: 1024, Temperature: 0.7, TopP: 0.9, TopK: 40}
+
+// cmdShell is `light` with no arguments: the interactive shell, no model
+// loaded yet.
+func cmdShell() error {
+	sh := newShell(engine.NewRuntime(), modelFlags{}, defaultOpts, "", false)
+	fmt.Fprintln(os.Stderr, "Light — /model <name> loads a chat model, /model lists them, /help for all commands, Ctrl-D to quit.")
+	return sh.run()
 }
 
 // chat streams replies and lets Ctrl-C stop the current one.
@@ -167,78 +176,6 @@ func (c *chat) interrupt() bool {
 	}
 	c.cancel()
 	return true
-}
-
-const chatHelp = `commands:
-  /clear           forget the conversation
-  /system <text>   set the system prompt (and clear)
-  /verbose         toggle timing after each reply
-  /bye             quit (or Ctrl-D)
-  """              start / end a multi-line message
-Ctrl-C stops a reply in progress.`
-
-func (c *chat) loop(msgs []engine.Message, system string) error {
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
-	defer signal.Stop(sig)
-	go func() {
-		for range sig {
-			if !c.interrupt() {
-				fmt.Fprint(os.Stderr, "\n(/bye or Ctrl-D to quit)\n>>> ")
-			}
-		}
-	}()
-	in := bufio.NewReader(os.Stdin)
-	for {
-		fmt.Fprint(os.Stderr, ">>> ")
-		line, err := readMessage(in)
-		if err == io.EOF {
-			fmt.Fprintln(os.Stderr)
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		switch cmd := strings.TrimSpace(line); {
-		case cmd == "":
-			continue
-		case cmd == "/bye" || cmd == "/exit" || cmd == "/quit":
-			return nil
-		case cmd == "/help" || cmd == "/?":
-			fmt.Fprintln(os.Stderr, chatHelp)
-			continue
-		case cmd == "/clear":
-			msgs = msgs[:0]
-			if system != "" {
-				msgs = append(msgs, engine.Message{Role: "system", Content: system})
-			}
-			fmt.Fprintln(os.Stderr, "(cleared)")
-			continue
-		case cmd == "/verbose":
-			c.verbose = !c.verbose
-			fmt.Fprintf(os.Stderr, "(verbose %v)\n", c.verbose)
-			continue
-		case strings.HasPrefix(cmd, "/system"):
-			system = strings.TrimSpace(strings.TrimPrefix(cmd, "/system"))
-			msgs = msgs[:0]
-			if system != "" {
-				msgs = append(msgs, engine.Message{Role: "system", Content: system})
-			}
-			fmt.Fprintln(os.Stderr, "(system prompt set; conversation cleared)")
-			continue
-		case strings.HasPrefix(cmd, "/"):
-			fmt.Fprintf(os.Stderr, "unknown command %s; /help lists them\n", cmd)
-			continue
-		}
-		msgs = append(msgs, engine.Message{Role: "user", Content: line})
-		text, err := c.reply(msgs)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			msgs = msgs[:len(msgs)-1]
-			continue
-		}
-		msgs = append(msgs, engine.Message{Role: "assistant", Content: text})
-	}
 }
 
 // readMessage reads one line, or a block between lines holding only `"""`.

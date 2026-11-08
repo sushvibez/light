@@ -110,3 +110,26 @@ func TestReadMessage(t *testing.T) {
 		t.Fatalf("at end: err %v, want EOF", err)
 	}
 }
+
+// The shell's command handling without a model: settings, system prompt,
+// prefix matching, unknown / ambiguous commands, chat without a model, and
+// /exit ending the loop.
+func TestShellCommands(t *testing.T) {
+	s := newShell(engine.NewRuntime(), modelFlags{}, defaultOpts, "", false)
+	s.in = bufio.NewReader(strings.NewReader(strings.Join([]string{
+		"/set temp 0.2", "/set top-k 5", "/set device cpu", "/set bogus 1", "/set temp x",
+		"/system be brief", "/sys", "/s", "/nosuch", "hello", "/verb", "/exit", "/help",
+	}, "\n")))
+	if err := s.run(); err != nil {
+		t.Fatal(err)
+	}
+	if s.opts.Temperature != 0.2 || s.opts.TopK != 5 || s.mf.device != "cpu" || !s.verbose {
+		t.Errorf("settings: %+v device %q verbose %v", s.opts, s.mf.device, s.verbose)
+	}
+	if s.system != "be brief" || len(s.msgs) != 1 || s.msgs[0].Role != "system" {
+		t.Errorf("system %q msgs %+v", s.system, s.msgs)
+	}
+	if rest, _ := io.ReadAll(s.in); string(rest) != "/help" {
+		t.Errorf("/exit did not stop the loop; left %q", rest)
+	}
+}
