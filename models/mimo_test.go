@@ -63,17 +63,19 @@ func TestMiMoTinyMatchesTransformers(t *testing.T) {
 //
 //	python scripts/verify/ref_mimo.py XiaomiMiMo/MiMo-7B-RL bf16 --chat
 //
-// TODO(mimo-7b): fill in the prompt ids, reference logits and greedy ids from
-// that run; until then the test stops after the reference-free checks.
+// (A100, on the GPU; transformers reports exactly the 16 mtp_layers tensors
+// as unused.) The reasoning model opens with "<think>", 16 logits ahead.
 const mimo7BRepo = "XiaomiMiMo/MiMo-7B-RL"
 
 var (
-	mimo7BChatIDs []int64
-	mimo7BRef     []struct {
+	mimo7BChatIDs = []int64{151644, 8948, 198, 2610, 525, 264, 63594, 17847, 13, 151645, 198, 151644, 872, 198, 840,
+		20772, 304, 825, 11652, 3170, 279, 12884, 374, 6303, 13, 151645, 198, 151644, 77091, 198}
+	mimo7BRef = []struct {
 		id    int
 		logit float32
-	}
-	mimo7BGreedy []int64
+	}{{13708, 34.5}, {27, 18.25}, {2, 17.625}, {12, 16.0}, {4421, 15.875}}
+	// "<think>" + newline + "Okay, the user wants to know why the sky is blue in"
+	mimo7BGreedy = []int64{13708, 766, 397, 32313, 11, 279, 1196, 6801, 311, 1414, 3170, 279, 12884, 374, 6303, 304}
 )
 
 func TestMiMo7BMatchesTransformersBF16(t *testing.T) {
@@ -105,12 +107,6 @@ func TestMiMo7BMatchesTransformersBF16(t *testing.T) {
 	}
 	t.Logf("params %.3f B", float64(m.ParamCount())/1e9)
 	ids := mimo7BChatIDs
-	if ids == nil {
-		ids = make([]int64, 32) // a fixed sequence until the chat-template ids are recorded
-		for i := range ids {
-			ids[i] = int64(1000 + 37*i)
-		}
-	}
 	cache := NewKVCache(m.NumLayers())
 	row := lastLogits(t, m, ids, cache, dev)
 	got := top5(row)
@@ -123,9 +119,6 @@ func TestMiMo7BMatchesTransformersBF16(t *testing.T) {
 		row = lastLogits(t, m, []int64{next}, cache, dev)
 	}
 	t.Logf("greedy %v", greedy)
-	if mimo7BRef == nil {
-		t.Skip("transformers reference values not recorded yet (see TODO(mimo-7b))")
-	}
 	for i, w := range mimo7BRef {
 		if i < 2 && got[i] != w.id {
 			t.Errorf("top-%d: got %d (%.3f), want %d (%.3f)", i+1, got[i], first[got[i]], w.id, w.logit)
