@@ -140,9 +140,11 @@ func fetchQwenConfig(repo string) (LlamaConfig, error) {
 		headDim = hf.HiddenSize / hf.NumAttentionHeads
 	}
 	// Qwen2 always carries Q/K/V bias regardless of the `attention_bias` flag;
-	// LLaMA/Mistral do not. We pick by model_type.
+	// LLaMA/Mistral do not. We pick by model_type. MiMo-7B (`mimo`) is Qwen2
+	// plus multi-token-prediction layers that the forward pass never runs
+	// (their `model.mtp_layers.*` weights are ignored here).
 	qkvBias := hf.AttentionBias
-	if hf.ModelType == "qwen2" || hf.ModelType == "qwen2_5" {
+	if hf.ModelType == "qwen2" || hf.ModelType == "qwen2_5" || hf.ModelType == "mimo" {
 		qkvBias = true
 	}
 	return LlamaConfig{
