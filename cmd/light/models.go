@@ -387,22 +387,43 @@ func cmdPull(args []string) error {
 		total += f.Size
 	}
 	fmt.Printf("pulling %s: %d files, %s\n", repo, len(plan.cache)+len(plan.ggufDir), gb(total))
-	for _, f := range plan.cache {
-		if _, err := hub.DownloadWithProgress(repo, *rev, f.Name, newBar(f)); err != nil {
-			return err
+	// Small files (configs, tokenizer) first, so an interrupted pull still
+	// leaves a usable model directory to resume; each file is retried,
+	// resuming its .part, before the pull gives up on it.
+	bySize := func(fs []hub.RepoFile) {
+		sort.SliceStable(fs, func(i, j int) bool { return fs[i].Size < fs[j].Size })
+	}
+	bySize(plan.cache)
+	bySize(plan.ggufDir)
+	var failed []string
+	fetch := func(f hub.RepoFile, get func() error) {
+		var err error
+		for attempt := 1; attempt <= pullAttempts; attempt++ {
+			if err = get(); err == nil {
+				doneBar(f)
+				return
+			}
+			fmt.Fprintf(os.Stderr, "\n  %s: %v (attempt %d of %d)\n", f.Name, err, attempt, pullAttempts)
+			time.Sleep(time.Duration(attempt) * 2 * time.Second)
 		}
-		doneBar(f)
+		failed = append(failed, f.Name)
+	}
+	for _, f := range plan.cache {
+		fetch(f, func() error { _, err := hub.DownloadWithProgress(repo, *rev, f.Name, newBar(f)); return err })
 	}
 	for _, f := range plan.ggufDir {
 		dst := filepath.Join(engine.GGUFDir(), path.Base(f.Name))
-		if err := hub.DownloadTo(repo, *rev, f.Name, dst, newBar(f)); err != nil {
-			return err
-		}
-		doneBar(f)
+		fetch(f, func() error { return hub.DownloadTo(repo, *rev, f.Name, dst, newBar(f)) })
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("%d file(s) failed after %d attempts each: %s (run the same pull again to resume)", len(failed), pullAttempts, strings.Join(failed, ", "))
 	}
 	fmt.Println("done; `light list` shows it")
 	return nil
 }
+
+// pullAttempts is how often a file download is tried (each retry resumes).
+const pullAttempts = 4
 
 // newBar returns a progress callback drawing one line for f on stderr.
 func newBar(f hub.RepoFile) hub.Progress {
