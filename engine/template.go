@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"image"
 	"strings"
 
 	"light/chattemplate"
@@ -11,6 +12,9 @@ import (
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+	// Images attached to the turn (shown before the text). Decoded from
+	// OpenAI-style content parts ({"type": "image_url"}) by UnmarshalJSON.
+	Images []image.Image `json:"-"`
 }
 
 // Template renders a conversation into the prompt string a model family

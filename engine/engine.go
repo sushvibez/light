@@ -54,6 +54,8 @@ type Model struct {
 	// autoregressive loop. SDAR holds its decoding settings.
 	Diffusion bool
 	SDAR      models.SDAROpts
+
+	vision *models.Qwen35Vision // loaded on the first image
 }
 
 // GenOpts controls sampling. Temperature 0 is greedy.
@@ -366,27 +368,39 @@ func (m *Model) Generate(ctx context.Context, msgs []Message, opts GenOpts, onTo
 	if len(ids) == 0 {
 		return "", Stats{}, errors.New("engine: empty prompt")
 	}
-	maxPos := m.LM.MaxContext()
-	if len(ids)+opts.MaxTokens > maxPos {
-		if len(ids) >= maxPos {
-			return "", Stats{}, fmt.Errorf("engine: prompt has %d tokens, model max is %d", len(ids), maxPos)
+	cache := models.NewKVCache(m.LM.NumLayers())
+	defer cache.Reset()
+	forward := func(tokens []int64) ([]float32, error) { return m.step(tokens, cache) }
+	prompt := toI64(ids)
+	images := hasImages(msgs)
+	if images {
+		if m.Diffusion {
+			return "", Stats{}, errors.New("engine: diffusion LMs do not take images")
 		}
-		opts.MaxTokens = maxPos - len(ids)
+		var err error
+		if forward, prompt, err = m.multimodal(msgs, ids, cache); err != nil {
+			return "", Stats{}, err
+		}
+	}
+	maxPos := m.LM.MaxContext()
+	if len(prompt)+opts.MaxTokens > maxPos {
+		if len(prompt) >= maxPos {
+			return "", Stats{}, fmt.Errorf("engine: prompt has %d tokens, model max is %d", len(prompt), maxPos)
+		}
+		opts.MaxTokens = maxPos - len(prompt)
 	}
 
 	var st Stats
-	st.PromptTokens = len(ids)
+	st.PromptTokens = len(prompt)
 	if m.Diffusion {
 		return m.generateDiffusion(ctx, ids, opts, onToken, st)
 	}
-	if l, ok := m.LM.(*models.Llama); ok && l.MTP != nil && opts.Temperature == 0 {
+	if l, ok := m.LM.(*models.Llama); ok && l.MTP != nil && opts.Temperature == 0 && !images {
 		return m.generateSpec(ctx, l, ids, opts, onToken, st)
 	}
-	cache := models.NewKVCache(m.LM.NumLayers())
-	defer cache.Reset()
 
 	t0 := time.Now()
-	row, err := m.step(toI64(ids), cache)
+	row, err := forward(prompt)
 	if err != nil {
 		return "", st, fmt.Errorf("prefill: %w", err)
 	}
@@ -414,7 +428,7 @@ func (m *Model) Generate(ctx context.Context, msgs []Message, opts GenOpts, onTo
 		if step+1 == opts.MaxTokens {
 			break
 		}
-		row, err = m.step([]int64{int64(next)}, cache)
+		row, err = forward([]int64{int64(next)})
 		if err != nil {
 			return out.String(), st, fmt.Errorf("decode step %d: %w", step, err)
 		}
@@ -508,13 +522,18 @@ func (m *Model) step(tokens []int64, cache *models.KVCache) ([]float32, error) {
 	if err != nil {
 		return nil, err
 	}
+	return m.lastLogits(logits, len(tokens))
+}
+
+// lastLogits returns the last position's row of (1, T, V) logits.
+func (m *Model) lastLogits(logits *tensor.Tensor, T int) ([]float32, error) {
 	cpu, err := logits.To(device.CPU())
 	if err != nil {
 		return nil, err
 	}
 	flat := tensor.MustSlice[float32](cpu)
 	V := m.LM.VocabSize()
-	off := (len(tokens) - 1) * V
+	off := (T - 1) * V
 	return flat[off : off+V], nil
 }
 

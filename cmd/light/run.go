@@ -54,6 +54,8 @@ func cmdRun(args []string) error {
 	seed := fs.Uint64("seed", 0, "sampling seed (0: random)")
 	system := fs.String("system", "", "system prompt")
 	verbose := fs.Bool("verbose", false, "print timing after each reply")
+	var imagePaths stringList
+	fs.Var(&imagePaths, "image", "attach an image (PNG, JPEG, GIF) to the prompt; repeatable (vision models: Qwen3.5)")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: light run [flags] <model> [prompt]\n\nWith a prompt argument or piped stdin, prints one reply and exits;\notherwise starts an interactive chat.\n\nflags:")
 		fs.PrintDefaults()
@@ -103,7 +105,15 @@ func cmdRun(args []string) error {
 			msgs = append(msgs, engine.Message{Role: "system", Content: *system})
 		}
 		c := &chat{rt: rt, opts: opts, verbose: *verbose, onStats: func(st engine.Stats) { recordReply(m, st, "run") }}
-		_, err = c.reply(append(msgs, engine.Message{Role: "user", Content: prompt}))
+		user := engine.Message{Role: "user", Content: prompt}
+		for _, p := range imagePaths {
+			img, err := engine.LoadImage(p)
+			if err != nil {
+				return err
+			}
+			user.Images = append(user.Images, img)
+		}
+		_, err = c.reply(append(msgs, user))
 		return err
 	}
 	sh := newShell(rt, mf, opts, *system, *verbose)
@@ -212,3 +222,9 @@ func readMessage(in *bufio.Reader) (string, error) {
 		}
 	}
 }
+
+// stringList is a repeatable string flag.
+type stringList []string
+
+func (s *stringList) String() string     { return strings.Join(*s, ",") }
+func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
