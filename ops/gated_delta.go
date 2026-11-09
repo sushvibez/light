@@ -95,10 +95,10 @@ func GatedDeltaRule(q, k, v, g, beta, state *tensor.Tensor, opts GatedDeltaOptio
 	}
 	chunked := opts.Mode == GatedDeltaChunked || (opts.Mode == GatedDeltaAuto && T > 1)
 
-	if out, err = tensor.Zeros(dtype.F32, []int{B, T, H, dv}, dev); err != nil {
+	if out, err = tensor.Empty(dtype.F32, []int{B, T, H, dv}, dev); err != nil {
 		return nil, nil, err
 	}
-	if final, err = tensor.Zeros(dtype.F32, []int{B, H, dk, dv}, dev); err != nil {
+	if final, err = tensor.Empty(dtype.F32, []int{B, H, dk, dv}, dev); err != nil {
 		return nil, nil, err
 	}
 	kern, err := registry.Lookup(registry.Key{Op: "gated_delta_rule", Dev: dev.Kind(), DType: dtype.F32})
@@ -162,10 +162,10 @@ func CausalConv1dDepthwise(x, w, state *tensor.Tensor, silu bool) (out, newState
 		}
 		ins = append(ins, zero)
 	}
-	if out, err = tensor.Zeros(dtype.F32, x.Shape().Dims(), dev); err != nil {
+	if out, err = tensor.Empty(dtype.F32, x.Shape().Dims(), dev); err != nil {
 		return nil, nil, err
 	}
-	if newState, err = tensor.Zeros(dtype.F32, []int{B, C, K - 1}, dev); err != nil {
+	if newState, err = tensor.Empty(dtype.F32, []int{B, C, K - 1}, dev); err != nil {
 		return nil, nil, err
 	}
 	kern, err := registry.Lookup(registry.Key{Op: "causal_conv1d_depthwise", Dev: dev.Kind(), DType: dtype.F32})

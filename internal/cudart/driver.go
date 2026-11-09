@@ -141,6 +141,7 @@ func LaunchKernel(
 	stream uintptr,
 	args []unsafe.Pointer,
 ) error {
+	tally(&counters.Launches)
 	runtime.LockOSThread() // ensureContext and the launch on one thread
 	defer runtime.UnlockOSThread()
 	if err := ensureContext(); err != nil {

@@ -53,7 +53,7 @@ func RoPE(x *tensor.Tensor, positions *tensor.Tensor, base float64) (*tensor.Ten
 	if err != nil {
 		return nil, err
 	}
-	out, err := tensor.Zeros(x.DType(), x.Shape().Dims(), x.Device())
+	out, err := tensor.Empty(x.DType(), x.Shape().Dims(), x.Device())
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +112,7 @@ func RoPEWithInvFreq(x, positions, invFreq *tensor.Tensor) (*tensor.Tensor, erro
 	if err != nil {
 		return nil, err
 	}
-	out, err := tensor.Zeros(x.DType(), x.Shape().Dims(), x.Device())
+	out, err := tensor.Empty(x.DType(), x.Shape().Dims(), x.Device())
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +156,7 @@ func RoPEInterleaved(x, positions *tensor.Tensor, base float64) (*tensor.Tensor,
 	if err != nil {
 		return nil, err
 	}
-	out, err := tensor.Zeros(x.DType(), x.Shape().Dims(), x.Device())
+	out, err := tensor.Empty(x.DType(), x.Shape().Dims(), x.Device())
 	if err != nil {
 		return nil, err
 	}

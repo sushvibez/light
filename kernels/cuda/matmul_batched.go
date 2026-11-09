@@ -19,7 +19,7 @@ func init() {
 
 func batchedMatmulBF16CUDA(ctx *registry.Context) error {
 	a, b, out := ctx.Inputs[0], ctx.Inputs[1], ctx.Output
-	a, b, err := batchedMatmulPrep(a, b)
+	a, b, transB, err := batchedMatmulPrep(a, b)
 	if err != nil {
 		return err
 	}
@@ -35,20 +35,16 @@ func batchedMatmulBF16CUDA(ctx *registry.Context) error {
 	M := a.Dim(1)
 	K := a.Dim(2)
 	N := b.Dim(2)
-	if err := cudart.GemmExBF16BatchedRowMajor(h, M, N, K,
-		a.Storage().CUDAPtr(),
-		b.Storage().CUDAPtr(),
-		out.Storage().CUDAPtr(),
-		B,
-	); err != nil {
-		return err
+	gemm := cudart.GemmExBF16BatchedRowMajor
+	if transB {
+		gemm = cudart.GemmExBF16BatchedRowMajorTransB
 	}
-	return nil
+	return gemm(h, M, N, K, a.Storage().CUDAPtr(), b.Storage().CUDAPtr(), out.Storage().CUDAPtr(), B)
 }
 
 func batchedMatmulF32CUDA(ctx *registry.Context) error {
 	a, b, out := ctx.Inputs[0], ctx.Inputs[1], ctx.Output
-	a, b, err := batchedMatmulPrep(a, b)
+	a, b, transB, err := batchedMatmulPrep(a, b)
 	if err != nil {
 		return err
 	}
@@ -64,33 +60,46 @@ func batchedMatmulF32CUDA(ctx *registry.Context) error {
 	M := a.Dim(1)
 	K := a.Dim(2)
 	N := b.Dim(2)
-	if err := cudart.SgemmStridedBatchedRowMajor(h, M, N, K,
-		a.Storage().CUDAPtr(),
-		b.Storage().CUDAPtr(),
-		out.Storage().CUDAPtr(),
-		B,
-	); err != nil {
-		return err
+	gemm := cudart.SgemmStridedBatchedRowMajor
+	if transB {
+		gemm = cudart.SgemmStridedBatchedRowMajorTransB
 	}
-	return nil
+	return gemm(h, M, N, K, a.Storage().CUDAPtr(), b.Storage().CUDAPtr(), out.Storage().CUDAPtr(), B)
 }
 
-func batchedMatmulPrep(a, b *tensor.Tensor) (*tensor.Tensor, *tensor.Tensor, error) {
+// batchedMatmulPrep makes both operands cuBLAS-ready. A transpose view of a
+// contiguous (count, N, K) block as b (attention's kᵀ against the key cache)
+// is passed through with transB set, so the cache is never copied.
+func batchedMatmulPrep(a, b *tensor.Tensor) (*tensor.Tensor, *tensor.Tensor, bool, error) {
 	if a.Rank() != 3 || b.Rank() != 3 {
-		return nil, nil, fmt.Errorf("cuda matmul_batched: need rank-3, got %d and %d", a.Rank(), b.Rank())
+		return nil, nil, false, fmt.Errorf("cuda matmul_batched: need rank-3, got %d and %d", a.Rank(), b.Rank())
 	}
 	var err error
 	if !a.IsContiguous() || a.Offset() != 0 {
 		a, err = a.Contiguous()
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
+	}
+	if isTransposedBlock(b) {
+		return a, b, true, nil
 	}
 	if !b.IsContiguous() || b.Offset() != 0 {
 		b, err = b.Contiguous()
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 	}
-	return a, b, nil
+	return a, b, false, nil
+}
+
+// isTransposedBlock reports whether b (count, K, N) is the transpose view of
+// a contiguous (count, N, K) block at offset 0: strides (N·K, 1, K).
+func isTransposedBlock(b *tensor.Tensor) bool {
+	if b.Offset() != 0 || b.IsContiguous() {
+		return false
+	}
+	K, N := b.Dim(1), b.Dim(2)
+	st := b.Strides().Slice()
+	return st[0] == N*K && st[1] == 1 && st[2] == K && K > 1 && N > 1
 }

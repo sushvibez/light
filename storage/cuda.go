@@ -28,6 +28,19 @@ func NewCUDAFromPointer(dev device.Device, dt dtype.DType, nelems int, bytes int
 // given CUDA device. The release callback (invoked when refcount reaches
 // zero) re-selects the right device and calls cudaFree.
 func NewCUDA(dev device.Device, dt dtype.DType, nelems int) (*Storage, error) {
+	return newCUDA(dev, dt, nelems, true)
+}
+
+// NewCUDAUninit allocates device memory without zeroing it, for op outputs
+// that every kernel writes completely. On a decode step of a small model the
+// cudaMemset of each fresh output was the single largest group of driver
+// calls (454 of ~1100 per token on Llama-3.2-1B), each a tiny kernel of its
+// own.
+func NewCUDAUninit(dev device.Device, dt dtype.DType, nelems int) (*Storage, error) {
+	return newCUDA(dev, dt, nelems, false)
+}
+
+func newCUDA(dev device.Device, dt dtype.DType, nelems int, zero bool) (*Storage, error) {
 	if dev.Kind() != device.KindCUDA {
 		panic("storage.NewCUDA: device is not CUDA")
 	}
@@ -41,7 +54,7 @@ func NewCUDA(dev device.Device, dt dtype.DType, nelems int) (*Storage, error) {
 		return nil, err
 	}
 	// Zero-initialize to match NewCPU semantics.
-	if bytes > 0 {
+	if zero && bytes > 0 {
 		if err := cudart.Memset(ptr, 0, uintptr(bytes)); err != nil {
 			cudaPool.release(ord, ptr, class)
 			return nil, err

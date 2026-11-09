@@ -766,27 +766,23 @@ func (m *Llama) runBlock(blk *llamaBlock, x *tensor.Tensor, B, T, prior int, dev
 		}
 	}
 
-	// GQA: expand K, V to NH heads.
+	// GQA without materialising repeated K / V: query heads kh·g .. kh·g+g−1
+	// share KV head kh, so folding the group into the row axis, q (B, NH, T,
+	// HD) → (B·KH, g·T, HD), lets one batched matmul per KV head serve all
+	// its query heads. Scores come out as (B·KH, g·T, S), which is the same
+	// memory as (B·NH, T, S) (row j·T + t of group kh is head kh·g + j), so
+	// the mask, softmax and the value product are unchanged. This removes
+	// 2·g concat copies of the whole cache per layer and step.
 attend:
-	k, err = repeatKV(k, g, B, KH, totalT, HD)
+	q, err = autograd.Reshape(q, B*KH, g*T, HD)
 	if err != nil {
 		return nil, err
 	}
-	v, err = repeatKV(v, g, B, KH, totalT, HD)
+	k, err = autograd.Reshape(k, B*KH, totalT, HD)
 	if err != nil {
 		return nil, err
 	}
-
-	// Collapse the leading B*NH so the batched matmul stays rank-3.
-	q, err = autograd.Reshape(q, B*NH, T, HD)
-	if err != nil {
-		return nil, err
-	}
-	k, err = autograd.Reshape(k, B*NH, totalT, HD)
-	if err != nil {
-		return nil, err
-	}
-	v, err = autograd.Reshape(v, B*NH, totalT, HD)
+	v, err = autograd.Reshape(v, B*KH, totalT, HD)
 	if err != nil {
 		return nil, err
 	}
@@ -795,11 +791,19 @@ attend:
 	if err != nil {
 		return nil, err
 	}
-	kTC, err := autograd.Contiguous(kT)
+	kTC := kT
+	if dev.Kind() != device.KindCUDA {
+		// The CUDA batched GEMM reads the transposed view in place
+		// (cublas op T); other backends want a contiguous kᵀ.
+		if kTC, err = autograd.Contiguous(kT); err != nil {
+			return nil, err
+		}
+	}
+	scores, err := autograd.MatMul(q, kTC) // (B*KH, g*T, totalT)
 	if err != nil {
 		return nil, err
 	}
-	scores, err := autograd.MatMul(q, kTC) // (B*NH, T, totalT)
+	scores, err = autograd.Reshape(scores, B*NH, T, totalT)
 	if err != nil {
 		return nil, err
 	}
@@ -824,7 +828,11 @@ attend:
 	if err != nil {
 		return nil, err
 	}
-	ctx, err := autograd.MatMul(attn, v) // (B*NH, T, HD)
+	attn, err = autograd.Reshape(attn, B*KH, g*T, totalT)
+	if err != nil {
+		return nil, err
+	}
+	ctx, err := autograd.MatMul(attn, v) // (B*KH, g*T, HD) == (B*NH, T, HD)
 	if err != nil {
 		return nil, err
 	}

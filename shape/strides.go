@@ -68,6 +68,24 @@ func IsContiguous(s Shape, st Strides) bool {
 	return st.Equal(DefaultStrides(s))
 }
 
+// IsDense reports whether (s, st) addresses one row-major block even if the
+// strides are not the default ones: axes of size 1 never contribute to an
+// element's offset, so their strides are irrelevant. (B, 1, H, D) permuted
+// to (B, H, 1, D) is dense this way. Unlike IsContiguous it says nothing
+// about how big the backing storage is.
+func IsDense(s Shape, st Strides) bool {
+	ds := DefaultStrides(s).strides
+	if len(st.strides) != len(ds) {
+		return false
+	}
+	for i, d := range s.Dims() {
+		if d != 1 && st.strides[i] != ds[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // ContigWithDim0Broadcast reports contiguity ignoring axis 0 if its stride is
 // 0 (common for expanded batch dimensions). Useful for elementwise kernels
 // that can linearize over the last N axes.

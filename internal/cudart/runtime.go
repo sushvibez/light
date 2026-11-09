@@ -40,6 +40,7 @@ func SetDevice(ordinal int) error {
 
 // Malloc allocates `bytes` of device memory and returns the opaque pointer.
 func Malloc(bytes uintptr) (uintptr, error) {
+	tally(&counters.Mallocs)
 	if bytes == 0 {
 		return 0, nil
 	}
@@ -52,6 +53,7 @@ func Malloc(bytes uintptr) (uintptr, error) {
 
 // Free releases a device pointer. Safe on 0.
 func Free(ptr uintptr) error {
+	tally(&counters.Frees)
 	if ptr == 0 {
 		return nil
 	}
@@ -75,6 +77,7 @@ func MallocHost(bytes uintptr) (uintptr, error) {
 // stream: it returns at once, ordered after the kernels already queued, and
 // the source must stay untouched until the copy has run.
 func MemcpyHtoDAsync(dst, src, bytes uintptr) error {
+	tally(&counters.HtoD)
 	if bytes == 0 {
 		return nil
 	}
@@ -87,6 +90,7 @@ func MemcpyHtoDAsync(dst, src, bytes uintptr) error {
 
 // MemcpyHtoD copies from host slice src to device pointer dst.
 func MemcpyHtoD(dst uintptr, src []byte) error {
+	tally(&counters.HtoD)
 	if len(src) == 0 {
 		return nil
 	}
@@ -104,6 +108,7 @@ func MemcpyHtoD(dst uintptr, src []byte) error {
 
 // MemcpyDtoH copies from device pointer src to host slice dst.
 func MemcpyDtoH(dst []byte, src uintptr) error {
+	tally(&counters.DtoH)
 	if len(dst) == 0 {
 		return nil
 	}
@@ -122,6 +127,7 @@ func MemcpyDtoH(dst []byte, src uintptr) error {
 // MemcpyDtoD copies between two device pointers (same or different devices
 // with peer access enabled).
 func MemcpyDtoD(dst, src uintptr, bytes uintptr) error {
+	tally(&counters.DtoD)
 	if bytes == 0 {
 		return nil
 	}
@@ -141,6 +147,7 @@ func MemcpyDtoD(dst, src uintptr, bytes uintptr) error {
 // buffers whose rows are `spitch` / `dpitch` bytes apart: one call for a
 // whole strided block (concat along an axis, KV-cache appends).
 func Memcpy2DDtoD(dst, dpitch, src, spitch, width, height uintptr) error {
+	tally(&counters.DtoD)
 	if width == 0 || height == 0 {
 		return nil
 	}
@@ -158,6 +165,7 @@ func Memcpy2DDtoD(dst, dpitch, src, spitch, width, height uintptr) error {
 
 // Memset fills device memory with the given byte.
 func Memset(ptr uintptr, value byte, bytes uintptr) error {
+	tally(&counters.Memsets)
 	if bytes == 0 {
 		return nil
 	}
@@ -171,6 +179,7 @@ func Memset(ptr uintptr, value byte, bytes uintptr) error {
 // DeviceSynchronize blocks until all work on the current device's default
 // stream has completed. Use after launches for correctness during testing.
 func DeviceSynchronize() error {
+	tally(&counters.Syncs)
 	if rc := C.cudaDeviceSynchronize(); rc != C.cudaSuccess {
 		return runtimeError(rc, "cudaDeviceSynchronize")
 	}

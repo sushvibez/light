@@ -93,7 +93,7 @@ func (t *Tensor) Contiguous() (*Tensor, error) {
 	if t.IsContiguous() && t.offset == 0 {
 		return t, nil
 	}
-	newT, err := Zeros(t.DType(), t.shape.Dims(), t.Device())
+	newT, err := Empty(t.DType(), t.shape.Dims(), t.Device())
 	if err != nil {
 		return nil, err
 	}

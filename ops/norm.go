@@ -48,7 +48,7 @@ func GroupNorm(x, gamma, beta *tensor.Tensor, groups int, eps float64) (*tensor.
 	if err != nil {
 		return nil, err
 	}
-	out, err := tensor.Zeros(x.DType(), x.Shape().Dims(), x.Device())
+	out, err := tensor.Empty(x.DType(), x.Shape().Dims(), x.Device())
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +90,7 @@ func RMSNorm(x, weight *tensor.Tensor, eps float64) (*tensor.Tensor, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err := tensor.Zeros(x.DType(), x.Shape().Dims(), x.Device())
+	out, err := tensor.Empty(x.DType(), x.Shape().Dims(), x.Device())
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +133,7 @@ func LayerNorm(x, gamma, beta *tensor.Tensor, eps float64) (*tensor.Tensor, erro
 	if err != nil {
 		return nil, err
 	}
-	out, err := tensor.Zeros(x.DType(), x.Shape().Dims(), x.Device())
+	out, err := tensor.Empty(x.DType(), x.Shape().Dims(), x.Device())
 	if err != nil {
 		return nil, err
 	}

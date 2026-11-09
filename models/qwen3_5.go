@@ -422,31 +422,32 @@ func (m *Qwen35) attention(blk *qwen35Block, h *tensor.Tensor, B, T, prior int, 
 		totalT = kvPrior + T
 		cache.K[layer], cache.V[layer] = k, v
 	}
+	// GQA folded into the row axis (see Llama's attention): one batched
+	// matmul per KV head serves its g query heads, no repeated K / V.
 	g := NH / KH
-	if k, err = repeatKV(k, g, B, KH, totalT, HD); err != nil {
+	if q, err = autograd.Reshape(q, B*KH, g*T, HD); err != nil {
 		return nil, err
 	}
-	if v, err = repeatKV(v, g, B, KH, totalT, HD); err != nil {
+	if k, err = autograd.Reshape(k, B*KH, totalT, HD); err != nil {
 		return nil, err
 	}
-	if q, err = autograd.Reshape(q, B*NH, T, HD); err != nil {
-		return nil, err
-	}
-	if k, err = autograd.Reshape(k, B*NH, totalT, HD); err != nil {
-		return nil, err
-	}
-	if v, err = autograd.Reshape(v, B*NH, totalT, HD); err != nil {
+	if v, err = autograd.Reshape(v, B*KH, totalT, HD); err != nil {
 		return nil, err
 	}
 	kT, err := autograd.Transpose(k, 1, 2)
 	if err != nil {
 		return nil, err
 	}
-	if kT, err = autograd.Contiguous(kT); err != nil {
+	if dev.Kind() != device.KindCUDA { // CUDA's batched GEMM reads the view in place
+		if kT, err = autograd.Contiguous(kT); err != nil {
+			return nil, err
+		}
+	}
+	scores, err := autograd.MatMul(q, kT) // (B*KH, g*T, totalT) == (B*NH, T, totalT)
+	if err != nil {
 		return nil, err
 	}
-	scores, err := autograd.MatMul(q, kT)
-	if err != nil {
+	if scores, err = autograd.Reshape(scores, B*NH, T, totalT); err != nil {
 		return nil, err
 	}
 	if scores, err = ops.Mul(scores, m.attnScale); err != nil {
@@ -465,7 +466,10 @@ func (m *Qwen35) attention(blk *qwen35Block, h *tensor.Tensor, B, T, prior int, 
 	if err != nil {
 		return nil, err
 	}
-	ctx, err := autograd.MatMul(attn, v)
+	if attn, err = autograd.Reshape(attn, B*KH, g*T, totalT); err != nil {
+		return nil, err
+	}
+	ctx, err := autograd.MatMul(attn, v) // (B*KH, g*T, HD) == (B*NH, T, HD)
 	if err != nil {
 		return nil, err
 	}

@@ -57,7 +57,7 @@ func Concat(tensors []*tensor.Tensor, axis int) (*tensor.Tensor, error) {
 
 	outDims := append([]int(nil), baseDims...)
 	outDims[ax] = catSize
-	out, err := tensor.Zeros(dt, outDims, dev)
+	out, err := tensor.Empty(dt, outDims, dev)
 	if err != nil {
 		return nil, err
 	}

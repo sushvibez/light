@@ -105,6 +105,7 @@ func SgemmRowMajorTransB(h *BlasHandle, m, n, k int, a, b, c uintptr) error {
 //	A: (M, K), B: (N, K), C: (M, N) — all row-major contiguous on device.
 //	Atype=Btype=BF16, Ctype=F32, computeType=F32.
 func GemmExBF16RowMajorTransB(h *BlasHandle, m, n, k int, a, b, c uintptr) error {
+	tally(&counters.Gemms)
 	alpha := C.float(1.0)
 	beta := C.float(0.0)
 	rc := C.cublasGemmEx(
@@ -131,6 +132,7 @@ func GemmExBF16RowMajorTransB(h *BlasHandle, m, n, k int, a, b, c uintptr) error
 // only the output store converts back to BF16. This is the "fully BF16"
 // inference path for nn.Linear.
 func GemmExBF16OutBF16RowMajorTransB(h *BlasHandle, m, n, k int, a, b, c uintptr) error {
+	tally(&counters.Gemms)
 	alpha := C.float(1.0)
 	beta := C.float(0.0)
 	rc := C.cublasGemmEx(
@@ -159,6 +161,7 @@ func GemmExBF16OutBF16RowMajorTransB(h *BlasHandle, m, n, k int, a, b, c uintptr
 //	A: (count, M, K), B: (count, K, N), C: (count, M, N)
 //	C[i] = A[i] @ B[i]
 func GemmExBF16BatchedRowMajor(h *BlasHandle, m, n, k int, a, b, c uintptr, count int) error {
+	tally(&counters.Gemms)
 	alpha := C.float(1.0)
 	beta := C.float(0.0)
 	rc := C.cublasGemmStridedBatchedEx(
@@ -203,6 +206,55 @@ func SgemmStridedBatchedRowMajor(h *BlasHandle, m, n, k int, a, b, c uintptr, co
 	)
 	if rc != C.CUBLAS_STATUS_SUCCESS {
 		return fmt.Errorf("cublasSgemmStridedBatched: status %d", int(rc))
+	}
+	return nil
+}
+
+// GemmExBF16BatchedRowMajorTransB is GemmExBF16BatchedRowMajor with B given
+// transposed: bT is (count, N, K) row-major (the untransposed key cache, say)
+// and C[i] = A[i] @ bT[i]ᵀ. Saves materialising kᵀ on every attention step.
+func GemmExBF16BatchedRowMajorTransB(h *BlasHandle, m, n, k int, a, bT, c uintptr, count int) error {
+	tally(&counters.Gemms)
+	alpha := C.float(1.0)
+	beta := C.float(0.0)
+	rc := C.cublasGemmStridedBatchedEx(
+		h.handle,
+		C.CUBLAS_OP_T, C.CUBLAS_OP_N,
+		C.int(n), C.int(m), C.int(k),
+		unsafe.Pointer(&alpha),
+		unsafe.Pointer(bT), C.CUDA_R_16BF, C.int(k), C.longlong(k*n),
+		unsafe.Pointer(a), C.CUDA_R_16BF, C.int(k), C.longlong(m*k),
+		unsafe.Pointer(&beta),
+		unsafe.Pointer(c), C.CUDA_R_16BF, C.int(n), C.longlong(m*n),
+		C.int(count),
+		C.CUBLAS_COMPUTE_32F,
+		C.CUBLAS_GEMM_DEFAULT,
+	)
+	if rc != C.CUBLAS_STATUS_SUCCESS {
+		return fmt.Errorf("cublasGemmStridedBatchedEx(bf16, transB): status %d", int(rc))
+	}
+	return nil
+}
+
+// SgemmStridedBatchedRowMajorTransB is the F32 counterpart of
+// GemmExBF16BatchedRowMajorTransB.
+func SgemmStridedBatchedRowMajorTransB(h *BlasHandle, m, n, k int, a, bT, c uintptr, count int) error {
+	tally(&counters.Gemms)
+	alpha := C.float(1.0)
+	beta := C.float(0.0)
+	rc := C.cublasSgemmStridedBatched(
+		h.handle,
+		C.CUBLAS_OP_T, C.CUBLAS_OP_N,
+		C.int(n), C.int(m), C.int(k),
+		&alpha,
+		(*C.float)(unsafe.Pointer(bT)), C.int(k), C.longlong(k*n),
+		(*C.float)(unsafe.Pointer(a)), C.int(k), C.longlong(m*k),
+		&beta,
+		(*C.float)(unsafe.Pointer(c)), C.int(n), C.longlong(m*n),
+		C.int(count),
+	)
+	if rc != C.CUBLAS_STATUS_SUCCESS {
+		return fmt.Errorf("cublasSgemmStridedBatched(transB): status %d", int(rc))
 	}
 	return nil
 }
@@ -262,6 +314,7 @@ func (d DataType) Size() int {
 //
 //	A: (M, K), C: (M, N) — row-major contiguous on device.
 func GemmExRowMajor(h *BlasHandle, m, n, k int, a, b, c uintptr, aType, bType, cType DataType, transB bool) error {
+	tally(&counters.Gemms)
 	alpha := C.float(1.0)
 	beta := C.float(0.0)
 	opB, ldb := C.cublasOperation_t(C.CUBLAS_OP_N), C.int(n)
@@ -292,6 +345,7 @@ func GemmExRowMajor(h *BlasHandle, m, n, k int, a, b, c uintptr, aType, bType, c
 //
 //	A: (count, M, K), B: (count, K, N), C: (count, M, N)
 func GemmStridedBatchedExRowMajor(h *BlasHandle, m, n, k int, a, b, c uintptr, dt DataType, count int) error {
+	tally(&counters.Gemms)
 	alpha := C.float(1.0)
 	beta := C.float(0.0)
 	rc := C.cublasGemmStridedBatchedEx(

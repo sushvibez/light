@@ -191,9 +191,14 @@ func gemmExLauncher(dt cudart.DataType) registry.Kernel {
 func batchedGemmExLauncher(dt cudart.DataType) registry.Kernel {
 	return func(ctx *registry.Context) error {
 		a, b, out := ctx.Inputs[0], ctx.Inputs[1], ctx.Output
-		a, b, err := batchedMatmulPrep(a, b)
+		a, b, transB, err := batchedMatmulPrep(a, b)
 		if err != nil {
 			return err
+		}
+		if transB { // generic dtype path: materialise bᵀ
+			if b, err = b.Contiguous(); err != nil {
+				return err
+			}
 		}
 		ord := out.Device().Ordinal()
 		if err := cudart.SetDevice(ord); err != nil {

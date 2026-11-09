@@ -56,7 +56,7 @@ func MatMulQ(x, w *tensor.Tensor) (*tensor.Tensor, error) {
 		}
 		return matMulQFallback(xC, w)
 	}
-	out, err := tensor.Zeros(dtype.F32, []int{M, N}, x.Device())
+	out, err := tensor.Empty(dtype.F32, []int{M, N}, x.Device())
 	if err != nil {
 		return nil, err
 	}

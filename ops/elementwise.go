@@ -60,7 +60,7 @@ func binaryDispatch(op string, a, b *tensor.Tensor) (*tensor.Tensor, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err := tensor.Zeros(a.DType(), outShape.Dims(), a.Device())
+	out, err := tensor.Empty(a.DType(), outShape.Dims(), a.Device())
 	if err != nil {
 		return nil, err
 	}
@@ -72,7 +72,7 @@ func binaryDispatch(op string, a, b *tensor.Tensor) (*tensor.Tensor, error) {
 
 // unaryDispatch is the shared plumbing for every unary op.
 func unaryDispatch(op string, a *tensor.Tensor) (*tensor.Tensor, error) {
-	out, err := tensor.Zeros(a.DType(), a.Shape().Dims(), a.Device())
+	out, err := tensor.Empty(a.DType(), a.Shape().Dims(), a.Device())
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +140,7 @@ func unaryParamDispatch(op string, a *tensor.Tensor, p0, p1 float64) (*tensor.Te
 	if err != nil {
 		return nil, err
 	}
-	out, err := tensor.Zeros(src.DType(), src.Shape().Dims(), src.Device())
+	out, err := tensor.Empty(src.DType(), src.Shape().Dims(), src.Device())
 	if err != nil {
 		return nil, err
 	}
