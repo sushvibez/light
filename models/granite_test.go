@@ -1,6 +1,8 @@
 package models
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -74,5 +76,66 @@ func TestGraniteTinyMatchesTransformers(t *testing.T) {
 	}
 	if d := maxAbsDiff(full, lastLogits(t, mg, ids, NewKVCache(mg.NumLayers()), g)); d > 1e-4 {
 		t.Errorf("CUDA vs CPU logits differ by %.2e", d)
+	}
+}
+
+// granite-4.0-micro (3B, attention-only granitemoehybrid) in BF16 against
+// transformers 5.21 BF16 (`ref_granite.py ibm-granite/granite-4.0-micro bf16
+// --chat --cpu`): the validation-bar chat prompt, top-5 last-position logits
+// (logits ÷ 10 already applied) and 16 greedy tokens ("The sky appears blue
+// due to the scattering of sunlight by the Earth's atmosphere,"). Runs on
+// CUDA when present, else on the CPU.
+func TestGraniteMicroMatchesTransformersBF16(t *testing.T) {
+	if os.Getenv("LIGHT_HEAVY_TESTS") == "" {
+		t.Skip("set LIGHT_HEAVY_TESTS=1 (6.3 GB BF16 checkpoint)")
+	}
+	home, _ := os.UserHomeDir()
+	if m, _ := filepath.Glob(filepath.Join(home, ".cache/huggingface/hub/models--ibm-granite--granite-4.0-micro/snapshots/*/model-*.safetensors")); len(m) == 0 {
+		t.Skip("ibm-granite/granite-4.0-micro not in HF cache")
+	}
+	requireHostMemGB(t, 10)
+	releaseModelMemory(t)
+	ids := []int64{100264, 9125, 100265, 2675, 527, 264, 64694, 18328, 13, 100257, 198, 100264, 882, 100265, 849, 21435, 304, 832, 11914, 3249, 279, 13180, 374, 6437, 13, 100257, 198, 100264, 78191, 100265}
+	ref := []struct {
+		id    int
+		logit float32
+	}{{791, 35.5000}, {31192, 26.7500}, {47048, 26.0000}, {14235, 24.1250}, {10544, 23.6250}}
+	greedyRef := []int64{791, 13180, 8111, 6437, 4245, 311, 279, 72916, 315, 40120, 555, 279, 9420, 596, 16975, 11}
+	dev := device.CPU()
+	if device.CUDAAvailable() {
+		g, err := device.CUDA(0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dev = g
+	}
+	m, err := LoadCausalLMFromHF("ibm-granite/granite-4.0-micro", dev, dtype.BF16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := NewKVCache(m.NumLayers())
+	row := lastLogits(t, m, ids, cache, dev)
+	got := top5(row)
+	for i, w := range ref {
+		if i < 3 && got[i] != w.id {
+			t.Errorf("top-%d: got %d (%.3f), want %d (%.3f)", i+1, got[i], row[got[i]], w.id, w.logit)
+		}
+		if d := row[w.id] - w.logit; d > 0.75 || d < -0.75 {
+			t.Errorf("logit[%d] = %.3f, want %.3f (transformers BF16; tol 0.75)", w.id, row[w.id], w.logit)
+		}
+	}
+	var greedy []int64
+	for len(greedy) < len(greedyRef) {
+		next := int64(top5(row)[0])
+		greedy = append(greedy, next)
+		row = lastLogits(t, m, []int64{next}, cache, dev)
+	}
+	agree := 0
+	for agree < len(greedy) && greedy[agree] == greedyRef[agree] {
+		agree++
+	}
+	t.Logf("greedy %v (first %d of %d agree with transformers BF16)", greedy, agree, len(greedy))
+	if agree < 12 {
+		t.Errorf("greedy %v diverges from transformers BF16 %v after %d tokens", greedy, greedyRef, agree)
 	}
 }
