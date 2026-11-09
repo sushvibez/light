@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"os"
+	"slices"
 	"testing"
 
 	"light/device"
@@ -179,6 +180,57 @@ func TestFlux2TransformerTinyMatchesDiffusers(t *testing.T) {
 		t.Logf("%v: max |light - diffusers| %.3g over %d values", dev, md, len(got))
 		if len(got) != len(ref.Out) || md > 1e-4 {
 			t.Errorf("%v: output differs by %.3g", dev, md)
+		}
+	}
+}
+
+// A tiny AutoencoderKL encoder (with quant_conv) against diffusers'
+// encode().latent_dist.mode() on an odd-sized image, on the CPU and WebGPU.
+func TestVAEEncoderTinyMatchesDiffusers(t *testing.T) {
+	raw, err := os.ReadFile("testdata/refs/vae-tiny-enc.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ref struct {
+		Image       []float32 `json:"image"`
+		ImageShape  []int     `json:"image_shape"`
+		Latent      []float32 `json:"latent"`
+		LatentShape []int     `json:"latent_shape"`
+	}
+	if err := json.Unmarshal(raw, &ref); err != nil {
+		t.Fatal(err)
+	}
+	devs := []device.Device{device.CPU()}
+	if g, err := device.WebGPU(0); err == nil {
+		devs = append(devs, g)
+	}
+	for _, dev := range devs {
+		v, err := LoadFluxVAE("testdata/vae-tiny-enc", dev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if v.Encoder == nil {
+			t.Fatal("no encoder loaded")
+		}
+		x, _ := tensor.New(ref.Image, ref.ImageShape, dev)
+		z, err := v.Encoder.Mode(x)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Equal(z.Shape().Dims(), ref.LatentShape) {
+			t.Fatalf("latent %v, want %v", z.Shape(), ref.LatentShape)
+		}
+		if z, err = z.To(device.CPU()); err != nil {
+			t.Fatal(err)
+		}
+		got := tensor.MustSlice[float32](z)
+		md := 0.0
+		for i := range got {
+			md = math.Max(md, math.Abs(float64(got[i]-ref.Latent[i])))
+		}
+		t.Logf("%v: max |light - diffusers| %.3g over %d values", dev, md, len(got))
+		if md > 1e-4 {
+			t.Errorf("%v: latent differs by %.3g", dev, md)
 		}
 	}
 }

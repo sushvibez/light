@@ -10,7 +10,9 @@ Flux2Transformer2DModel and a tiny AutoencoderKLFlux2 (decoder + batch-norm
 stats only on disk) - saves it to <out_dir>, and runs it non-distilled
 (classifier-free guidance 3.0) for 2 steps at 64 x 64 with explicit latents,
 text encoder layers (1, 2, 3) and 40 text tokens (padded). Writes the prompt ids,
-the prompt embeddings, the sigmas and the final image to <out.json>.
+the prompt embeddings, the sigmas and the final image to <out.json>, plus
+an edit run with <out_dir>/../flux2-ref.png (80 x 64, so the processor's
+crop is a no-op) as the reference image ("edit_image").
 """
 import json, os, shutil, sys
 import torch
@@ -57,7 +59,7 @@ pipe.save_pretrained(out_dir, safe_serialization=True)
 f = os.path.join(out_dir, "text_encoder", "model.safetensors")
 save_file({k: v.to(torch.bfloat16) for k, v in load_file(f).items()}, f, metadata={"format": "pt"})
 f = os.path.join(out_dir, "vae", "diffusion_pytorch_model.safetensors")
-save_file({k: v for k, v in load_file(f).items() if not k.startswith(("encoder.", "quant_conv."))}, f)
+# (the encoder stays: the edit run encodes a reference image)
 
 # The tokenizer (11 MB) is not kept: the Go test reads FLUX.2-klein-4B's.
 shutil.rmtree(os.path.join(out_dir, "tokenizer"))
@@ -68,9 +70,23 @@ with torch.no_grad():
     pe, _ = pipe.encode_prompt(prompt, max_sequence_length=max_len, text_encoder_out_layers=layers)
     img = pipe(prompt=prompt, height=H, width=W, num_inference_steps=steps, guidance_scale=3.0, latents=latents,
                max_sequence_length=max_len, text_encoder_out_layers=layers, output_type="pt").images
+sigmas = pipe.scheduler.sigmas.tolist()  # before the edit run resets the schedule
 msgs = [{"role": "user", "content": prompt}]
 text = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True, enable_thinking=False)
 enc = tok(text, padding="max_length", truncation=True, max_length=max_len)
+import numpy as np
+from PIL import Image
+yy, xx = np.mgrid[0:64, 0:80]
+ref_img = Image.fromarray(np.stack([xx * 3, yy * 4, ((xx // 8 + yy // 8) % 2) * 255], -1).astype(np.uint8))
+ref_path = os.path.join(os.path.dirname(os.path.abspath(out_dir)), "flux2-ref.png")
+ref_img.save(ref_path)
+torch.manual_seed(7)
+edit_latents = torch.randn(1, 16, 16, 20)
+with torch.no_grad():
+    edit = pipe(prompt=prompt, image=Image.open(ref_path).convert("RGB"), num_inference_steps=steps,
+                guidance_scale=3.0, latents=edit_latents, max_sequence_length=max_len,
+                text_encoder_out_layers=layers, output_type="pt").images
+print("edit image", tuple(edit.shape))
 # The conditioning in float64 too: transformers' F32 Qwen3 drifts by ~2e-4
 # here (its F32 rotary angles), Light by ~2e-7.
 te64 = Qwen3ForCausalLM.from_pretrained(os.path.join(out_dir, "text_encoder"), dtype=torch.float64).eval()
@@ -78,10 +94,12 @@ with torch.no_grad():
     hs = te64(input_ids=torch.tensor([enc["input_ids"]]), attention_mask=torch.tensor([enc["attention_mask"]]),
               output_hidden_states=True).hidden_states
 pe64 = torch.stack([hs[k] for k in layers], 1).permute(0, 2, 1, 3).reshape(1, max_len, -1)
-print("ids", enc["input_ids"], "image", tuple(img.shape), "sigmas", pipe.scheduler.sigmas.tolist())
+print("ids", enc["input_ids"], "image", tuple(img.shape), "sigmas", sigmas)
 r = lambda a: [round(v, 7) for v in a.flatten().tolist()]
 json.dump({"prompt": prompt, "height": H, "width": W, "steps": steps, "max_seq_len": max_len, "layers": list(layers),
            "guidance": 3.0, "text": text, "ids": enc["input_ids"], "mask": enc["attention_mask"],
            "latents": r(latents), "latents_shape": list(latents.shape), "prompt_embeds": r(pe), "prompt_embeds_f64": r(pe64),
-           "sigmas": pipe.scheduler.sigmas.tolist(), "image": r(img), "image_shape": list(img.shape)},
+           "sigmas": sigmas, "image": r(img), "image_shape": list(img.shape),
+           "edit_latents": r(edit_latents), "edit_latents_shape": list(edit_latents.shape),
+           "edit_image": r(edit), "edit_image_shape": list(edit.shape)},
           open(out_json, "w"))

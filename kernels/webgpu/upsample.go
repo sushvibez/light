@@ -35,3 +35,36 @@ func upsampleNearest(ctx *registry.Context) error {
 	defer params.Release()
 	return run1D(d, "upsample_nearest", []wgpudev.Binding{rd(raw(x)), rw(raw(out)), uni(params)}, n)
 }
+
+func init() {
+	registry.Register(registry.Key{Op: "pad", Dev: device.KindWebGPU, DType: dtype.F32}, padF32)
+}
+
+// padF32: ops.Pad (zeros along one axis).
+func padF32(ctx *registry.Context) error {
+	x, out := ctx.Inputs[0], ctx.Output
+	dim, _ := ctx.Attrs["dim"].(int)
+	left, _ := ctx.Attrs["left"].(int)
+	x, err := contig(x)
+	if err != nil {
+		return err
+	}
+	d, err := dev()
+	if err != nil {
+		return err
+	}
+	n := out.NumElements()
+	if n == 0 {
+		return nil
+	}
+	inner := 1
+	for _, s := range out.Shape().Dims()[dim+1:] {
+		inner *= s
+	}
+	params, err := d.Uniform(uint32(out.Dim(dim)), uint32(inner), uint32(left), uint32(x.Dim(dim)))
+	if err != nil {
+		return err
+	}
+	defer params.Release()
+	return run1D(d, "pad", []wgpudev.Binding{rd(raw(x)), rw(raw(out)), uni(params)}, n)
+}

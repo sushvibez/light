@@ -267,6 +267,15 @@ func TestSoftmaxParity(t *testing.T) {
 	})
 }
 
+// ops.Pad along each axis.
+func TestPadParity(t *testing.T) {
+	cpu := device.CPU()
+	x := mustNew(t, randF32(2*3*5*7, 82), []int{2, 3, 5, 7}, cpu)
+	for _, c := range [][3]int{{3, 0, 1}, {2, 0, 1}, {1, 2, 3}, {0, 1, 0}} {
+		parity1(t, "pad", x, func(a *tensor.Tensor) (*tensor.Tensor, error) { return ops.Pad(a, c[0], c[1], c[2]) }, 0)
+	}
+}
+
 // ops.UpsampleNearest by 2 x 2 and 3 x 1.
 func TestUpsampleNearestParity(t *testing.T) {
 	cpu := device.CPU()

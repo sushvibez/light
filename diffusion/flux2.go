@@ -3,6 +3,8 @@ package diffusion
 import (
 	"encoding/json"
 	"fmt"
+	"image"
+	"math"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"light/device"
 	"light/dtype"
 	"light/models"
+	"light/nn"
 	"light/ops"
 	"light/tensor"
 	"light/tokenizer"
@@ -36,6 +39,10 @@ type Flux2 struct {
 type Flux2LoadOptions struct {
 	// TokenizerJSON overrides <repo>/tokenizer/tokenizer.json.
 	TokenizerJSON string
+	// Storage16 keeps the text encoder's and transformer's matmul weights in
+	// BF16 (F32 compute; exact for BF16 checkpoints): klein-4B then needs
+	// ~16 GB instead of ~32.
+	Storage16 bool
 }
 
 // LoadFlux2 loads a Flux2KleinPipeline folder (or Hub repo) onto dev at F32.
@@ -60,7 +67,16 @@ func LoadFlux2(repo string, dev device.Device, o Flux2LoadOptions) (*Flux2, erro
 		return nil, fmt.Errorf("flux2: %s is a %s, not a Flux2KleinPipeline", repo, idx.Class)
 	}
 	p := &Flux2{Distilled: idx.Distilled, Dev: dev}
-	if p.TextEncoder, err = models.LoadCausalLMFromHF(sub("text_encoder"), dev, dtype.F32); err != nil {
+	load16 := func(f func() error) error {
+		if o.Storage16 {
+			return nn.WithWeightStorage16(dtype.BF16, f)
+		}
+		return f()
+	}
+	if err = load16(func() (err error) {
+		p.TextEncoder, err = models.LoadCausalLMFromHF(sub("text_encoder"), dev, dtype.F32)
+		return
+	}); err != nil {
 		return nil, fmt.Errorf("flux2 text_encoder: %w", err)
 	}
 	tj := o.TokenizerJSON
@@ -70,7 +86,10 @@ func LoadFlux2(repo string, dev device.Device, o Flux2LoadOptions) (*Flux2, erro
 	if p.Tok, err = tokenizer.Load(tj); err != nil {
 		return nil, fmt.Errorf("flux2 tokenizer: %w", err)
 	}
-	if p.Transformer, err = models.LoadFlux2Transformer(sub("transformer"), dev); err != nil {
+	if err = load16(func() (err error) {
+		p.Transformer, err = models.LoadFlux2Transformer(sub("transformer"), dev)
+		return
+	}); err != nil {
 		return nil, fmt.Errorf("flux2 transformer: %w", err)
 	}
 	if p.VAE, err = models.LoadFluxVAE(sub("vae"), dev); err != nil {
@@ -105,6 +124,10 @@ type Flux2Options struct {
 	MaxSeqLen     int     // text tokens, default 512
 	Layers        []int   // text encoder hidden states, default 9, 18, 27
 	Seed          uint64
+	// Images are reference images for editing (multi-reference): each is
+	// VAE-encoded and joins the sequence as extra image tokens. Width /
+	// Height default to the first image's (cut to a multiple of 16).
+	Images []image.Image
 	// Latents, when set, is the initial noise (1, 4·C, H/2, W/2) before
 	// packing (to match a reference run).
 	Latents *tensor.Tensor
@@ -170,11 +193,21 @@ func (p *Flux2) Generate(o Flux2Options) (*Flux2Result, error) {
 	if o.Layers == nil {
 		o.Layers = []int{9, 18, 27}
 	}
+	refs, refIDs, rw, rh, err := p.encodeReferences(o.Images)
+	if err != nil {
+		return nil, err
+	}
 	if o.Width == 0 {
 		o.Width = 1024
+		if rw > 0 {
+			o.Width = rw
+		}
 	}
 	if o.Height == 0 {
 		o.Height = 1024
+		if rh > 0 {
+			o.Height = rh
+		}
 	}
 	cfg := !p.Distilled && o.Guidance > 1
 	embeds, ids, err := p.encode(o.Prompt, o.MaxSeqLen, o.Layers)
@@ -232,8 +265,20 @@ func (p *Flux2) Generate(o Flux2Options) (*Flux2Result, error) {
 	for i := range o.Steps {
 		t := sigmas[i] * float32(p.Scheduler.NumTrainTimesteps)
 		run := func(txt *tensor.Tensor) (*tensor.Tensor, error) {
-			return p.Transformer.Forward(models.Flux2Inputs{Image: x, Text: txt, Timestep: []float32{t / 1000},
-				ImgIDs: imgIDs, TxtIDs: txtIDs})
+			in, ids := x, imgIDs
+			if refs != nil {
+				var err error
+				if in, err = ops.Concat([]*tensor.Tensor{x, refs}, 1); err != nil {
+					return nil, err
+				}
+				ids = append(append([]float32(nil), imgIDs...), refIDs...)
+			}
+			v, err := p.Transformer.Forward(models.Flux2Inputs{Image: in, Text: txt, Timestep: []float32{t / 1000},
+				ImgIDs: ids, TxtIDs: txtIDs})
+			if err != nil || refs == nil {
+				return v, err
+			}
+			return v.Narrow(1, 0, x.Dim(1)) // the prediction for the generated tokens
 		}
 		v, err := run(embeds)
 		if err != nil {
@@ -311,6 +356,128 @@ func (p *Flux2) Generate(o Flux2Options) (*Flux2Result, error) {
 		return nil, err
 	}
 	return &Flux2Result{Image: img, PromptEmbeds: embeds, IDs: ids, Sigmas: sigmas}, nil
+}
+
+// encodeReferences turns reference images into packed, batch-normalised
+// latent tokens (1, Σ tokens, 4·C) and their ids (t = 10·(i+1), row, col,
+// 0); it also returns the first image's size (sides cut to a multiple of
+// 2·vaeScale) for the output default.
+func (p *Flux2) encodeReferences(imgs []image.Image) (*tensor.Tensor, []float32, int, int, error) {
+	if len(imgs) == 0 {
+		return nil, nil, 0, 0, nil
+	}
+	if p.VAE.Encoder == nil {
+		return nil, nil, 0, 0, fmt.Errorf("flux2: the VAE has no encoder weights; editing needs them")
+	}
+	C4 := p.Transformer.Cfg.InChannels
+	unit := p.vaeScale * 2
+	var toks []*tensor.Tensor
+	var ids []float32
+	fw, fh := 0, 0
+	for i, img := range imgs {
+		px, w, h, err := flux2ImagePixels(img, unit)
+		if err != nil {
+			return nil, nil, 0, 0, err
+		}
+		if i == 0 {
+			fw, fh = w, h
+		}
+		x, err := tensor.New(px, []int{1, 3, h, w}, p.Dev)
+		if err != nil {
+			return nil, nil, 0, 0, err
+		}
+		z, err := p.VAE.Encoder.Mode(x) // (1, C, h/s, w/s)
+		if err != nil {
+			return nil, nil, 0, 0, err
+		}
+		C, zh, zw := z.Dim(1), z.Dim(2), z.Dim(3)
+		// Patchify 2 x 2 into channels: (1, C, zh/2, 2, zw/2, 2) → (1, C, 2, 2, zh/2, zw/2).
+		if z, err = z.Reshape(1, C, zh/2, 2, zw/2, 2); err != nil {
+			return nil, nil, 0, 0, err
+		}
+		if z, err = z.Permute(0, 1, 3, 5, 2, 4); err != nil {
+			return nil, nil, 0, 0, err
+		}
+		if z, err = z.Contiguous(); err != nil {
+			return nil, nil, 0, 0, err
+		}
+		ph, pw := zh/2, zw/2
+		if z, err = z.Reshape(1, C4, ph, pw); err != nil {
+			return nil, nil, 0, 0, err
+		}
+		mean, _ := tensor.New(p.VAE.BNMean, []int{1, C4, 1, 1}, p.Dev)
+		std, _ := tensor.New(p.VAE.BNStd, []int{1, C4, 1, 1}, p.Dev)
+		if z, err = ops.Sub(z, mean); err != nil {
+			return nil, nil, 0, 0, err
+		}
+		if z, err = ops.Div(z, std); err != nil {
+			return nil, nil, 0, 0, err
+		}
+		if z, err = z.Reshape(1, C4, ph*pw); err != nil {
+			return nil, nil, 0, 0, err
+		}
+		if z, err = z.Permute(0, 2, 1); err != nil {
+			return nil, nil, 0, 0, err
+		}
+		if z, err = z.Contiguous(); err != nil {
+			return nil, nil, 0, 0, err
+		}
+		toks = append(toks, z)
+		for r := range ph {
+			for c := range pw {
+				ids = append(ids, float32(10*(i+1)), float32(r), float32(c), 0)
+			}
+		}
+	}
+	all := toks[0]
+	if len(toks) > 1 {
+		var err error
+		if all, err = ops.Concat(toks, 1); err != nil {
+			return nil, nil, 0, 0, err
+		}
+	}
+	return all, ids, fw, fh, nil
+}
+
+// flux2ImagePixels is the pipeline's reference-image preprocessing: images
+// over 1024² pixels shrink to that area, sides are cut to a multiple of
+// unit (resize to cover + centre crop), then (x / 255)·2 − 1 as (3, H, W).
+// Exact when no resize is needed; resizes use Pillow bicubic where
+// diffusers uses Lanczos.
+func flux2ImagePixels(img image.Image, unit int) ([]float32, int, int, error) {
+	rgb, w, h := models.ImageRGB(img)
+	if w*h > 1024*1024 {
+		s := math.Sqrt(float64(1024*1024) / float64(w*h))
+		nw, nh := int(float64(w)*s), int(float64(h)*s)
+		rgb, w, h = models.ResizeRGB(rgb, w, h, nw, nh), nw, nh
+	}
+	tw, th := (w/unit)*unit, (h/unit)*unit
+	if tw == 0 || th == 0 {
+		return nil, 0, 0, fmt.Errorf("flux2: reference image %dx%d smaller than %d px", w, h, unit)
+	}
+	if tw != w || th != h {
+		// Resize so the image covers (tw, th), then crop the centre.
+		sw, sh := tw, th
+		if float64(tw)/float64(th) > float64(w)/float64(h) {
+			sh = h * tw / w
+		} else {
+			sw = w * th / h
+		}
+		rgb = models.ResizeRGB(rgb, w, h, sw, sh)
+		x0, y0 := (sw-tw)/2, (sh-th)/2
+		crop := make([]uint8, tw*th*3)
+		for y := range th {
+			copy(crop[y*tw*3:(y+1)*tw*3], rgb[((y0+y)*sw+x0)*3:((y0+y)*sw+x0+tw)*3])
+		}
+		rgb, w, h = crop, tw, th
+	}
+	px := make([]float32, 3*h*w)
+	for c := range 3 {
+		for i := range h * w {
+			px[c*h*w+i] = float32(rgb[i*3+c])/255*2 - 1
+		}
+	}
+	return px, w, h, nil
 }
 
 // flux2EmpiricalMu is the pipeline's compute_empirical_mu.

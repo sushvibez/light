@@ -18,6 +18,7 @@ import (
 // ShiftFactor before decoding).
 type FluxVAE struct {
 	Decoder       *VAEDecoder
+	Encoder       *VAEEncoder // nil when the checkpoint has no encoder weights
 	ScalingFactor float32
 	ShiftFactor   float32
 	// FLUX.2 (AutoencoderKLFlux2): the BatchNorm statistics of the 2 x 2
@@ -31,6 +32,7 @@ type autoencoderKLConfig struct {
 	BlockOut         []int   `json:"block_out_channels"`
 	LayersPerBlock   int     `json:"layers_per_block"`
 	UsePostQuantConv *bool   `json:"use_post_quant_conv"`
+	UseQuantConv     *bool   `json:"use_quant_conv"`
 	ScalingFactor    float32 `json:"scaling_factor"`
 	ShiftFactor      float32 `json:"shift_factor"`
 	BatchNormEps     float64 `json:"batch_norm_eps"`
@@ -60,6 +62,12 @@ func LoadFluxVAE(dir string, dev device.Device) (*FluxVAE, error) {
 		return nil, fmt.Errorf("LoadFluxVAE: %w", err)
 	}
 	v := &FluxVAE{Decoder: d, ScalingFactor: c.ScalingFactor, ShiftFactor: c.ShiftFactor}
+	if _, ok := w["encoder.conv_in.weight"]; ok {
+		qc := c.UseQuantConv == nil || *c.UseQuantConv
+		if v.Encoder, err = loadVAEEncoder(w, cfg, qc, dtype.F32, dev); err != nil {
+			return nil, fmt.Errorf("LoadFluxVAE: %w", err)
+		}
+	}
 	if mean, ok := w["bn.running_mean"]; ok {
 		vr, ok := w["bn.running_var"]
 		if !ok {

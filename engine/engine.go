@@ -565,3 +565,7 @@ func ggufDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".cache", "light", "gguf")
 }
+
+// PickDevice resolves a device name ("gpu", "webgpu", "cpu" or "" for
+// CUDA when present, else the CPU) as Load does.
+func PickDevice(name string) (device.Device, error) { return pickDevice(name) }

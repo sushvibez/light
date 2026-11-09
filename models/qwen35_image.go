@@ -203,3 +203,9 @@ func Qwen35ImagePatches(img image.Image, c Qwen35ImageConfig) ([]float32, [3]int
 	}
 	return out, [3]int{1, gh, gw}, nil
 }
+
+// ImageRGB returns img as row-major RGB bytes with its width and height.
+func ImageRGB(img image.Image) ([]uint8, int, int) { return rgbBytes(img) }
+
+// ResizeRGB resizes row-major RGB bytes with Pillow's antialiased bicubic.
+func ResizeRGB(src []uint8, w, h, ow, oh int) []uint8 { return pilResizeRGB(src, w, h, ow, oh) }

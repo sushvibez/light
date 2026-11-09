@@ -4,6 +4,7 @@
     .venv/bin/python scripts/verify/ref_flux.py --make-tiny <dir> <out.json>
     .venv/bin/python scripts/verify/ref_flux.py --make-tiny-vae <dir> <out.json>
     .venv/bin/python scripts/verify/ref_flux.py --make-tiny-flux2 <dir> <out.json>
+    .venv/bin/python scripts/verify/ref_flux.py --make-tiny-vae-enc <dir> <out.json>
 
 Writes a seeded tiny-random FluxTransformer2DModel (2 double + 2 single
 blocks, guidance embedder, 3-axis RoPE) to <dir> with save_pretrained, runs
@@ -37,6 +38,24 @@ if sys.argv[1] == "--make-tiny-vae":
         img = vae.decode(z).sample
     print("image", tuple(img.shape), "mean abs", img.abs().mean().item())
     json.dump({"z": r(z), "z_shape": list(z.shape), "image": r(img), "image_shape": list(img.shape)}, open(out_json, "w"))
+    sys.exit(0)
+if sys.argv[1] == "--make-tiny-vae-enc":
+    # A tiny AutoencoderKL with its encoder and quant_conv: encode().mode().
+    from diffusers import AutoencoderKL
+    torch.manual_seed(4)
+    vae = AutoencoderKL(in_channels=3, out_channels=3, latent_channels=4, block_out_channels=(32, 32),
+                        down_block_types=("DownEncoderBlock2D",) * 2, up_block_types=("UpDecoderBlock2D",) * 2,
+                        layers_per_block=1, norm_num_groups=32, use_quant_conv=True, use_post_quant_conv=True).eval()
+    with torch.no_grad():
+        for p in vae.parameters():
+            p.add_(0.05 * torch.randn_like(p))
+    vae.save_pretrained(out_dir, safe_serialization=True)
+    img = torch.rand(1, 3, 18, 26) * 2 - 1
+    with torch.no_grad():
+        z = vae.encode(img).latent_dist.mode()
+    print("latent", tuple(z.shape), "mean abs", z.abs().mean().item())
+    json.dump({"image": r(img), "image_shape": list(img.shape), "latent": r(z), "latent_shape": list(z.shape)},
+              open(out_json, "w"))
     sys.exit(0)
 if sys.argv[1] == "--make-tiny-flux2":
     # FLUX.2 (klein-style: no guidance embedder): bias-free, shared

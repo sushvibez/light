@@ -2,6 +2,8 @@ package diffusion
 
 import (
 	"encoding/json"
+	"image"
+	"image/png"
 	"math"
 	"os"
 	"slices"
@@ -37,6 +39,9 @@ func TestFlux2PipelineTinyMatchesDiffusers(t *testing.T) {
 		PromptEmbeds []float32 `json:"prompt_embeds_f64"` // see ref_flux2_pipe.py
 		Sigmas       []float32 `json:"sigmas"`
 		Image        []float32 `json:"image"`
+		EditLatents  []float32 `json:"edit_latents"`
+		EditLShape   []int     `json:"edit_latents_shape"`
+		EditImage    []float32 `json:"edit_image"`
 	}
 	if err := json.Unmarshal(raw, &ref); err != nil {
 		t.Fatal(err)
@@ -96,6 +101,27 @@ func TestFlux2PipelineTinyMatchesDiffusers(t *testing.T) {
 			}
 			cmp(t, "text conditioning", res.PromptEmbeds, ref.PromptEmbeds, 1e-5)
 			cmp(t, "image", res.Image, ref.Image, 1e-4)
+
+			// Editing: the reference image joins the sequence as extra tokens.
+			f, err := os.Open("testdata/flux2-ref.png")
+			if err != nil {
+				t.Fatal(err)
+			}
+			refImg, err := png.Decode(f)
+			f.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			el, err := tensor.New(ref.EditLatents, ref.EditLShape, dev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ed, err := p.Generate(Flux2Options{Prompt: ref.Prompt, Steps: ref.Steps, Guidance: ref.Guidance,
+				MaxSeqLen: ref.MaxSeqLen, Layers: ref.Layers, Images: []image.Image{refImg}, Latents: el})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cmp(t, "edit image", ed.Image, ref.EditImage, 1e-4)
 		})
 	}
 }
