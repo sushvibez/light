@@ -213,6 +213,9 @@ func recordReply(m *engine.Model, st engine.Stats, source string) {
 	}
 	updatePerf(func(h *perfHost) {
 		e := entryFor(h, m.Spec.ID, devLabel(m.Dev))
+		if source != "bench" && e.Source == "bench" {
+			return // a chat reply's short prompt does not replace the bench numbers
+		}
 		e.PromptTokens = st.PromptTokens
 		e.PrefillTPS = float64(st.PromptTokens) / (st.PrefillMS / 1000)
 		e.DecodeTPS = st.TokPerSec
@@ -249,8 +252,15 @@ func benchModel(e engine.Entry, devices []string, tokens int, mf modelFlags) err
 			fmt.Fprintf(os.Stderr, "  %s: %v\n", dv, err)
 			continue
 		}
-		_, st, err := rt.Generate(context.Background(), []engine.Message{{Role: "user", Content: benchPrompt}},
-			engine.GenOpts{Temperature: 0, MaxTokens: tokens}, nil)
+		msgs := []engine.Message{{Role: "user", Content: benchPrompt}}
+		// Warm up first: the first call pays one-off costs (CUDA JITs the
+		// BF16 PTX, WebGPU compiles its pipelines) that would read as a
+		// several-times-slower prefill. Nothing carries over between calls.
+		_, _, err = rt.Generate(context.Background(), msgs, engine.GenOpts{Temperature: 0, MaxTokens: 2}, nil)
+		var st engine.Stats
+		if err == nil {
+			_, st, err = rt.Generate(context.Background(), msgs, engine.GenOpts{Temperature: 0, MaxTokens: tokens}, nil)
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  %s: %v\n", dv, err)
 		} else {

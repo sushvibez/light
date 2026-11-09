@@ -62,6 +62,14 @@ func WrapCPU(dt dtype.DType, nelems int, buf []byte) *Storage {
 	}
 }
 
+// WrapCPUOwned is WrapCPU for bytes owned elsewhere (a file mapping):
+// release runs once when the last tensor using the storage is collected.
+func WrapCPUOwned(dt dtype.DType, nelems int, buf []byte, release func()) *Storage {
+	s := WrapCPU(dt, nelems, buf)
+	s.release = release
+	return s
+}
+
 // Device returns the device this storage lives on.
 func (s *Storage) Device() device.Device { return s.device }
 
