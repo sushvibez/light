@@ -31,8 +31,10 @@ GPTQ / AWQ) is complete as of 2026-11-08 except for the items below.
 
 - **Gemma 3 SigLIP** tower (image input for gemma-3-4b and up; the text path
   skips it today).
-- **Qwen3-VL** vision tower (+ MRoPE): prerequisite for Qwen3.5 / 3.6 / 3.8
-  image input, WeVisOne-VL and the Qwen-Image text encoder.
+- **Images in the engine / CLI / API** for Qwen3.5 (model side done
+  2026-11-09: tower, MRoPE, preprocessing); then video frames, Qwen3-VL
+  deepstack (for Qwen3-VL proper, WeVisOne-VL and the Qwen-Image text
+  encoder).
 - Gemma 4 vision / audio towers; Muse Glimmer's 1.8B ViT; EmbeddingGemma 2
   vision / audio towers (text encoders only today).
 - CLIP vision tower (SD only has the text tower), SigLIP, DINOv2, Segment
