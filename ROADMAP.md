@@ -133,7 +133,7 @@ validation bar.
 
 ### CUDA
 
-- **CUDA graphs / per-token overhead** for small models (launch overhead on
+- **CUDA graphs / per-token overhead** (desktop) for small models (launch overhead on
   the decode hot path); multi-stream CUDA.
 - **Faster GGUF decode kernel**: `matmul_q` v1 (warp per column, byte loads)
   decodes Qwen2-0.5B at ~17 tok/s vs 31 tok/s F32 cuBLAS — vectorised block
