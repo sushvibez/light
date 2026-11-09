@@ -30,3 +30,13 @@ func FromBytes(data []byte, dt dtype.DType, dims []int, dev device.Device) (*Ten
 	}
 	return cpuT.To(dev)
 }
+
+// FromStorage wraps a CPU storage holding row-major contiguous elements as a
+// tensor of the given shape, without copying (the loaders' mapped files).
+func FromStorage(s *storage.Storage, dims []int) (*Tensor, error) {
+	sh := shape.New(dims...)
+	if s.Len() != sh.NumElements() {
+		return nil, fmt.Errorf("tensor.FromStorage: storage holds %d elements, shape %v wants %d", s.Len(), sh, sh.NumElements())
+	}
+	return newTensor(s, sh, shape.DefaultStrides(sh), 0), nil
+}

@@ -22,12 +22,20 @@ func LoadFiles(paths []string, dev device.Device) (map[string]*tensor.Tensor, ma
 	out := make(map[string]*tensor.Tensor)
 	var firstMeta map[string]string
 	for i, p := range paths {
-		f, err := os.Open(p)
-		if err != nil {
-			return nil, nil, fmt.Errorf("safetensors.LoadFiles: open %s: %w", p, err)
+		var shard map[string]*tensor.Tensor
+		var meta map[string]string
+		var err error
+		if dev.Kind() == device.KindCPU {
+			shard, meta, err = loadMapped(p) // no heap copy of the weights
 		}
-		shard, meta, err := Load(f, dev)
-		f.Close()
+		if shard == nil {
+			f, err2 := os.Open(p)
+			if err2 != nil {
+				return nil, nil, fmt.Errorf("safetensors.LoadFiles: open %s: %w", p, err2)
+			}
+			shard, meta, err = Load(f, dev)
+			f.Close()
+		}
 		if err != nil {
 			return nil, nil, fmt.Errorf("safetensors.LoadFiles: load %s: %w", p, err)
 		}
@@ -43,3 +51,5 @@ func LoadFiles(paths []string, dev device.Device) (map[string]*tensor.Tensor, ma
 	}
 	return out, firstMeta, nil
 }
+
+func deviceCPU() device.Device { return device.CPU() }
