@@ -3,11 +3,11 @@ package models
 import "testing"
 
 // TestDDIMTimestepsLeadingMode checks our DDIM timestep selection matches
-// HuggingFace Diffusers' default "leading" mode for SD 1.5:
+// HuggingFace Diffusers' default "leading" mode for SD 1.5 (steps_offset 1):
 //
-//	timesteps = (arange(N) * (1000/N)).round()[::-1]
+//	timesteps = (arange(N) * (1000/N)).round()[::-1] + 1
 //
-// For N=50 that's [980, 960, 940, ..., 20, 0]. This was off by `step-1`
+// For N=50 that's [981, 961, 941, ..., 21, 1]. This was off by `step-1`
 // in the first cut and visibly hurt image quality; the test locks the fix.
 func TestDDIMTimestepsLeadingMode(t *testing.T) {
 	cases := []struct {
@@ -38,13 +38,13 @@ func TestDDIMTimestepsLeadingMode(t *testing.T) {
 					c.numInference, i, s.Timesteps[i], c.want[i], s.Timesteps)
 			}
 		}
-		// Bookend: first should be (N-1)*step, last should be 0.
+		// Bookend: first should be (N-1)*step + 1, last should be 1.
 		step := 1000 / c.numInference
-		if s.Timesteps[0] != (c.numInference-1)*step {
-			t.Fatalf("N=%d first ts=%d, want %d", c.numInference, s.Timesteps[0], (c.numInference-1)*step)
+		if s.Timesteps[0] != (c.numInference-1)*step+1 {
+			t.Fatalf("N=%d first ts=%d, want %d", c.numInference, s.Timesteps[0], (c.numInference-1)*step+1)
 		}
-		if s.Timesteps[len(s.Timesteps)-1] != 0 {
-			t.Fatalf("N=%d last ts=%d, want 0", c.numInference, s.Timesteps[len(s.Timesteps)-1])
+		if s.Timesteps[len(s.Timesteps)-1] != 1 {
+			t.Fatalf("N=%d last ts=%d, want 1", c.numInference, s.Timesteps[len(s.Timesteps)-1])
 		}
 	}
 }
@@ -54,7 +54,7 @@ func expectedTimesteps(numTrain, numInference int) []int {
 	step := numTrain / numInference
 	out := make([]int, numInference)
 	for i := 0; i < numInference; i++ {
-		out[i] = (numInference - 1 - i) * step
+		out[i] = (numInference-1-i)*step + 1
 	}
 	return out
 }

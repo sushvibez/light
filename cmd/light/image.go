@@ -8,11 +8,13 @@ import (
 	"image"
 	"os"
 	"path/filepath"
+	"runtime/pprof"
 	"time"
 
 	"light/diffusion"
 	"light/engine"
 	"light/hub"
+	"light/models"
 )
 
 // cmdImage generates an image with a diffusers pipeline (FLUX.2 klein,
@@ -28,11 +30,12 @@ func cmdImage(args []string) error {
 	guidance := fs.Float64("guidance", 0, "classifier-free / distilled guidance (default: the pipeline's)")
 	seed := fs.Uint64("seed", 0, "noise seed")
 	f32 := fs.Bool("f32", false, "keep F32 weights (default: 16-bit weight storage, F32 compute)")
+	cpuprof := fs.String("cpuprofile", "", "write a CPU profile (pprof) of the run to this file")
 	strength := fs.Float64("strength", 0.6, "image-to-image: the fraction of the schedule that runs (1 = ignore the image)")
 	var refs stringList
 	fs.Var(&refs, "image", "FLUX.2 klein: reference image for editing (repeatable); Z-Image / FLUX.1: init image for image-to-image. The output size defaults to the (first) image's")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: light image [flags] <org/repo> <prompt>\n\nPipelines: Flux2KleinPipeline (FLUX.2 klein, text-to-image and editing), ZImagePipeline (Z-Image / Turbo), FluxPipeline (FLUX.1).\n\nflags:")
+		fmt.Fprintln(os.Stderr, "usage: light image [flags] <org/repo> <prompt>\n\nPipelines: Flux2KleinPipeline (FLUX.2 klein, text-to-image and editing), ZImagePipeline (Z-Image / Turbo), FluxPipeline (FLUX.1), StableDiffusionPipeline (SD 1.5, DDIM).\n\nflags:")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -71,6 +74,17 @@ func cmdImage(args []string) error {
 			return diffusion.Img2Img{Image: im, Strength: float32(*strength)}, err
 		}
 		return diffusion.Img2Img{}, fmt.Errorf("%s: one -image (the init image) at most", repo)
+	}
+	if *cpuprof != "" {
+		f, err := os.Create(*cpuprof)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			return err
+		}
+		defer pprof.StopCPUProfile()
 	}
 	t0 := time.Now()
 	var img diffusion.Image
@@ -135,8 +149,47 @@ func cmdImage(args []string) error {
 			return err
 		}
 		img = diffusion.Image{Pixels: res.Image}
+	case "StableDiffusionPipeline":
+		i2i, err := initImage()
+		if err != nil {
+			return err
+		}
+		// F32 weights: the CPU convolution has no 16-bit kernel.
+		sd, err := models.LoadSD15FromHF(repo, d)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "loaded %s in %.1f s\n", repo, time.Since(t0).Seconds())
+		t1 := time.Now()
+		o := models.DefaultSDGenerateOpts(prompt)
+		if *width != 0 || *height != 0 || i2i.Image != nil {
+			o.Width, o.Height = *width, *height
+		}
+		if *steps != 0 {
+			o.NumInference = *steps
+		}
+		if *guidance != 0 {
+			o.GuidanceScale = float32(*guidance)
+		}
+		o.Seed, o.InitImage, o.Strength = *seed, i2i.Image, i2i.Strength
+		hwc, err := sd.Generate(o, d)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "generated in %.1f s\n", time.Since(t1).Seconds())
+		chw, err := hwc.Permute(2, 0, 1)
+		if err != nil {
+			return err
+		}
+		if chw, err = chw.Contiguous(); err != nil {
+			return err
+		}
+		if chw, err = chw.Reshape(1, 3, hwc.Dim(0), hwc.Dim(1)); err != nil {
+			return err
+		}
+		img = diffusion.Image{Pixels: chw}
 	default:
-		return fmt.Errorf("%s: pipeline %q not supported (Flux2KleinPipeline, ZImagePipeline, FluxPipeline)", repo, mi.Class)
+		return fmt.Errorf("%s: pipeline %q not supported (Flux2KleinPipeline, ZImagePipeline, FluxPipeline, StableDiffusionPipeline)", repo, mi.Class)
 	}
 	if err := img.SavePNG(*out); err != nil {
 		return err

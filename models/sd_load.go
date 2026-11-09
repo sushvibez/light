@@ -63,7 +63,7 @@ func LoadSD15FromHFWithDType(repo string, wdt dtype.DType, dev device.Device) (*
 		return nil, fmt.Errorf("unet: %w", err)
 	}
 	// 4. VAE decoder (at the requested dtype).
-	vae, err := loadSDVAESD15(repo, wdt, dev)
+	vae, enc, err := loadSDVAESD15(repo, wdt, dev)
 	if err != nil {
 		return nil, fmt.Errorf("vae: %w", err)
 	}
@@ -71,6 +71,7 @@ func LoadSD15FromHFWithDType(repo string, wdt dtype.DType, dev device.Device) (*
 		TextEncoder: te,
 		UNet:        unet,
 		VAE:         vae,
+		Encoder:     enc,
 		Tokenizer:   tok,
 		Scheduler:   NewDDIMScheduler(50),
 	}, nil
@@ -463,14 +464,22 @@ func loadSDUNetSD15(repo string, wdt dtype.DType, dev device.Device) (*SDUNet, e
 	return m, nil
 }
 
-// loadSDVAESD15 loads the SD 1.5 VAE decoder (encoder is skipped — we only
-// need decode for txt2img).
-func loadSDVAESD15(repo string, wdt dtype.DType, dev device.Device) (*VAEDecoder, error) {
+// loadSDVAESD15 loads the SD 1.5 VAE decoder and, when the checkpoint has
+// one, its encoder (for image-to-image).
+func loadSDVAESD15(repo string, wdt dtype.DType, dev device.Device) (*VAEDecoder, *VAEEncoder, error) {
 	weights, err := loadComponentSafetensors(repo, "vae", dev)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return loadVAEDecoder(weights, VAEDecoderSD15(), wdt, dev)
+	d, err := loadVAEDecoder(weights, VAEDecoderSD15(), wdt, dev)
+	if err != nil {
+		return nil, nil, err
+	}
+	if _, ok := weights["encoder.conv_in.weight"]; !ok {
+		return d, nil, nil
+	}
+	e, err := loadVAEEncoder(weights, VAEDecoderSD15(), true, wdt, dev)
+	return d, e, err
 }
 
 // loadVAEDecoder builds a decoder for cfg and fills it from an

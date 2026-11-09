@@ -3,19 +3,83 @@ package cpu
 import (
 	"light/device"
 	"light/dtype"
+	"light/internal/parallel"
 	"light/internal/registry"
+	"light/internal/simd"
 )
 
 func init() {
 	reg := func(op string, dt dtype.DType, k registry.Kernel) {
 		registry.Register(registry.Key{Op: op, Dev: device.KindCPU, DType: dt}, k)
 	}
-	reg("conv2d", dtype.F32, conv2dKernel[float32])
+	reg("conv2d", dtype.F32, conv2dF32)
 	reg("conv2d", dtype.F64, conv2dKernel[float64])
 	reg("maxpool2d", dtype.F32, maxPool2dKernel[float32])
 	reg("maxpool2d", dtype.F64, maxPool2dKernel[float64])
 	reg("avgpool2d", dtype.F32, avgPool2dKernel[float32])
 	reg("avgpool2d", dtype.F64, avgPool2dKernel[float64])
+}
+
+// conv2dF32 is conv2dKernel as blocked im2col + the AVX2 x · Wᵀ tiles:
+// each worker takes a range of output pixels, lays convBlock of them out as
+// rows of Cin · kH · kW patch values (zero padding included), and multiplies
+// the weight rows (Cout, Cin · kH · kW) against them straight into the
+// (Cout, Hout · Wout) output. Same products, different summation order.
+func conv2dF32(ctx *registry.Context) error {
+	const convBlock = 48
+	in, w, out := ctx.Inputs[0], ctx.Inputs[1], ctx.Output
+	stride := ctx.Attrs["stride"].([2]int)
+	pad := ctx.Attrs["padding"].([2]int)
+	sH, sW, pH, pW := stride[0], stride[1], pad[0], pad[1]
+	N, Cin, H, W := in.Dim(0), in.Dim(1), in.Dim(2), in.Dim(3)
+	Cout, kH, kW := w.Dim(0), w.Dim(2), w.Dim(3)
+	Hout, Wout := out.Dim(2), out.Dim(3)
+	K, P := Cin*kH*kW, Hout*Wout
+	inS, wS, outS := asSlice[float32](in), asSlice[float32](w), asSlice[float32](out)
+	var bias []float32
+	if len(ctx.Inputs) > 2 && ctx.Inputs[2] != nil {
+		bias = asSlice[float32](ctx.Inputs[2])
+	}
+	for n := range N {
+		src := inS[n*Cin*H*W:]
+		dst := outS[n*Cout*P : (n+1)*Cout*P]
+		parallel.For(P, convBlock, func(lo, hi int) {
+			col := make([]float32, convBlock*K)
+			for p0 := lo; p0 < hi; p0 += convBlock {
+				pc := min(convBlock, hi-p0)
+				for r := range pc {
+					oh, ow := (p0+r)/Wout, (p0+r)%Wout
+					row := col[r*K : (r+1)*K]
+					i := 0
+					for ci := range Cin {
+						plane := src[ci*H*W:]
+						for ky := range kH {
+							ih := oh*sH - pH + ky
+							for kx := range kW {
+								iw := ow*sW - pW + kx
+								if ih < 0 || ih >= H || iw < 0 || iw >= W {
+									row[i] = 0
+								} else {
+									row[i] = plane[ih*W+iw]
+								}
+								i++
+							}
+						}
+					}
+				}
+				simd.MatTB(wS, K, col, K, dst[p0:], P, Cout, pc, K)
+				if bias != nil {
+					for co := range Cout {
+						o := dst[co*P+p0 : co*P+p0+pc]
+						for j := range o {
+							o[j] += bias[co]
+						}
+					}
+				}
+			}
+		})
+	}
+	return nil
 }
 
 // conv2dKernel implements naive 2-D convolution:

@@ -128,3 +128,43 @@ func TestConv2dErrors(t *testing.T) {
 		t.Error("expected Cin mismatch")
 	}
 }
+
+// The F32 im2col / AVX2 path against the F64 reference loops, over channel
+// counts on and off the 8-wide fast path, strides, padding and a 1 x 1.
+func TestConv2dF32MatchesF64(t *testing.T) {
+	dev := device.CPU()
+	cases := []struct{ n, cin, cout, h, w, k, s, p int }{
+		{1, 3, 8, 17, 13, 3, 1, 1},
+		{2, 16, 10, 9, 11, 3, 2, 1},
+		{1, 8, 5, 7, 7, 1, 1, 0},
+		{1, 32, 7, 12, 10, 3, 1, 0},
+		{1, 5, 4, 6, 9, 4, 2, 2},
+	}
+	for _, c := range cases {
+		x, _ := tensor.RandN(dtype.F64, []int{c.n, c.cin, c.h, c.w}, dev)
+		wt, _ := tensor.RandN(dtype.F64, []int{c.cout, c.cin, c.k, c.k}, dev)
+		b, _ := tensor.RandN(dtype.F64, []int{c.cout}, dev)
+		want, err := ops.Conv2d(x, wt, b, [2]int{c.s, c.s}, [2]int{c.p, c.p})
+		if err != nil {
+			t.Fatal(err)
+		}
+		x32, _ := ops.Cast(x, dtype.F32)
+		w32, _ := ops.Cast(wt, dtype.F32)
+		b32, _ := ops.Cast(b, dtype.F32)
+		got, err := ops.Conv2d(x32, w32, b32, [2]int{c.s, c.s}, [2]int{c.p, c.p})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !got.Shape().Equal(want.Shape()) {
+			t.Fatalf("%+v: shape %v, want %v", c, got.Shape(), want.Shape())
+		}
+		g, wv := tensor.MustSlice[float32](got), tensor.MustSlice[float64](want)
+		md := 0.0
+		for i := range wv {
+			md = math.Max(md, math.Abs(float64(g[i])-wv[i]))
+		}
+		if md > 1e-4 {
+			t.Errorf("%+v: max diff %.3g", c, md)
+		}
+	}
+}

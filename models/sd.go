@@ -2,6 +2,7 @@ package models
 
 import (
 	"fmt"
+	"image"
 	"math"
 	"math/rand/v2"
 	"runtime"
@@ -23,6 +24,7 @@ type StableDiffusion struct {
 	TextEncoder *CLIPText
 	UNet        *SDUNet
 	VAE         *VAEDecoder
+	Encoder     *VAEEncoder // nil when the VAE checkpoint has no encoder (image-to-image needs it)
 	Tokenizer   *tokenizer.CLIPTokenizer
 	Scheduler   *DDIMScheduler
 }
@@ -31,12 +33,23 @@ type StableDiffusion struct {
 type SDGenerateOpts struct {
 	Prompt        string
 	Negative      string  // empty → ""
-	Width         int     // pixels; must be a multiple of 8 (latent factor)
+	Width         int     // pixels; must be a multiple of 8 (latent factor); 0 with InitImage: the image's
 	Height        int     // pixels; multiple of 8
 	NumInference  int     // sampler steps; 50 typical
 	GuidanceScale float32 // CFG scale; 7.5 typical
 	Seed          uint64  // 0 → nondeterministic
 	ScalingFactor float32 // SD 1.x = 0.18215
+
+	// InitImage turns the run into image-to-image (diffusers'
+	// StableDiffusionImg2ImgPipeline): the image (resized to Width x Height
+	// when they differ) is VAE-encoded (the mean), noised to the timestep
+	// int(Strength · NumInference) steps from the end, and only those steps
+	// run. Strength 1 ignores the image.
+	InitImage image.Image
+	Strength  float32
+	// Noise, when set, is the (1, 4, H/8, W/8) F32 initial noise instead of
+	// the seeded one (to match a reference run).
+	Noise *tensor.Tensor
 
 	// OnPhase fires at coarse pipeline phases ("tokenize", "encode prompt",
 	// "init noise", "diffuse", "vae decode") so callers can log progress
@@ -66,6 +79,25 @@ func DefaultSDGenerateOpts(prompt string) SDGenerateOpts {
 // Generate runs text-to-image. Returns an (H, W, 3) F32 image in [0, 1].
 // Caller is responsible for converting to PNG / JPEG.
 func (s *StableDiffusion) Generate(opts SDGenerateOpts, dev device.Device) (*tensor.Tensor, error) {
+	first := 0 // the first scheduler step that runs
+	if opts.InitImage != nil {
+		if s.Encoder == nil {
+			return nil, fmt.Errorf("SD.Generate: image-to-image needs the VAE encoder weights")
+		}
+		if opts.Width == 0 && opts.Height == 0 {
+			b := opts.InitImage.Bounds()
+			opts.Width, opts.Height = b.Dx()/8*8, b.Dy()/8*8
+		}
+		// get_timesteps: init_timestep = min(int(n · strength), n).
+		n := opts.NumInference
+		first = max(n-min(int(float64(n)*float64(opts.Strength)), n), 0)
+		if first >= n {
+			return nil, fmt.Errorf("SD.Generate: strength %g leaves no steps", opts.Strength)
+		}
+	}
+	if s.Scheduler == nil || len(s.Scheduler.Timesteps) != opts.NumInference {
+		s.Scheduler = NewDDIMScheduler(opts.NumInference)
+	}
 	if opts.Width%8 != 0 || opts.Height%8 != 0 {
 		return nil, fmt.Errorf("SD.Generate: width/height must be multiples of 8 (got %dx%d)", opts.Width, opts.Height)
 	}
@@ -142,6 +174,23 @@ func (s *StableDiffusion) Generate(opts SDGenerateOpts, dev device.Device) (*ten
 	if err != nil {
 		return nil, err
 	}
+	if opts.Noise != nil {
+		if latent, err = opts.Noise.To(dev); err != nil {
+			return nil, err
+		}
+	}
+	if opts.InitImage != nil {
+		phase("encode image")
+		x0, err := s.encodeImage(opts.InitImage, opts.Width, opts.Height, opts.ScalingFactor, dev)
+		if err != nil {
+			return nil, err
+		}
+		// add_noise: sqrt(ᾱ_t) · x0 + sqrt(1 − ᾱ_t) · noise.
+		ac := s.Scheduler.AlphasCumprod[s.Scheduler.Timesteps[first]]
+		if latent, err = ddimAxBy(x0, latent, float32(math.Sqrt(ac)), float32(math.Sqrt(1-ac))); err != nil {
+			return nil, err
+		}
+	}
 
 	// 4. Diffusion loop.
 	//
@@ -152,7 +201,7 @@ func (s *StableDiffusion) Generate(opts SDGenerateOpts, dev device.Device) (*ten
 	// the cost of running the model twice per step. Worth it to fit on
 	// 16 GB cards.
 	phase("diffuse")
-	for step := range opts.NumInference {
+	for step := first; step < opts.NumInference; step++ {
 		stepStart := time.Now()
 		t := s.Scheduler.Timesteps[step]
 		// (1, 320) timestep embedding — same `t` for both forwards. Cast
@@ -249,6 +298,44 @@ func (s *StableDiffusion) Generate(opts SDGenerateOpts, dev device.Device) (*ten
 		}
 	}
 	return tensor.New(out, []int{H, W, 3}, device.CPU())
+}
+
+// encodeImage returns the scaled latents (1, 4, h/8, w/8) of img at w x h:
+// pixels to [-1, 1], the encoder's mean, times the scaling factor.
+func (s *StableDiffusion) encodeImage(img image.Image, w, h int, scale float32, dev device.Device) (*tensor.Tensor, error) {
+	rgb, iw, ih := ImageRGB(img)
+	if iw != w || ih != h {
+		rgb = ResizeRGB(rgb, iw, ih, w, h)
+	}
+	px := make([]float32, 3*h*w)
+	for c := range 3 {
+		for i := range h * w {
+			px[c*h*w+i] = float32(rgb[i*3+c])/255*2 - 1
+		}
+	}
+	x, err := tensor.New(px, []int{1, 3, h, w}, dev)
+	if err != nil {
+		return nil, err
+	}
+	if wdt := s.Encoder.ConvIn.Weight.DType(); wdt != dtype.F32 {
+		if x, err = ops.Cast(x, wdt); err != nil {
+			return nil, err
+		}
+	}
+	z, err := s.Encoder.Mode(x)
+	if err != nil {
+		return nil, err
+	}
+	if z.DType() != dtype.F32 {
+		if z, err = ops.Cast(z, dtype.F32); err != nil {
+			return nil, err
+		}
+	}
+	sc, err := tensor.New([]float32{scale}, []int{1}, dev)
+	if err != nil {
+		return nil, err
+	}
+	return ops.Mul(z, sc)
 }
 
 // tokensToI64Tensor takes (T,) int32 and returns a (1, T) I64 tensor on dev.
