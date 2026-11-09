@@ -78,6 +78,12 @@ func TestPlanPull(t *testing.T) {
 	if got := names(p.cache); !slices.Equal(got, want) || p.ggufDir != nil || p.choices != nil {
 		t.Errorf("safetensors plan %v / %v / %v", got, names(p.ggufDir), names(p.choices))
 	}
+	// Mistral: HF shards plus a duplicate consolidated.safetensors (skipped).
+	p = planPull("mistralai/Mistral-7B-Instruct-v0.3", files("config.json", "consolidated.safetensors", "model-00001-of-00003.safetensors",
+		"model-00002-of-00003.safetensors", "model-00003-of-00003.safetensors", "model.safetensors.index.json", "params.json", "tokenizer.json"))
+	if got := names(p.cache); slices.Contains(got, "consolidated.safetensors") || !slices.Contains(got, "model-00003-of-00003.safetensors") {
+		t.Errorf("mistral plan %v", got)
+	}
 	// One GGUF: into the GGUF directory.
 	p = planPull("org/m-GGUF", files("m-Q4_K_M.gguf", "README.md", "config.json"))
 	if got := names(p.ggufDir); !slices.Equal(got, []string{"m-Q4_K_M.gguf"}) || p.cache != nil {

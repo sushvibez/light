@@ -23,6 +23,9 @@ func init() {
 // behaviour and our F16 elementwise convention.
 func matmulHalfKernel(ctx *registry.Context) error {
 	a, b, out := ctx.Inputs[0], ctx.Inputs[1], ctx.Output
+	if matmulHalfFast(a, b, out, false) {
+		return nil
+	}
 	aDim := a.Shape().Dims()
 	bDim := b.Shape().Dims()
 	M, K := aDim[0], aDim[1]
@@ -51,6 +54,9 @@ func matmulHalfKernel(ctx *registry.Context) error {
 // matmulBF16Kernel is the BF16 counterpart.
 func matmulBF16Kernel(ctx *registry.Context) error {
 	a, b, out := ctx.Inputs[0], ctx.Inputs[1], ctx.Output
+	if matmulHalfFast(a, b, out, false) {
+		return nil
+	}
 	aDim := a.Shape().Dims()
 	bDim := b.Shape().Dims()
 	M, K := aDim[0], aDim[1]
@@ -199,6 +205,9 @@ func readF32(t *tensor.Tensor) (func(i, j int) float32, error) {
 // GemmEx contract the CUDA kernels follow.
 func matmulMixedKernel(ctx *registry.Context) error {
 	a, b, out := ctx.Inputs[0], ctx.Inputs[1], ctx.Output
+	if matmulHalfFast(a, b, out, a.DType() == dtype.F32) {
+		return nil
+	}
 	ra, err := readF32(a)
 	if err != nil {
 		return err

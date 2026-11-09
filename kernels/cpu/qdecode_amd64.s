@@ -282,3 +282,32 @@ i4word:
 i4done:
 	VZEROUPPER
 	RET
+
+// func bf16RowAVX2(src *uint16, dst *float32, n int)
+// BF16 → F32 (the bits shifted into the high half); n a multiple of 8.
+TEXT ·bf16RowAVX2(SB), NOSPLIT, $0-24
+	MOVQ src+0(FP), SI
+	MOVQ dst+8(FP), DI
+	MOVQ n+16(FP), CX
+bf16loop:
+	CMPQ CX, $16
+	JL   bf16tail
+	VPMOVZXWD (SI), Y1
+	VPMOVZXWD 16(SI), Y2
+	VPSLLD    $16, Y1, Y1
+	VPSLLD    $16, Y2, Y2
+	VMOVUPS   Y1, (DI)
+	VMOVUPS   Y2, 32(DI)
+	ADDQ $32, SI
+	ADDQ $64, DI
+	SUBQ $16, CX
+	JMP  bf16loop
+bf16tail:
+	CMPQ CX, $8
+	JL   bf16done
+	VPMOVZXWD (SI), Y1
+	VPSLLD    $16, Y1, Y1
+	VMOVUPS   Y1, (DI)
+bf16done:
+	VZEROUPPER
+	RET

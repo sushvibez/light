@@ -83,6 +83,42 @@ func batchedMatmulHalfKernel(toF32 func(uint16) float32, fromF32 func(float32) u
 		aS, bS, outS := asSlice[uint16](a), asSlice[uint16](b), asSlice[uint16](out)
 		B, M, K, N := a.Dim(0), a.Dim(1), a.Dim(2), b.Dim(2)
 		aStr, bStr := a.Strides().Slice(), b.Strides().Slice()
+		// Widen both operands to F32 (keeping B's layout, so kᵀ views stay
+		// on the dot path) and run the parallel F32 batched path; products
+		// and sums are F32 and each output is rounded once, as below.
+		{
+			af := make([]float32, B*M*K)
+			for batch := range B {
+				for i := range M {
+					for kk := range K {
+						af[(batch*M+i)*K+kk] = toF32(aS[batch*aStr[0]+a.Offset()+i*aStr[1]+kk*aStr[2]])
+					}
+				}
+			}
+			bf := make([]float32, len(bS)-b.Offset())
+			for i := range bf {
+				bf[i] = toF32(bS[b.Offset()+i])
+			}
+			of := make([]float32, B*M*N)
+			ok := true
+			var mu sync.Mutex
+			parallel.For(B, 1, func(lo, hi int) {
+				for batch := lo; batch < hi; batch++ {
+					if !matmulF32Fast(af, batch*M*K, []int{K, 1}, bf, batch*bStr[0], []int{bStr[1], bStr[2]}, of[batch*M*N:], M, K, N) {
+						mu.Lock()
+						ok = false
+						mu.Unlock()
+						return
+					}
+				}
+			})
+			if ok {
+				for i, v := range of {
+					outS[i] = fromF32(v)
+				}
+				return nil
+			}
+		}
 		for batch := range B {
 			aBase := batch*aStr[0] + a.Offset()
 			bBase := batch*bStr[0] + b.Offset()

@@ -22,5 +22,8 @@ func q6KBlockAVX2(ql *byte, qh *byte, sc *float32, dst *float32)
 //go:noescape
 func int4RowAVX2(codes *uint32, s *float32, z *float32, dst *float32, groups, wpg int)
 
+//go:noescape
+func bf16RowAVX2(src *uint16, dst *float32, n int)
+
 // The AVX2 decoders use AVX2 integer ops and the same CPU check as simd.
 var decodeAVX2 = simd.Accelerated()

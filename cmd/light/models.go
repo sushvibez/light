@@ -323,8 +323,11 @@ func planPull(repo string, files []hub.RepoFile) pullPlan {
 	case has("pytorch_model*.bin"):
 		weights = "pytorch_model*.bin"
 	}
+	// Mistral's repos also ship consolidated.safetensors (its own format, the
+	// same weights again): skip it when HF-layout shards are present.
+	hfShards := has("model*.safetensors")
 	for _, f := range files {
-		if !topLevel(f) {
+		if !topLevel(f) || (hfShards && strings.HasPrefix(f.Name, "consolidated")) {
 			continue
 		}
 		if ok, _ := path.Match(weights, f.Name); (ok && weights != "") || aux(f.Name) {
