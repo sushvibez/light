@@ -74,6 +74,7 @@ status are in the commits (and, up to 2026-11-09, the
 | **Falcon** | `models/falcon.go`, `falcon_load.go` | ✅ Verified 2026-10-29 | Every decoder variant (ALiBi, MQA, new arch); falcon-rw-1b / 7b match transformers |
 | **SDAR-1.7B-Chat (block-diffusion LM)** | `models/sdar.go` (`Llama.ForwardDiffusion`, `GenerateDiffusion`, `SDAROpts`), `models/llama.go` (block-bidirectional mask, no-store KV pass), `engine/engine.go` (diffusion branch) | ✅ Verified 2026-10-28 | Block-diffusion decoding on a Qwen3 body; first pass = transformers on CUDA BF16 |
 | **MercyLM** | `models/mercy.go` | Done — pretrained | 15.4M GPT-style LM; `examples/38_mercy_chat` |
+| **T5 encoder (T5 / v1.1 / Flan)** | `models/t5.go` | ✅ Verified 2026-11-09 (t5-v1_1-small) | Hidden states within 5.3e-6 of transformers on CPU and WebGPU; Flux / SD3 text encoder |
 | **BERT** | `models/bert.go`, `models/bert_load.go` | Done — pretrained | bge-small-en-v1.5 embeddings match PyTorch to 7.8e-7 |
 | **EmbeddingGemma 2** | `models/embeddinggemma2.go`, `embeddinggemma2_load.go` | ✅ Verified 2026-10-29 | Bidirectional Gemma 4 blocks; embeddings match transformers |
 
@@ -91,6 +92,7 @@ status are in the commits (and, up to 2026-11-09, the
 | Model | File | Status | Notes |
 |-------|------|--------|-------|
 | **Stable Diffusion 1.5** | `models/sd*.go` | Done — pretrained | CLIP text encoder + UNet2DCondition + VAE decoder + DDIM; BF16 on RTX 5060 Ti. `LoadSD15FromHF`; `examples/37_sd15_txt2img` |
+| **Flux (FLUX.1 schnell / dev)** | `models/flux.go`, `diffusion/flux.go` | ✅ Tiny-verified 2026-11-09 | MMDiT + T5 + CLIP pooled + flow-match Euler + 16-ch VAE; diffusers' FluxPipeline end to end within 3.3e-6 (CPU, WebGPU). Real 12B weights not run yet |
 
 ### 1.4 Vision (classification and detection)
 
@@ -506,10 +508,10 @@ Candle's `candle-transformers/src/models` (Oct 2026) by group; details per model
 | LLMs (dense) | llama, mistral, phi3 (+ Phi-4-mini), gemma / 2 / 3 / 4, qwen2, qwen3, deepseek2, falcon, glm4, granite | — | phi-1/2 (mixformer), gemma v1, chatglm, codegeex4, starcoder2, mpt, persimmon, stable_lm, olmo, helium, lfm2, smol, llama2_c |
 | LLMs (MoE / recurrent) | qwen3_moe | mixtral, qwen2_moe (loaders not wired), granitemoehybrid (no Mamba layers) | mamba / mamba2, rwkv v5–v7, based, recurrent_gemma |
 | GGUF | llama / qwen2 / qwen3 / mistral / qwen3moe, qwen35, muse-glimmer, moshi | — | the other Candle quantized modules |
-| Encoders | bert, embedding_gemma2 | — | distilbert, jina / nomic / modern bert, deberta, xlm-roberta, stella, nvembed, colpali, t5, marian |
+| Encoders | bert, embedding_gemma2, t5 (encoder) | — | distilbert, jina / nomic / modern bert, deberta, xlm-roberta, stella, nvembed, colpali, marian |
 | Vision | resnet, vgg, vit (+ mobilenetv2, yolov5) | — | dinov2, beit, eva2, convnext, efficientnet, mobileone, fastvit, hiera, repvgg, segformer, SAM, depth-anything, trocr |
 | Multimodal | — | clip (SD text tower) | siglip, blip, llava, moondream, paligemma, pixtral, qwen3_vl, paddleocr_vl, voxtral |
-| Diffusion | — | stable_diffusion (1.5 only) | SD 2.1 / XL, mmdit (SD3), flux, wuerstchen, z_image |
+| Diffusion | flux | stable_diffusion (1.5 only) | SD 2.1 / XL, mmdit (SD3), wuerstchen, z_image |
 | Audio | whisper, mimi, moshi (+ qwen3_asr) | — | encodec, dac, snac, metavoice, parler_tts, csm |
 
 Light-only: Qwen3.5, Muse Glimmer, Mellum, Nemotron, MiMo (+ MTP), MiniMax-Text-01, SDAR, Qwen3-ASR, EmbeddingGemma 2, Ministral 3.

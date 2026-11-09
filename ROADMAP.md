@@ -17,9 +17,10 @@ GPTQ / AWQ) is complete as of 2026-11-08 except for the items below.
 
 1. **SDXL base** — same primitives as SD 1.5 (CLIP, UNet2DCondition, VAE,
    DDIM), with dual text encoders and a bigger UNet.
-2. **Flux / SD3 (MMDiT)** — structurally different from the UNet path: joint
-   text/image transformer blocks, flow-matching schedulers. Unlocks the DiT
-   family (Qwen-Image, Z-Image, Krea, the user-queued FLUX checkpoint).
+2. **Flux on real weights / SD3** — the Flux pipeline (`diffusion.LoadFlux`) is
+   verified end to end on a tiny checkpoint; FLUX.1-schnell (12B) still needs
+   a real run (Colab, or w16 on a 32 GB host) and a CLI entry point. SD3
+   (MMDiT with CLIP-L + CLIP-G + T5) reuses most of it.
 3. **INT8 W8A8 GEMM** — `cublasGemmEx(CUBLAS_COMPUTE_32I)` for
    SmoothQuant-style int8 weights × int8 activations; today int8 is
    per-column weights × F32 activations only (`ops.MatMulInt8`).
@@ -125,7 +126,7 @@ validation bar.
 - Load-time memory: the CPU loads the checkpoint's 16-bit weights directly,
   but Gemma-4-E2B still peaks at ~16 GB working set on the iGPU.
 - MoE kernels (`moe_gemm`, routing).
-- Missing kernels: `conv1d`, `gather`, `cumsum`, compare ops, `groupnorm`,
+- Missing kernels: `conv1d`, `gather`, `cumsum`, compare ops, `clamp`,
   `where`, `flash_attention`.
 - Remaining per-token cost after dispatch batching.
 - **Perf pass:** the Q8_0 GEMV decodes 35% slower than the 16-bit one on the
