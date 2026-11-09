@@ -109,76 +109,81 @@ func loadCLIPTextSD15(repo string, dev device.Device) (*CLIPText, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg := CLIPTextSD15()
-	te, err := NewCLIPText(cfg, true, dev)
+	te, err := NewCLIPText(CLIPTextSD15(), true, dev)
 	if err != nil {
 		return nil, err
 	}
+	return te, loadCLIPTextWeights(te, weights)
+}
+
+// loadCLIPTextWeights fills a CLIPText from a transformers CLIPTextModel
+// state dict.
+func loadCLIPTextWeights(te *CLIPText, weights map[string]*tensor.Tensor) error {
 	prefix := "text_model."
 	if err := copyExactCast(te.TokenEmb.Weight, weights, prefix+"embeddings.token_embedding.weight"); err != nil {
-		return nil, err
+		return err
 	}
 	if err := copyExactCast(te.PosEmb.Weight, weights, prefix+"embeddings.position_embedding.weight"); err != nil {
-		return nil, err
+		return err
 	}
 	for i, blk := range te.Blocks {
 		p := fmt.Sprintf("%sencoder.layers.%d.", prefix, i)
 		if err := copyExactCast(blk.N1.Gamma, weights, p+"layer_norm1.weight"); err != nil {
-			return nil, err
+			return err
 		}
 		if err := copyExactCast(blk.N1.Beta, weights, p+"layer_norm1.bias"); err != nil {
-			return nil, err
+			return err
 		}
 		if err := copyExactCast(blk.Attn.QProj.W, weights, p+"self_attn.q_proj.weight"); err != nil {
-			return nil, err
+			return err
 		}
 		if err := copyExactCast(blk.Attn.QProj.B, weights, p+"self_attn.q_proj.bias"); err != nil {
-			return nil, err
+			return err
 		}
 		if err := copyExactCast(blk.Attn.KProj.W, weights, p+"self_attn.k_proj.weight"); err != nil {
-			return nil, err
+			return err
 		}
 		if err := copyExactCast(blk.Attn.KProj.B, weights, p+"self_attn.k_proj.bias"); err != nil {
-			return nil, err
+			return err
 		}
 		if err := copyExactCast(blk.Attn.VProj.W, weights, p+"self_attn.v_proj.weight"); err != nil {
-			return nil, err
+			return err
 		}
 		if err := copyExactCast(blk.Attn.VProj.B, weights, p+"self_attn.v_proj.bias"); err != nil {
-			return nil, err
+			return err
 		}
 		if err := copyExactCast(blk.Attn.OProj.W, weights, p+"self_attn.out_proj.weight"); err != nil {
-			return nil, err
+			return err
 		}
 		if err := copyExactCast(blk.Attn.OProj.B, weights, p+"self_attn.out_proj.bias"); err != nil {
-			return nil, err
+			return err
 		}
 		if err := copyExactCast(blk.N2.Gamma, weights, p+"layer_norm2.weight"); err != nil {
-			return nil, err
+			return err
 		}
 		if err := copyExactCast(blk.N2.Beta, weights, p+"layer_norm2.bias"); err != nil {
-			return nil, err
+			return err
 		}
 		if err := copyExactCast(blk.FC1.W, weights, p+"mlp.fc1.weight"); err != nil {
-			return nil, err
+			return err
 		}
 		if err := copyExactCast(blk.FC1.B, weights, p+"mlp.fc1.bias"); err != nil {
-			return nil, err
+			return err
 		}
 		if err := copyExactCast(blk.FC2.W, weights, p+"mlp.fc2.weight"); err != nil {
-			return nil, err
+			return err
 		}
 		if err := copyExactCast(blk.FC2.B, weights, p+"mlp.fc2.bias"); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	if err := copyExactCast(te.FinalNorm.Gamma, weights, prefix+"final_layer_norm.weight"); err != nil {
-		return nil, err
+		return err
 	}
 	if err := copyExactCast(te.FinalNorm.Beta, weights, prefix+"final_layer_norm.bias"); err != nil {
-		return nil, err
+		return err
 	}
-	return te, nil
+	return nil
 }
 
 // resnetKeys assigns HF ResnetBlock2D keys from `prefix` into our `r`.

@@ -17,7 +17,7 @@ var binaryOp = map[string]uint32{"add": 0, "sub": 1, "mul": 2, "div": 3, "pow": 
 var unaryOp = map[string]uint32{
 	"relu": 0, "sigmoid": 1, "tanh": 2, "neg": 3, "exp": 4, "log": 5, "sqrt": 6,
 	"gelu": 7, "silu": 8, "abs": 9, "sin": 10, "cos": 11, "tan": 12,
-	"floor": 13, "ceil": 14, "round": 15, "softplus": 16,
+	"floor": 13, "ceil": 14, "round": 15, "softplus": 16, "gelu_erf": 17,
 }
 
 func init() {

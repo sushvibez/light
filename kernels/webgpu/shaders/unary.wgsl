@@ -15,6 +15,14 @@ const GELU_COEFF: f32 = 0.044715;
 // tanh with the argument clamped to ±15, where tanh is ±1 to f32 precision.
 // The builtin is not safe everywhere: on D3D12 (HLSL tanh) some drivers
 // return NaN for large inputs (seen on Intel graphics: GPT-2's GELU).
+// erf via Abramowitz & Stegun 7.1.26 (|error| < 1.5e-7; WGSL has no erf).
+fn erf_f32(x: f32) -> f32 {
+    let a = abs(x);
+    let t = 1.0 / (1.0 + 0.3275911 * a);
+    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * exp(-a * a);
+    return sign(x) * y;
+}
+
 fn safe_tanh(x: f32) -> f32 {
     return tanh(clamp(x, -15.0, 15.0));
 }
@@ -53,6 +61,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 out[idx] = log(1.0 + exp(x));
             }
         }
+        case 17u: { out[idx] = 0.5 * x * (1.0 + erf_f32(x * 0.70710678118654752)); } // exact GELU
         default: {}
     }
 }

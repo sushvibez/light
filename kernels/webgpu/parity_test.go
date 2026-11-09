@@ -202,7 +202,7 @@ func TestUnaryParity(t *testing.T) {
 	ap := mustNew(t, pos, []int{7, 111}, cpu)
 	for name, fn := range map[string]func(*tensor.Tensor) (*tensor.Tensor, error){
 		"neg": ops.Neg, "exp": ops.Exp, "relu": ops.Relu, "sigmoid": ops.Sigmoid,
-		"tanh": ops.Tanh, "silu": ops.SiLU, "gelu": ops.Gelu, "abs": ops.Abs,
+		"tanh": ops.Tanh, "silu": ops.SiLU, "gelu": ops.Gelu, "gelu_erf": ops.GeluErf, "abs": ops.Abs,
 		"sin": ops.Sin, "cos": ops.Cos, "floor": ops.Floor, "ceil": ops.Ceil, "round": ops.Round,
 	} {
 		t.Run(name, func(t *testing.T) { parity1(t, name, a, fn, 1e-4) })
@@ -290,6 +290,26 @@ func TestNormParity(t *testing.T) {
 	})
 	t.Run("rmsnorm", func(t *testing.T) {
 		parity2(t, "rmsnorm", x, g, func(a, w *tensor.Tensor) (*tensor.Tensor, error) { return ops.RMSNorm(a, w, 1e-6) }, 1e-4)
+	})
+	t.Run("groupnorm", func(t *testing.T) {
+		gpu := gpuOrSkip(t)
+		for _, c := range []struct{ N, C, H, W, G int }{{2, 64, 5, 7, 32}, {1, 32, 33, 31, 1}, {1, 128, 3, 3, 32}} {
+			xs := mustNew(t, randF32(c.N*c.C*c.H*c.W, 63), []int{c.N, c.C, c.H, c.W}, cpu)
+			gs := mustNew(t, randF32(c.C, 64), []int{c.C}, cpu)
+			bs := mustNew(t, randF32(c.C, 65), []int{c.C}, cpu)
+			cpuOut, err := ops.GroupNorm(xs, gs, bs, c.G, 1e-6)
+			if err != nil {
+				t.Fatal(err)
+			}
+			xG, _ := xs.To(gpu)
+			gG, _ := gs.To(gpu)
+			bG, _ := bs.To(gpu)
+			gpuOut, err := ops.GroupNorm(xG, gG, bG, c.G, 1e-6)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertClose(t, "groupnorm", toCPUF32(t, cpuOut), toCPUF32(t, gpuOut), 1e-4)
+		}
 	})
 }
 
