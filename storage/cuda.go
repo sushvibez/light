@@ -3,7 +3,9 @@
 package storage
 
 import (
+	"runtime"
 	"sync"
+	"sync/atomic"
 
 	"light/device"
 	"light/dtype"
@@ -87,10 +89,15 @@ type cudaCachingPool struct {
 	free   map[poolKey][]uintptr
 	cached int // bytes held in free lists
 	order  []poolKey
+	fresh  atomic.Int64 // bytes of cudaMalloc since the last forced GC
 }
 
 // PoolCapBytes is the most device memory the allocator keeps cached.
 var PoolCapBytes = 2 << 30
+
+// FreshBytesPerGC is how much device memory may be cudaMalloc'd between
+// forced garbage collections (0 disables them); see cudaCachingPool.alloc.
+var FreshBytesPerGC int64 = 1 << 30
 
 // sizeClass rounds a byte count to its class: 512-byte steps below 1 MB,
 // 1 MB steps above, so nearly-equal activations share blocks.
@@ -116,6 +123,16 @@ func (p *cudaCachingPool) alloc(ord, bytes int) (uintptr, int, error) {
 		return ptr, class, nil
 	}
 	p.mu.Unlock()
+	// Fresh device memory. Buffers come back to the pool only through GC
+	// cleanups, and a long prefill allocates gigabytes of short-lived
+	// activations without growing the Go heap enough to trigger one, so
+	// every FreshBytesPerGC of misses forces a collection: it bounds the
+	// peak at roughly the live set plus that budget (a 543-token Ministral
+	// prefill held 5 GB of dead activations otherwise).
+	if FreshBytesPerGC > 0 && p.fresh.Add(int64(class)) >= FreshBytesPerGC {
+		p.fresh.Store(0)
+		runtime.GC()
+	}
 	ptr, err := cudart.Malloc(uintptr(class))
 	if err != nil {
 		// Out of memory: drop the cache and retry once.
