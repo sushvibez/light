@@ -2,6 +2,8 @@ package diffusion
 
 import (
 	"encoding/json"
+	"image"
+	"image/png"
 	"math"
 	"os"
 	"slices"
@@ -34,6 +36,13 @@ func TestFluxPipelineTinyMatchesDiffusers(t *testing.T) {
 		Pooled       []float32 `json:"pooled"`
 		Sigmas       []float32 `json:"sigmas"`
 		Image        []float32 `json:"image"`
+		I2IHeight    int       `json:"i2i_height"`
+		I2IWidth     int       `json:"i2i_width"`
+		I2ISteps     int       `json:"i2i_steps"`
+		I2IStrength  float32   `json:"i2i_strength"`
+		I2INoise     []float32 `json:"i2i_noise"`
+		I2INoiseSh   []int     `json:"i2i_noise_shape"`
+		I2IImage     []float32 `json:"i2i_image"`
 	}
 	if err := json.Unmarshal(raw, &ref); err != nil {
 		t.Fatal(err)
@@ -88,6 +97,33 @@ func TestFluxPipelineTinyMatchesDiffusers(t *testing.T) {
 			maxDiff(t, "T5 states", res.PromptEmbeds, ref.PromptEmbeds, 1e-4)
 			maxDiff(t, "CLIP pooled", res.Pooled, ref.Pooled, 1e-4)
 			maxDiff(t, "image", res.Image, ref.Image, 1e-4)
+
+			noise, err := tensor.New(ref.I2INoise, ref.I2INoiseSh, dev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err = p.Generate(FluxOptions{Prompt: ref.Prompt, Width: ref.I2IWidth, Height: ref.I2IHeight,
+				Steps: ref.I2ISteps, MaxSeqLen: ref.MaxSeqLen, Noise: noise,
+				Img2Img: Img2Img{Image: refPNG(t), Strength: ref.I2IStrength}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			maxDiff(t, "img2img image", res.Image, ref.I2IImage, 1e-4)
 		})
 	}
+}
+
+// refPNG is flux2-ref.png, the init / reference image of the pipeline tests.
+func refPNG(t *testing.T) image.Image {
+	t.Helper()
+	f, err := os.Open("testdata/flux2-ref.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	img, err := png.Decode(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return img
 }

@@ -114,6 +114,11 @@ type ZImageOptions struct {
 	MaxSeqLen      int     // prompt tokens kept at most, default 512
 	Seed           uint64
 	Latents        *tensor.Tensor // (C, H/vae·2, W/vae·2) initial noise, to match a reference run
+	// Img2Img, when its Image is set, starts from that image noised to the
+	// schedule's strength point (ZImageImg2ImgPipeline); Width / Height then
+	// default to the image's. Noise is the (C, h, w) noise (seeded when nil).
+	Img2Img Img2Img
+	Noise   *tensor.Tensor
 }
 
 // ZImageResult is a generated image and what produced it.
@@ -162,6 +167,9 @@ func (p *ZImage) Generate(o ZImageOptions) (*ZImageResult, error) {
 	if o.MaxSeqLen == 0 {
 		o.MaxSeqLen = 512
 	}
+	if o.Img2Img.Image != nil && o.Width == 0 && o.Height == 0 {
+		o.Width, o.Height = defaultSize(o.Img2Img.Image, p.vaeScale*2)
+	}
 	if o.Width == 0 {
 		o.Width = 1024
 	}
@@ -181,23 +189,42 @@ func (p *ZImage) Generate(o ZImageOptions) (*ZImageResult, error) {
 	C := p.Transformer.Cfg.InChannels
 	h := 2 * (o.Height / (p.vaeScale * 2))
 	w := 2 * (o.Width / (p.vaeScale * 2))
+	sigmas := p.Scheduler.Sigmas(o.Steps, (h/2)*(w/2))
+	first := 0
 	x := o.Latents
 	if x == nil {
-		rng := rand.New(rand.NewPCG(o.Seed, o.Seed^0x9e3779b97f4a7c15))
-		noise := make([]float32, C*h*w)
-		for i := range noise {
-			noise[i] = float32(rng.NormFloat64())
+		if x = o.Noise; x == nil {
+			rng := rand.New(rand.NewPCG(o.Seed, o.Seed^0x9e3779b97f4a7c15))
+			noise := make([]float32, C*h*w)
+			for i := range noise {
+				noise[i] = float32(rng.NormFloat64())
+			}
+			if x, err = tensor.New(noise, []int{C, h, w}, p.Dev); err != nil {
+				return nil, err
+			}
 		}
-		if x, err = tensor.New(noise, []int{C, h, w}, p.Dev); err != nil {
-			return nil, err
+		if o.Img2Img.Image != nil {
+			z, err := imageLatents(p.VAE, o.Img2Img.Image, w*p.vaeScale, h*p.vaeScale, p.Dev)
+			if err != nil {
+				return nil, err
+			}
+			if z, err = z.Reshape(C, h, w); err != nil {
+				return nil, err
+			}
+			first = startStep(o.Steps, o.Img2Img.Strength)
+			if first >= o.Steps {
+				return nil, fmt.Errorf("z-image: strength %g leaves no steps", o.Img2Img.Strength)
+			}
+			if x, err = noised(z, x, sigmas[first]); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if x.Dim(0) != C || x.Dim(1) != h || x.Dim(2) != w {
 		return nil, fmt.Errorf("z-image: latents %v, want (%d, %d, %d)", x.Shape(), C, h, w)
 	}
-	sigmas := p.Scheduler.Sigmas(o.Steps, (h/2)*(w/2))
 	scalar := func(v float32) (*tensor.Tensor, error) { return tensor.New([]float32{v}, []int{1}, p.Dev) }
-	for i := range o.Steps {
+	for i := first; i < o.Steps; i++ {
 		t := sigmas[i] * float32(p.Scheduler.NumTrainTimesteps)
 		tm := (1000 - t) / 1000
 		v, err := p.Transformer.Forward(x, cap, tm)

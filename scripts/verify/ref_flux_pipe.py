@@ -9,7 +9,9 @@ replaced by a seeded tiny AutoencoderKL that uses 32 GroupNorm groups (the
 tiny pipe's VAE uses 1, which Light's VAE blocks do not take), then runs
 FluxPipeline for 2 steps at 32 x 32 with explicit packed latents and writes
 the token ids, text embeddings, sigmas and the final image (output_type
-"pt", in [0, 1]) to <out.json>.
+"pt", in [0, 1]) to <out.json>. Then runs FluxImg2ImgPipeline on
+<out_dir>/../flux2-ref.png (80 x 64, so no resize) at strength 0.5 for 3
+steps, with the VAE's mode latents and explicit noise ("i2i_*").
 """
 import json, os, shutil, sys
 import torch
@@ -31,9 +33,6 @@ with torch.no_grad():
         p.add_(0.05 * torch.randn_like(p))
 shutil.rmtree(os.path.join(out_dir, "vae"))
 vae.save_pretrained(os.path.join(out_dir, "vae"), safe_serialization=True)
-from safetensors.torch import load_file, save_file
-f = os.path.join(out_dir, "vae", "diffusion_pytorch_model.safetensors")
-save_file({k: v for k, v in load_file(f).items() if k.startswith("decoder.")}, f)
 
 pipe = FluxPipeline.from_pretrained(out_dir, torch_dtype=torch.float32)
 pipe.vae = vae
@@ -48,7 +47,26 @@ with torch.no_grad():
                latents=latents, output_type="pt").images
 print("image", tuple(img.shape), "mean", img.mean().item(), "sigmas", pipe.scheduler.sigmas.tolist())
 r = lambda a: [round(v, 7) for v in a.flatten().tolist()]
+
+sigmas = pipe.scheduler.sigmas.tolist()  # before the img2img run resets the shared scheduler
+
+# img2img: deterministic encode (mode) and injected noise.
+import diffusers.pipelines.flux.pipeline_flux_img2img as m
+from diffusers import FluxImg2ImgPipeline
+from PIL import Image
+m.retrieve_latents = lambda enc, generator=None, sample_mode="sample": enc.latent_dist.mode()
+torch.manual_seed(4)
+noise = torch.randn(1, 1, 64, 80)
+m.randn_tensor = lambda shape, generator=None, device=None, dtype=None: noise.clone()
+i2p = FluxImg2ImgPipeline(**pipe.components)
+ref_path = os.path.join(os.path.dirname(os.path.abspath(out_dir)), "flux2-ref.png")
+with torch.no_grad():
+    i2 = i2p(prompt=prompt, image=Image.open(ref_path).convert("RGB"), height=64, width=80, strength=0.5,
+             num_inference_steps=3, max_sequence_length=max_len, output_type="pt").images
+print("i2i image", tuple(i2.shape), "mean", i2.mean().item())
+i2i = {"i2i_height": 64, "i2i_width": 80, "i2i_steps": 3, "i2i_strength": 0.5, "i2i_noise": r(noise),
+       "i2i_noise_shape": list(noise.shape), "i2i_image": r(i2)}
 json.dump({"prompt": prompt, "height": H, "width": W, "steps": steps, "max_seq_len": max_len,
            "clip_ids": clip_ids, "t5_ids": t5_ids, "latents": r(latents), "latents_shape": list(latents.shape),
-           "prompt_embeds": r(pe), "pooled": r(pooled), "sigmas": pipe.scheduler.sigmas.tolist(),
-           "image": r(img), "image_shape": list(img.shape)}, open(out_json, "w"))
+           "prompt_embeds": r(pe), "pooled": r(pooled), "sigmas": sigmas,
+           "image": r(img), "image_shape": list(img.shape), **i2i}, open(out_json, "w"))

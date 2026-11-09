@@ -35,6 +35,12 @@ func TestZImagePipelineTinyMatchesDiffusers(t *testing.T) {
 		Caption      []float32 `json:"caption_f64"`
 		Sigmas       []float32 `json:"sigmas"`
 		Image        []float32 `json:"image"`
+		I2ISteps     int       `json:"i2i_steps"`
+		I2IStrength  float32   `json:"i2i_strength"`
+		I2INoise     []float32 `json:"i2i_noise"`
+		I2INoiseSh   []int     `json:"i2i_noise_shape"`
+		I2IImage     []float32 `json:"i2i_image"`
+		I2IImageSh   []int     `json:"i2i_image_shape"`
 	}
 	if err := json.Unmarshal(raw, &ref); err != nil {
 		t.Fatal(err)
@@ -93,6 +99,20 @@ func TestZImagePipelineTinyMatchesDiffusers(t *testing.T) {
 			}
 			cmp(t, "caption", res.Caption, ref.Caption, 1e-5)
 			cmp(t, "image", res.Image, ref.Image, 1e-4)
+
+			noise, err := tensor.New(ref.I2INoise, ref.I2INoiseSh, dev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err = p.Generate(ZImageOptions{Prompt: ref.Prompt, Steps: ref.I2ISteps, Guidance: ref.Guidance,
+				MaxSeqLen: ref.MaxSeqLen, Noise: noise, Img2Img: Img2Img{Image: refPNG(t), Strength: ref.I2IStrength}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(res.Image.Shape().Dims(), ref.I2IImageSh) {
+				t.Errorf("img2img image %v, want %v", res.Image.Shape(), ref.I2IImageSh)
+			}
+			cmp(t, "img2img image", res.Image, ref.I2IImage, 1e-4)
 		})
 	}
 }

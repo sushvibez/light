@@ -118,8 +118,9 @@ Light already has. Sizes are BF16 safetensors.
    the Flux pipeline and the Qwen3 decoder.
 2. **flux-3-image-klein** (queued; gated; 11 GB DiT + 8.9 GB encoder):
    right after FLUX.2-klein, once its architecture is confirmed.
-3. **Image-to-image for every pipeline**: VAE encoder + strength (SDEdit)
-   for Flux, FLUX.2, SD 1.5 and SDXL.
+3. **Image-to-image for every pipeline**: VAE encoder + strength (SDEdit).
+   Done for FLUX.1 and Z-Image (`light image -image -strength`); FLUX.2
+   klein edits via reference images instead. SD 1.5 / SDXL left.
 4. **Z-Image-Turbo** (most-liked text-to-image; Apache-2.0; 6B single-stream
    DiT, same Qwen3-4B encoder, 8 steps).
 5. **LFM3-1.7B** (queued; short-conv + full / sliding attention hybrid,

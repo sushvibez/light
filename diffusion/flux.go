@@ -95,6 +95,11 @@ type FluxOptions struct {
 	// Latents, when set, is the initial packed noise (1, S_img, C·4) instead
 	// of the seeded draw (used to match a reference run).
 	Latents *tensor.Tensor
+	// Img2Img, when its Image is set, starts from that image noised to the
+	// schedule's strength point (FluxImg2ImgPipeline). Noise is then the
+	// unpacked (1, C, h, w) noise (seeded when nil).
+	Img2Img Img2Img
+	Noise   *tensor.Tensor
 }
 
 // FluxResult is a generated image and what produced it.
@@ -188,15 +193,35 @@ func (p *Flux) Generate(o FluxOptions) (*FluxResult, error) {
 	h := 2 * (o.Height / (p.vaeScale * 2))
 	w := 2 * (o.Width / (p.vaeScale * 2))
 	S := (h / 2) * (w / 2)
+	sigmas := p.Scheduler.Sigmas(o.Steps, S)
+	first := 0
 	x := o.Latents
 	if x == nil {
-		rng := rand.New(rand.NewPCG(o.Seed, o.Seed^0x9e3779b97f4a7c15))
-		noise := make([]float32, C*h*w)
-		for i := range noise {
-			noise[i] = float32(rng.NormFloat64())
+		n := o.Noise
+		if n == nil {
+			rng := rand.New(rand.NewPCG(o.Seed, o.Seed^0x9e3779b97f4a7c15))
+			noise := make([]float32, C*h*w)
+			for i := range noise {
+				noise[i] = float32(rng.NormFloat64())
+			}
+			if n, err = tensor.New(noise, []int{1, C, h, w}, p.Dev); err != nil {
+				return nil, err
+			}
 		}
-		n, err := tensor.New(noise, []int{1, C, h / 2, 2, w / 2, 2}, p.Dev)
-		if err != nil {
+		if o.Img2Img.Image != nil {
+			z, err := imageLatents(p.VAE, o.Img2Img.Image, w*p.vaeScale, h*p.vaeScale, p.Dev)
+			if err != nil {
+				return nil, err
+			}
+			first = startStep(o.Steps, o.Img2Img.Strength)
+			if first >= o.Steps {
+				return nil, fmt.Errorf("flux: strength %g leaves no steps", o.Img2Img.Strength)
+			}
+			if n, err = noised(z, n, sigmas[first]); err != nil {
+				return nil, err
+			}
+		}
+		if n, err = n.Reshape(1, C, h/2, 2, w/2, 2); err != nil {
 			return nil, err
 		}
 		if n, err = n.Permute(0, 2, 4, 1, 3, 5); err != nil {
@@ -221,12 +246,11 @@ func (p *Flux) Generate(o FluxOptions) (*FluxResult, error) {
 	}
 	txtIDs := make([]float32, o.MaxSeqLen*3)
 
-	sigmas := p.Scheduler.Sigmas(o.Steps, S)
 	var guidance []float32
 	if cfg.GuidanceEmbeds {
 		guidance = []float32{o.Guidance}
 	}
-	for i := range o.Steps {
+	for i := first; i < o.Steps; i++ {
 		t := sigmas[i] * float32(p.Scheduler.NumTrainTimesteps) // scheduler timesteps
 		v, err := p.Transformer.Forward(models.FluxInputs{
 			Image: x, Text: embeds, Pooled: pooled,

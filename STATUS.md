@@ -92,7 +92,9 @@ status are in the commits (and, up to 2026-11-09, the
 | Model | File | Status | Notes |
 |-------|------|--------|-------|
 | **Stable Diffusion 1.5** | `models/sd*.go` | Done — pretrained | CLIP text encoder + UNet2DCondition + VAE decoder + DDIM; BF16 on RTX 5060 Ti. `LoadSD15FromHF`; `examples/37_sd15_txt2img` |
-| **Flux (FLUX.1 schnell / dev)** | `models/flux.go`, `diffusion/flux.go` | ✅ Tiny-verified 2026-11-09 | MMDiT + T5 + CLIP pooled + flow-match Euler + 16-ch VAE; diffusers' FluxPipeline end to end within 3.3e-6 (CPU, WebGPU). Real 12B weights not run yet |
+| **Flux (FLUX.1 schnell / dev)** | `models/flux.go`, `diffusion/flux.go` | ✅ Tiny-verified 2026-11-09 | MMDiT + T5 + CLIP pooled + flow-match Euler + 16-ch VAE; diffusers' FluxPipeline within 3.3e-6, FluxImg2ImgPipeline within 6.4e-6 (CPU, WebGPU). Real 12B weights not run yet |
+| **FLUX.2 klein** | `models/flux2.go`, `diffusion/flux2.go` | ✅ Tiny-verified 2026-11-09 | Qwen3 encoder + FLUX.2 DiT; text-to-image within 7.4e-6, multi-reference editing within 8.9e-6 (CPU, WebGPU) |
+| **Z-Image (Turbo)** | `models/zimage.go`, `diffusion/zimage.go` | ✅ Tiny-verified 2026-11-09 | Qwen3 encoder + S3-DiT; ZImagePipeline within 4.6e-5, img2img within 6.9e-5 (CPU, WebGPU) |
 
 ### 1.4 Vision (classification and detection)
 

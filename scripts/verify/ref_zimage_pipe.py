@@ -11,7 +11,10 @@ ZImageTransformer2DModel and a tiny 16-channel-style AutoencoderKL with
 scaling / shift factors - saves it (without the tokenizer) to <out_dir>
 and runs it with classifier-free guidance 2.0 for 3 steps at 64 x 64 from
 explicit latents. Writes the prompt ids, the caption features (in float64
-and transformers' F32), the sigmas and the final image to <out.json>.
+and transformers' F32), the sigmas and the final image to <out.json>. Then
+runs ZImageImg2ImgPipeline on <out_dir>/../flux2-ref.png (80 x 64, the
+default size) at strength 0.6, with the VAE's mode latents and explicit
+noise ("i2i_*").
 """
 import json, os, shutil, sys
 import torch
@@ -56,8 +59,6 @@ if os.path.exists(out_dir):
 pipe.save_pretrained(out_dir, safe_serialization=True)
 f = os.path.join(out_dir, "text_encoder", "model.safetensors")
 save_file({k: v.to(torch.bfloat16) for k, v in load_file(f).items()}, f, metadata={"format": "pt"})
-f = os.path.join(out_dir, "vae", "diffusion_pytorch_model.safetensors")
-save_file({k: v for k, v in load_file(f).items() if k.startswith("decoder.")}, f)
 shutil.rmtree(os.path.join(out_dir, "tokenizer"))  # the Go test reads klein's (11 MB)
 
 prompt, H, W, steps, max_len = "a red cube on a blue table", 64, 64, 3, 64
@@ -75,7 +76,23 @@ with torch.no_grad():
     cap64 = te64(input_ids=torch.tensor([ids]), output_hidden_states=True).hidden_states[-2][0]
 print("ids", ids, "image", tuple(img.shape), "sigmas", sigmas)
 r = lambda a: [round(v, 7) for v in a.flatten().tolist()]
+
+import diffusers.pipelines.z_image.pipeline_z_image_img2img as m
+from diffusers import ZImageImg2ImgPipeline
+from PIL import Image
+m.retrieve_latents = lambda enc, generator=None, sample_mode="sample": enc.latent_dist.mode()
+torch.manual_seed(11)
+noise = torch.randn(1, 4, 32, 40)
+m.randn_tensor = lambda shape, generator=None, device=None, dtype=None: noise.clone()
+i2p = ZImageImg2ImgPipeline(**pipe.components)
+ref_path = os.path.join(os.path.dirname(os.path.abspath(out_dir)), "flux2-ref.png")
+with torch.no_grad():
+    i2 = i2p(prompt=prompt, image=Image.open(ref_path).convert("RGB"), strength=0.6, num_inference_steps=3,
+             guidance_scale=2.0, max_sequence_length=max_len, output_type="pt").images
+print("i2i image", tuple(i2.shape), "mean", i2.mean().item())
+i2i = {"i2i_steps": 3, "i2i_strength": 0.6, "i2i_noise": r(noise[0]), "i2i_noise_shape": list(noise.shape[1:]),
+       "i2i_image": r(i2), "i2i_image_shape": list(i2.shape)}
 json.dump({"prompt": prompt, "height": H, "width": W, "steps": steps, "max_seq_len": max_len, "guidance": 2.0,
            "text": text, "ids": ids, "latents": r(latents[0]), "latents_shape": list(latents.shape[1:]),
-           "caption_f64": r(cap64), "sigmas": sigmas, "image": r(img), "image_shape": list(img.shape)},
+           "caption_f64": r(cap64), "sigmas": sigmas, "image": r(img), "image_shape": list(img.shape), **i2i},
           open(out_json, "w"))
