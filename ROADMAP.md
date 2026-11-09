@@ -107,17 +107,36 @@ GPTQ / AWQ) is complete as of 2026-11-08 except for the items below.
     RoI Align / RoI Pool.
   - Llama-2 7B (same loader as Llama-3; needs the checkpoint).
 
-## 3. User-queued targets (2026-10-28, in the order given)
+## 3. Next models (2026-11-09, in order)
 
-Each starts with a config / architecture inspection, then the usual
-validation bar.
+From Hugging Face downloads / trending per category, weighed by what fits
+the laptop (31 GB RAM, Intel iGPU) and the desktop (16 GB GPU) and by what
+Light already has. Sizes are BF16 safetensors.
 
-1. **LTX-2.5** — video DiT + video VAE.
-2. **`black-forest-labs/flux-3-image-klein-comfy`** — FLUX image model,
-   ComfyUI checkpoint layout (after §1.2).
-3. **`XHToken/Spark-X2.6-4B`**
-4. **LFM3** (Liquid AI)
-5. **`HelpingAI/PixelGen`**
+1. **FLUX.2-klein-4B** (text-to-image and multi-reference editing in one
+   model; Apache-2.0; 7.8 GB DiT + Qwen3-4B text encoder 8 GB). Builds on
+   the Flux pipeline and the Qwen3 decoder.
+2. **flux-3-image-klein** (queued; gated; 11 GB DiT + 8.9 GB encoder):
+   right after FLUX.2-klein, once its architecture is confirmed.
+3. **Image-to-image for every pipeline**: VAE encoder + strength (SDEdit)
+   for Flux, FLUX.2, SD 1.5 and SDXL.
+4. **Z-Image-Turbo** (most-liked text-to-image; Apache-2.0; 6B single-stream
+   DiT, same Qwen3-4B encoder, 8 steps).
+5. **LFM3-1.7B** (queued; short-conv + full / sliding attention hybrid,
+   sandwich norms), then LFM3-VL-2B.
+6. **Spark-X2.6-4B** (queued; custom code: gated attention output, head
+   dim 256).
+7. **Wan2.1-T2V-1.3B**, then **Wan2.2-TI2V-5B** (text / image to video;
+   Apache-2.0; UMT5 encoder): the video DiT + 3D VAE path.
+8. **Qwen-Image-2.1 / Turbo** (most-downloaded text-to-image; 7B DiT +
+   Qwen3-VL-8B encoder, ~32 GB: Q8_0 / desktop / Colab; needs Qwen3-VL
+   deepstack).
+9. Quick non-image wins: Kokoro-82M (TTS), Qwen3-Embedding-0.6B,
+   Depth-Anything-V2, BiRefNet / RMBG-2.0 (background removal), Florence-2.
+10. **LTX-2.5** (queued): 76 GB DiT + 24 GB encoder; Colab only, after Wan
+    proves the video path.
+11. **PixelGen** (queued): an SDXL fine-tune; works once SDXL lands
+    (desktop).
 
 ## 4. Backends
 
