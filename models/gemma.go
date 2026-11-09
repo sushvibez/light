@@ -354,6 +354,27 @@ func mulScalarF32(x *tensor.Tensor, s float64) (*tensor.Tensor, error) {
 	return ops.Cast(x32, dt)
 }
 
+// divScalarF32 is x / s computed in F32 and rounded once to x's dtype
+// (PyTorch's 16-bit tensor ÷ Python float).
+func divScalarF32(x *tensor.Tensor, s float64) (*tensor.Tensor, error) {
+	st, err := tensor.New([]float32{float32(s)}, []int{1}, x.Device())
+	if err != nil {
+		return nil, err
+	}
+	if x.DType() == dtype.F32 {
+		return ops.Div(x, st)
+	}
+	dt := x.DType()
+	x32, err := ops.Cast(x, dtype.F32)
+	if err != nil {
+		return nil, err
+	}
+	if x32, err = ops.Div(x32, st); err != nil {
+		return nil, err
+	}
+	return ops.Cast(x32, dt)
+}
+
 // softcap returns c·tanh(x/c).
 func softcap(x *tensor.Tensor, c float64) (*tensor.Tensor, error) {
 	inv, err := tensor.New([]float32{float32(1 / c)}, []int{1}, x.Device())

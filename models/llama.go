@@ -45,8 +45,15 @@ type LlamaConfig struct {
 	SlidingLayers      []bool  // optional per-layer switch (len NumLayers); nil = every layer uses SlidingWindow. Gemma alternates local/global layers.
 	QKNorm             bool    // Qwen3: RMSNorm over the head dim of Q and K (per layer weights) before RoPE
 	PostNorms          bool    // GLM-4-0414: RMSNorm on the attention and MLP outputs before each residual add
-	LayerNorm1P        bool    // Nemotron: LayerNorm (mean-centred, with bias) instead of RMSNorm; loaders store gamma as 1 + w
-	ReLU2MLP           bool    // Nemotron: non-gated MLP down(relu(up(x))²); GateProj is nil
+	// Granite scaling (0 = off): token embeddings × EmbedMultiplier, the
+	// attention softmax scale AttnScale instead of 1/√HeadDim, residual
+	// branches × ResidualMultiplier before each add, logits ÷ LogitsScaling.
+	EmbedMultiplier    float64
+	AttnScale          float64
+	ResidualMultiplier float64
+	LogitsScaling      float64
+	LayerNorm1P        bool // Nemotron: LayerNorm (mean-centred, with bias) instead of RMSNorm; loaders store gamma as 1 + w
+	ReLU2MLP           bool // Nemotron: non-gated MLP down(relu(up(x))²); GateProj is nil
 	// Mixture-of-experts FFN (Qwen3-MoE / Mixtral / DeepSeek-style). NumExperts
 	// > 0 turns the FFN of every layer selected by DecoderSparseStep /
 	// MLPOnlyLayers into an nn.SparseMoE with NumExpertsPerTok routed experts
@@ -487,6 +494,9 @@ func NewLlama(cfg LlamaConfig, dev device.Device) (*Llama, error) {
 		return nil, err
 	}
 	scaleVal := float32(1.0 / math.Sqrt(float64(cfg.HeadDim)))
+	if cfg.AttnScale != 0 {
+		scaleVal = float32(cfg.AttnScale)
+	}
 	scaleT, err := tensor.New([]float32{scaleVal}, []int{1}, dev)
 	if err != nil {
 		return nil, err
@@ -568,6 +578,11 @@ func (m *Llama) ForwardWithCache(tokens *tensor.Tensor, cache *KVCache) (*tensor
 	if err != nil {
 		return nil, err
 	}
+	if m.Cfg.EmbedMultiplier != 0 {
+		if h, err = mulScalarF32(h, m.Cfg.EmbedMultiplier); err != nil {
+			return nil, err
+		}
+	}
 	return m.ForwardEmbeds(h, cache)
 }
 
@@ -620,6 +635,11 @@ func (m *Llama) ForwardEmbeds(h *tensor.Tensor, cache *KVCache) (*tensor.Tensor,
 	logits, err := m.LMHead.Forward(h) // (B, T, V)
 	if err != nil {
 		return nil, err
+	}
+	if m.Cfg.LogitsScaling != 0 {
+		if logits, err = divScalarF32(logits, m.Cfg.LogitsScaling); err != nil {
+			return nil, err
+		}
 	}
 	// In BF16 mode the LM-head output is BF16; cast to F32 so callers (which
 	// sample on CPU via MustSlice[float32]) can read it directly. The cost
@@ -827,7 +847,7 @@ attend:
 			return nil, err
 		}
 	}
-	x, err = autograd.Add(x, attnOut)
+	x, err = m.residual(x, attnOut)
 	if err != nil {
 		return nil, err
 	}
@@ -851,7 +871,7 @@ attend:
 				return nil, err
 			}
 		}
-		return autograd.Add(x, mlpOut)
+		return m.residual(x, mlpOut)
 	}
 	if blk.GateProj == nil { // Nemotron: down(relu(up(h))²)
 		up, err := blk.UpProj.Forward(h)
@@ -868,7 +888,7 @@ attend:
 		if err != nil {
 			return nil, err
 		}
-		return autograd.Add(x, mlpOut)
+		return m.residual(x, mlpOut)
 	}
 	gate, err := blk.GateProj.Forward(h)
 	if err != nil {
@@ -895,7 +915,20 @@ attend:
 			return nil, err
 		}
 	}
-	return autograd.Add(x, mlpOut)
+	return m.residual(x, mlpOut)
+}
+
+// residual is x + branch, the branch scaled by ResidualMultiplier first
+// when set (Granite: residual + hidden · multiplier, rounded per op as
+// transformers does in BF16).
+func (m *Llama) residual(x, branch *tensor.Tensor) (*tensor.Tensor, error) {
+	if r := m.Cfg.ResidualMultiplier; r != 0 {
+		var err error
+		if branch, err = mulScalarF32(branch, r); err != nil {
+			return nil, err
+		}
+	}
+	return autograd.Add(x, branch)
 }
 
 // applyRoPE rotates x by position: plain RoPE on Cfg.RopeBase, or the scaled
