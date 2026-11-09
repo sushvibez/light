@@ -234,3 +234,52 @@ func TestVAEEncoderTinyMatchesDiffusers(t *testing.T) {
 		}
 	}
 }
+
+// A seeded tiny-random ZImageTransformer2DModel (caption and image both
+// padded to 32 with the learned pad tokens; scripts/verify/ref_flux.py
+// --make-tiny-zimage) against diffusers' forward, on the CPU and WebGPU.
+func TestZImageTransformerTinyMatchesDiffusers(t *testing.T) {
+	raw, err := os.ReadFile("testdata/refs/zimage-tiny.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ref struct {
+		Latents []float32 `json:"latents"`
+		LShape  []int     `json:"latents_shape"`
+		Caption []float32 `json:"caption"`
+		CShape  []int     `json:"caption_shape"`
+		T       float32   `json:"t"`
+		Out     []float32 `json:"out"`
+	}
+	if err := json.Unmarshal(raw, &ref); err != nil {
+		t.Fatal(err)
+	}
+	devs := []device.Device{device.CPU()}
+	if g, err := device.WebGPU(0); err == nil {
+		devs = append(devs, g)
+	}
+	for _, dev := range devs {
+		m, err := LoadZImageTransformer("testdata/zimage-tiny", dev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lat, _ := tensor.New(ref.Latents, ref.LShape, dev)
+		cp, _ := tensor.New(ref.Caption, ref.CShape, dev)
+		y, err := m.Forward(lat, cp, ref.T)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if y, err = y.To(device.CPU()); err != nil {
+			t.Fatal(err)
+		}
+		got := tensor.MustSlice[float32](y)
+		md := 0.0
+		for i := range got {
+			md = math.Max(md, math.Abs(float64(got[i]-ref.Out[i])))
+		}
+		t.Logf("%v: max |light - diffusers| %.3g over %d values", dev, md, len(got))
+		if len(got) != len(ref.Out) || md > 1e-4 {
+			t.Errorf("%v: output differs by %.3g", dev, md)
+		}
+	}
+}

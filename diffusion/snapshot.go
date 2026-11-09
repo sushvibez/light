@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"light/hub"
 )
@@ -54,8 +55,18 @@ func Snapshot(repo string) (string, error) {
 		if strings.HasSuffix(f.Name, ".msgpack") || strings.HasSuffix(f.Name, ".h5") || strings.HasSuffix(f.Name, ".onnx") {
 			continue
 		}
-		if _, err := hub.Download(repo, "main", f.Name); err != nil {
-			return "", fmt.Errorf("diffusion: %s/%s: %w", repo, f.Name, err)
+		// Large files over flaky connections: retry, resuming the partial file.
+		var derr error
+		for attempt := range 4 {
+			if attempt > 0 {
+				time.Sleep(time.Duration(attempt) * 2 * time.Second)
+			}
+			if _, derr = hub.Download(repo, "main", f.Name); derr == nil {
+				break
+			}
+		}
+		if derr != nil {
+			return "", fmt.Errorf("diffusion: %s/%s: %w", repo, f.Name, derr)
 		}
 	}
 	return filepath.Dir(idx), nil

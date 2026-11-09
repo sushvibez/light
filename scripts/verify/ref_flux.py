@@ -5,6 +5,7 @@
     .venv/bin/python scripts/verify/ref_flux.py --make-tiny-vae <dir> <out.json>
     .venv/bin/python scripts/verify/ref_flux.py --make-tiny-flux2 <dir> <out.json>
     .venv/bin/python scripts/verify/ref_flux.py --make-tiny-vae-enc <dir> <out.json>
+    .venv/bin/python scripts/verify/ref_flux.py --make-tiny-zimage <dir> <out.json>
 
 Writes a seeded tiny-random FluxTransformer2DModel (2 double + 2 single
 blocks, guidance embedder, 3-axis RoPE) to <dir> with save_pretrained, runs
@@ -38,6 +39,30 @@ if sys.argv[1] == "--make-tiny-vae":
         img = vae.decode(z).sample
     print("image", tuple(img.shape), "mean abs", img.abs().mean().item())
     json.dump({"z": r(z), "z_shape": list(z.shape), "image": r(img), "image_shape": list(img.shape)}, open(out_json, "w"))
+    sys.exit(0)
+if sys.argv[1] == "--make-tiny-zimage":
+    # Z-Image S3-DiT: a 7-token caption and a 30-patch image, both padded to 32.
+    from diffusers import ZImageTransformer2DModel
+    torch.manual_seed(8)
+    m = ZImageTransformer2DModel(all_patch_size=(2,), all_f_patch_size=(1,), in_channels=4, dim=64, n_layers=2,
+                                 n_refiner_layers=1, n_heads=4, n_kv_heads=4, norm_eps=1e-5, qk_norm=True,
+                                 cap_feat_dim=24, rope_theta=256.0, t_scale=1000.0, axes_dims=[4, 6, 6],
+                                 axes_lens=[64, 32, 32]).eval()
+    with torch.no_grad():
+        for name, p in m.named_parameters():
+            if "norm" in name and name.endswith("weight"):
+                p.add_(0.2 * torch.randn_like(p))
+            else:
+                p.normal_(0, 0.08)
+    m.save_pretrained(out_dir, safe_serialization=True)
+    lat = torch.randn(4, 1, 10, 12)
+    cap = torch.randn(7, 24)
+    t = torch.tensor([0.35])
+    with torch.no_grad():
+        y = m([lat], t, [cap], return_dict=False)[0][0]
+    print("out", tuple(y.shape), "mean abs", y.abs().mean().item())
+    json.dump({"latents": r(lat), "latents_shape": [4, 10, 12], "caption": r(cap), "caption_shape": list(cap.shape),
+               "t": 0.35, "out": r(y), "out_shape": list(y.shape)}, open(out_json, "w"))
     sys.exit(0)
 if sys.argv[1] == "--make-tiny-vae-enc":
     # A tiny AutoencoderKL with its encoder and quant_conv: encode().mode().
