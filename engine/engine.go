@@ -55,8 +55,9 @@ type Model struct {
 	Diffusion bool
 	SDAR      models.SDAROpts
 
-	vision  *models.Qwen35Vision // loaded on the first image
-	pixtral *models.Pixtral
+	vision       *models.Qwen35Vision // loaded on the first image
+	pixtral      *models.Pixtral
+	gemma4Vision *models.Gemma4Vision
 	// w16 / store16: the LM keeps 16-bit weights; vision towers load the same way.
 	w16     bool
 	store16 dtype.DType

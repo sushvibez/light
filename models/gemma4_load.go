@@ -74,7 +74,7 @@ func fetchGemma4Config(repo string) (Gemma4Config, error) {
 	if hf.EnableMoEBlock {
 		return Gemma4Config{}, fmt.Errorf("fetchGemma4Config: MoE blocks (26B-A4B) not supported yet")
 	}
-	if hf.UseBidirectional != nil && *hf.UseBidirectional != "" {
+	if hf.UseBidirectional != nil && *hf.UseBidirectional != "" && *hf.UseBidirectional != "vision" {
 		return Gemma4Config{}, fmt.Errorf("fetchGemma4Config: use_bidirectional_attention=%q not supported", *hf.UseBidirectional)
 	}
 	if hf.HeadDim == 0 {
@@ -101,7 +101,8 @@ func fetchGemma4Config(repo string) (Gemma4Config, error) {
 		NumGlobalKVHeads: hf.NumGlobalKeyValueHeads, HeadDim: hf.HeadDim, GlobalHeadDim: hf.GlobalHeadDim,
 		MaxPosition: hf.MaxPositionEmbed, RopeBase: 1e6, RopeLocalBase: 1e4, PartialRotary: 0.25,
 		RmsEps: hf.RmsNormEps, SlidingWindow: hf.SlidingWindow,
-		PLEDim: hf.HiddenSizePerLayerInput, PLEVocab: hf.VocabSizePerLayerInput,
+		VisionBidirectional: hf.UseBidirectional != nil && *hf.UseBidirectional == "vision",
+		PLEDim:              hf.HiddenSizePerLayerInput, PLEVocab: hf.VocabSizePerLayerInput,
 		NumKVSharedLayers: hf.NumKVSharedLayers, DoubleWideMLP: hf.UseDoubleWideMLP, AttentionKEqV: hf.AttentionKEqV,
 	}
 	if cfg.PLEVocab == 0 {

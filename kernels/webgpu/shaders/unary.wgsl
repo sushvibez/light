@@ -61,6 +61,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 out[idx] = log(1.0 + exp(x));
             }
         }
+        case 18u: { out[idx] = min(max(x, bitcast<f32>(params.z)), bitcast<f32>(params.w)); } // clamp(lo, hi)
         case 17u: { out[idx] = 0.5 * x * (1.0 + erf_f32(x * 0.70710678118654752)); } // exact GELU
         default: {}
     }

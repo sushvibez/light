@@ -267,6 +267,15 @@ func TestSoftmaxParity(t *testing.T) {
 	})
 }
 
+// ops.Clamp with finite and infinite bounds.
+func TestClampParity(t *testing.T) {
+	cpu := device.CPU()
+	x := mustNew(t, randF32(1000, 80), []int{1000}, cpu)
+	for _, b := range [][2]float64{{-0.3, 0.4}, {math.Inf(-1), 0.1}, {-0.2, math.Inf(1)}} {
+		parity1(t, "clamp", x, func(a *tensor.Tensor) (*tensor.Tensor, error) { return ops.Clamp(a, b[0], b[1]) }, 0)
+	}
+}
+
 func TestNormParity(t *testing.T) {
 	cpu := device.CPU()
 	rows, cols := 37, 768

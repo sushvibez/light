@@ -31,12 +31,12 @@ GPTQ / AWQ) is complete as of 2026-11-08 except for the items below.
 
 - **Gemma 3 SigLIP** tower (image input for gemma-3-4b and up; the text path
   skips it today).
-- Qwen3.5 and Ministral 3 images work end to end (2026-11-09); next: images
-  in the interactive shell, video frames, Qwen3-VL deepstack (Qwen3-VL
-  proper, WeVisOne-VL, the Qwen-Image text encoder). Ministral 3 + image on
-  the 16 GB-shared Intel iGPU still runs out of memory a few tokens into
-  decode (7.7 GB LM + tower + a 650-token prefill): Q8_0 or a smaller
-  prompt there.
+- Qwen3.5, Ministral 3 and Gemma 4 images work end to end (2026-11-09);
+  next: images in the interactive shell, video frames, Qwen3-VL deepstack
+  (Qwen3-VL proper, WeVisOne-VL, the Qwen-Image text encoder). On the
+  16 GB-shared Intel iGPU, Ministral 3 and Gemma-4-E2B with an image run
+  out of memory (Gemma 4's tower attends over 2520 patches): Q8_0 weights,
+  fewer soft tokens or a smaller prompt there.
 - Gemma 4 vision / audio towers; Muse Glimmer's 1.8B ViT; EmbeddingGemma 2
   vision / audio towers (text encoders only today).
 - CLIP vision tower (SD only has the text tower), SigLIP, DINOv2, Segment

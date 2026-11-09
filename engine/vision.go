@@ -134,6 +134,9 @@ func (m *Model) multimodal(msgs []Message, ids []int32, cache *models.KVCache) (
 	if l, ok := m.LM.(*models.Llama); ok {
 		return m.multimodalPixtral(l, msgs, ids, cache)
 	}
+	if g, ok := m.LM.(*models.Gemma4); ok {
+		return m.multimodalGemma4(g, msgs, ids, cache)
+	}
 	lm, ok := m.LM.(*models.Qwen35)
 	if !ok || lm.Cfg.ImageTokenID == 0 || len(lm.Cfg.MRoPESection) != 3 {
 		return nil, nil, fmt.Errorf("engine: %s does not take images", m.Spec.ID)
@@ -337,4 +340,75 @@ func (m *Model) loadTower(load func() error) error {
 func settle() {
 	runtime.GC()
 	runtime.GC()
+}
+
+// multimodalGemma4 is multimodal for Gemma 4: each <|image|> the template
+// places becomes <|image> + one <|image|> per soft token + <image|>; the
+// prefill runs Gemma4.ForwardMultimodal, decode steps are plain.
+func (m *Model) multimodalGemma4(lm *models.Gemma4, msgs []Message, ids []int32, cache *models.KVCache) (func([]int64) ([]float32, error), []int64, error) {
+	var tok [4]int64
+	for i, s := range []string{"<|image|>", "<|image>", "<image|>", "<pad>"} {
+		id := m.Tok.TokenToID(s)
+		if id < 0 {
+			return nil, nil, fmt.Errorf("engine: %s has no %s token; it does not take images", m.Spec.ID, s)
+		}
+		tok[i] = int64(id)
+	}
+	imgTok, boi, eoi, pad := tok[0], tok[1], tok[2], tok[3]
+	if m.gemma4Vision == nil {
+		var v *models.Gemma4Vision
+		err := m.loadTower(func() (err error) { v, err = models.LoadGemma4VisionFromHF(m.Spec.Repo, m.Dev); return })
+		if err != nil {
+			return nil, nil, fmt.Errorf("engine: vision tower: %w", err)
+		}
+		m.gemma4Vision = v
+	}
+	var ims []models.Gemma4Image
+	for _, msg := range msgs {
+		for _, img := range msg.Images {
+			im, err := m.gemma4Vision.Gemma4Preprocess(img)
+			if err != nil {
+				return nil, nil, err
+			}
+			ims = append(ims, im)
+		}
+	}
+	var out []int64
+	g := 0
+	for _, id := range ids {
+		if int64(id) != imgTok {
+			out = append(out, int64(id))
+			continue
+		}
+		if g >= len(ims) {
+			return nil, nil, fmt.Errorf("engine: the prompt has more image placeholders than images (%d)", len(ims))
+		}
+		out = append(out, m.gemma4Vision.Gemma4ImageTokens(ims[g], boi, imgTok, eoi)...)
+		g++
+	}
+	if g != len(ims) {
+		return nil, nil, fmt.Errorf("engine: %d images but the template placed %d", len(ims), g)
+	}
+	feats, err := m.gemma4Vision.Forward(ims, m.Dev)
+	if err != nil {
+		return nil, nil, fmt.Errorf("engine: vision tower: %w", err)
+	}
+	settle()
+	first := true
+	forward := func(tokens []int64) ([]float32, error) {
+		if !first {
+			return m.step(tokens, cache)
+		}
+		first = false
+		x, err := tensor.New(tokens, []int{1, len(tokens)}, m.Dev)
+		if err != nil {
+			return nil, err
+		}
+		logits, err := lm.ForwardMultimodal(x, feats, imgTok, pad, cache)
+		if err != nil {
+			return nil, err
+		}
+		return m.lastLogits(logits, len(tokens))
+	}
+	return forward, out, nil
 }

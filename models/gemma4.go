@@ -20,29 +20,33 @@ import (
 // 1/√d), an unweighted RMS norm on V, a per-layer output scalar and direct
 // (not 1+w) RMSNorm weights.
 type Gemma4Config struct {
-	VocabSize         int
-	HiddenSize        int
-	IntermediateSize  int
-	NumLayers         int
-	NumHeads          int
-	NumKVHeads        int // sliding layers
-	NumGlobalKVHeads  int // full-attention layers (defaults to NumKVHeads)
-	HeadDim           int // sliding layers
-	GlobalHeadDim     int // full-attention layers (512)
-	MaxPosition       int
-	RopeBase          float64 // full-attention layers (1e6)
-	RopeLocalBase     float64 // sliding layers (1e4)
-	PartialRotary     float64 // fraction of GlobalHeadDim that is rotated (0.25)
-	RmsEps            float64
-	SlidingWindow     int
-	SlidingLayers     []bool // per layer
-	FinalLogitSoftcap float64
-	PLEDim            int // hidden_size_per_layer_input (0 = no PLE)
-	PLEVocab          int // vocab_size_per_layer_input
-	NumKVSharedLayers int
-	DoubleWideMLP     bool // on KV-shared layers
-	AttentionKEqV     bool // value = key projection
-	WeightDType       dtype.DType
+	VocabSize        int
+	HiddenSize       int
+	IntermediateSize int
+	NumLayers        int
+	NumHeads         int
+	NumKVHeads       int // sliding layers
+	NumGlobalKVHeads int // full-attention layers (defaults to NumKVHeads)
+	HeadDim          int // sliding layers
+	GlobalHeadDim    int // full-attention layers (512)
+	MaxPosition      int
+	RopeBase         float64 // full-attention layers (1e6)
+	RopeLocalBase    float64 // sliding layers (1e4)
+	PartialRotary    float64 // fraction of GlobalHeadDim that is rotated (0.25)
+	RmsEps           float64
+	SlidingWindow    int
+	// VisionBidirectional (use_bidirectional_attention "vision"): sliding
+	// layers attend bidirectionally inside each image during a multimodal
+	// prefill; otherwise images are causal like text.
+	VisionBidirectional bool
+	SlidingLayers       []bool // per layer
+	FinalLogitSoftcap   float64
+	PLEDim              int // hidden_size_per_layer_input (0 = no PLE)
+	PLEVocab            int // vocab_size_per_layer_input
+	NumKVSharedLayers   int
+	DoubleWideMLP       bool // on KV-shared layers
+	AttentionKEqV       bool // value = key projection
+	WeightDType         dtype.DType
 }
 
 func (cfg Gemma4Config) activationDType() dtype.DType {
@@ -122,6 +126,14 @@ type Gemma4 struct {
 	pleEmbScale *tensor.Tensor // √PLEDim
 	pleMix      *tensor.Tensor // 2^-½
 	tabs        gemma4Tables
+
+	// Set during ForwardMultimodal: the image rows to scatter over the
+	// placeholder positions (mmIDs == mmTok) after the embedding, and each
+	// position's image block (-1 for text) for the sliding layers' mask.
+	mmImage   *tensor.Tensor
+	mmIDs     []int64
+	mmTok     int64
+	imgBlocks []int
 }
 
 // gemma4Tables caches the device-resident constants a Gemma 4 style model
@@ -323,6 +335,11 @@ func (m *Gemma4) ForwardWithCache(tokens *tensor.Tensor, cache *KVCache) (*tenso
 	}
 	if h, err = ops.Mul(h, m.embScale); err != nil {
 		return nil, err
+	}
+	if m.mmImage != nil {
+		if h, err = scatterImage(h, m.mmIDs, m.mmTok, m.mmImage); err != nil {
+			return nil, err
+		}
 	}
 	// Per-layer inputs: (B, T, L, P) = (norm(proj(h)/√D) + ple_embed(ids)·√P) / √2.
 	var ple *tensor.Tensor
@@ -691,7 +708,75 @@ func (tb *gemma4Tables) rope(x, pos *tensor.Tensor, sliding bool, hd int, base, 
 }
 
 func (m *Gemma4) mask(T, prior, window int, dt dtype.DType, dev device.Device) (*tensor.Tensor, error) {
+	if m.imgBlocks != nil && window > 0 && prior == 0 && len(m.imgBlocks) == T {
+		return imageBlockMask(m.imgBlocks, window, dt, dev)
+	}
 	return m.tabs.mask(T, prior, window, false, dt, dev)
+}
+
+// imageBlockMask is the sliding layers' prefill mask with images: a key is
+// visible if it is not after the query or shares the query's image block,
+// and is within the window (key > query − window).
+func imageBlockMask(blocks []int, window int, dt dtype.DType, dev device.Device) (*tensor.Tensor, error) {
+	T := len(blocks)
+	negInf := float32(math.Inf(-1))
+	data := make([]float32, T*T)
+	for q := range T {
+		for k := range T {
+			ok := k <= q || (blocks[q] >= 0 && blocks[q] == blocks[k])
+			if !ok || k <= q-window {
+				data[q*T+k] = negInf
+			}
+		}
+	}
+	t, err := tensor.New(data, []int{T, T}, dev)
+	if err != nil || dt == dtype.F32 {
+		return t, err
+	}
+	return ops.Cast(t, dt)
+}
+
+// ForwardMultimodal runs a fresh sequence (1, T) whose image placeholder
+// tokens (imageTok) take, in order, the rows of image (the vision tower's
+// output, (N, HiddenSize)): placeholders look up the pad token (for both
+// the token and the per-layer embeddings), their rows are then replaced,
+// and, with VisionBidirectional, the sliding layers attend bidirectionally
+// inside each image (runs of placeholders; boi / eoi count as text).
+func (m *Gemma4) ForwardMultimodal(tokens, image *tensor.Tensor, imageTok, padTok int64, cache *KVCache) (*tensor.Tensor, error) {
+	if tokens.Rank() != 2 || tokens.Dim(0) != 1 {
+		return nil, fmt.Errorf("Gemma4.ForwardMultimodal: tokens must be (1, T), got %v", tokens.Shape())
+	}
+	if cache != nil && cache.Len != 0 {
+		return nil, fmt.Errorf("Gemma4.ForwardMultimodal: needs a fresh cache")
+	}
+	host, err := tokens.To(device.CPU())
+	if err != nil {
+		return nil, err
+	}
+	ids := append([]int64(nil), tensor.MustSlice[int64](host)...)
+	llm := make([]int64, len(ids))
+	blocks := make([]int, len(ids))
+	blk := -1
+	for i, id := range ids {
+		llm[i], blocks[i] = id, -1
+		if id == imageTok {
+			llm[i] = padTok
+			if i == 0 || ids[i-1] != imageTok {
+				blk++
+			}
+			blocks[i] = blk
+		}
+	}
+	lt, err := tensor.New(llm, []int{1, len(llm)}, tokens.Device())
+	if err != nil {
+		return nil, err
+	}
+	m.mmImage, m.mmIDs, m.mmTok = image, ids, imageTok
+	if m.Cfg.VisionBidirectional {
+		m.imgBlocks = blocks
+	}
+	defer func() { m.mmImage, m.mmIDs, m.imgBlocks = nil, nil, nil }()
+	return m.ForwardWithCache(lt, cache)
 }
 
 // mask returns the additive (T, prior+T) attention mask: causal with an

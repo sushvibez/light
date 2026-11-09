@@ -63,7 +63,7 @@ status are in the commits (and, up to 2026-11-09, the
 | Phi-4 (14B) | — | Architecture-ready | Same template; needs 4-bit to fit 16 GB |
 | **Gemma 3 (text)** | `models/gemma.go`, `gemma_load.go` | ✅ Verified 2026-10-28 | 1B F32 top-5 = transformers to 4 dp; 4B multimodal checkpoint loads text-only |
 | **Gemma 2** | `models/gemma.go`, `gemma_load.go` | ✅ Verified 2026-10-29 | Softcaps + alternating local / global; 2B matches transformers to 4 dp |
-| **Gemma 4 (text)** | `models/gemma4.go`, `gemma4_load.go` | ✅ Verified 2026-10-29 | Per-layer embeddings, KV sharing, proportional RoPE; E2B matches transformers; runs on CPU, CUDA and WebGPU |
+| **Gemma 4 (text)** | `models/gemma4.go`, `gemma4_load.go` | ✅ Verified 2026-10-29 | Per-layer embeddings, KV sharing, proportional RoPE; E2B matches transformers; runs on CPU, CUDA and WebGPU. Image input: E2B image chat = transformers, 16 / 16 greedy |
 | **Muse Glimmer 30B (text)** | `models/muse_glimmer_load.go`, `muse_glimmer_gguf.go` (on the `Gemma3` skeleton) | ✅ Verified 2026-11-08 (30B GGUF Q4) | Gemma 3 skeleton + Muse switches (NoPE globals, output gate, q scale); 30B GGUF Q4 top-5 = reference |
 | **Mellum 2.1 12B-A2.5B** | `models/llama3_load.go` (`model_type` `mellum`, Qwen3-MoE path) | ✅ Verified 2026-11-07 (12B BF16, A100) | Qwen3-MoE + YaRN + per-layer-type RoPE; 12B BF16 matches transformers (A100) |
 | **DeepSeek-V2 / V3** | `models/deepseek_v2.go`, `deepseek_v2_load.go`, `deepseek_route.go` | ✅ Verified 2026-11-08 (V2-Lite-Chat, A100); V3 routing tiny-verified | MLA (latent KV cache) + DeepSeekMoE; V2-Lite-Chat matches transformers (A100); V3 routing tiny-verified |
