@@ -1,6 +1,8 @@
 package models
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 
@@ -72,5 +74,69 @@ func TestMinistralTinyMatchesTransformers(t *testing.T) {
 	}
 	if d := maxAbsDiff(full, lastLogits(t, mg, ids, NewKVCache(mg.NumLayers()), gpu)); d > 1e-4 {
 		t.Errorf("%v vs CPU logits differ by %.2e", gpu, d)
+	}
+}
+
+// Ministral-3-3B-Instruct-2512 (FP8 checkpoint, dequantized to BF16 at
+// load) in BF16 against transformers 5.21 BF16 on the CPU (which also
+// dequantizes; `ref_ministral.py mistralai/Ministral-3-3B-Instruct-2512 bf16
+// --chat`): top-5 logits and 16 greedy tokens ("The sky appears blue due to
+// **Rayleigh scattering**, where shorter blue wavelengths of"). CUDA when
+// present, else the CPU.
+func TestMinistral3BMatchesTransformersBF16(t *testing.T) {
+	if os.Getenv("LIGHT_HEAVY_TESTS") == "" {
+		t.Skip("set LIGHT_HEAVY_TESTS=1 (4.4 GB FP8 checkpoint, 7.7 GB in BF16)")
+	}
+	home, _ := os.UserHomeDir()
+	if m, _ := filepath.Glob(filepath.Join(home, ".cache/huggingface/hub/models--mistralai--Ministral-3-3B-Instruct-2512/snapshots/*/model.safetensors")); len(m) == 0 {
+		t.Skip("mistralai/Ministral-3-3B-Instruct-2512 not in HF cache")
+	}
+	requireHostMemGB(t, 12)
+	releaseModelMemory(t)
+	ids := []int64{1, 17, 4568, 1584, 1261, 104335, 27089, 1046, 18, 3, 2763, 44122, 1294, 1925, 19286, 5782, 1278, 21283, 1395, 10991, 1046, 4}
+	ref := []struct {
+		id    int
+		logit float32
+	}{{1784, 18.8750}, {5492, 17.0000}, {99701, 16.5000}, {27236, 16.5000}, {47451, 16.0000}}
+	greedyRef := []int64{1784, 21283, 10249, 10991, 3964, 1317, 1603, 51199, 70972, 35805, 6143, 2478, 24701, 10991, 63233, 1307}
+	dev := device.CPU()
+	if device.CUDAAvailable() {
+		g, err := device.CUDA(0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dev = g
+	}
+	m, err := LoadCausalLMFromHF("mistralai/Ministral-3-3B-Instruct-2512", dev, dtype.BF16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := m.Cfg; c.NumLayers != 26 || c.HeadDim != 128 || c.Llama4ScalingBeta != 0.1 || c.Llama4ScalingOrig != 16384 || c.RopeScaling == nil || c.RopeScaling.Type != "yarn" {
+		t.Fatalf("config %+v", c)
+	}
+	cache := NewKVCache(m.NumLayers())
+	row := lastLogits(t, m, ids, cache, dev)
+	got := top5(row)
+	if got[0] != ref[0].id {
+		t.Errorf("top-1: got %d (%.3f), want %d (%.3f)", got[0], row[got[0]], ref[0].id, ref[0].logit)
+	}
+	for _, w := range ref {
+		if d := row[w.id] - w.logit; d > 0.5 || d < -0.5 {
+			t.Errorf("logit[%d] = %.3f, want %.3f (transformers BF16; tol 0.5)", w.id, row[w.id], w.logit)
+		}
+	}
+	var greedy []int64
+	for len(greedy) < len(greedyRef) {
+		next := int64(top5(row)[0])
+		greedy = append(greedy, next)
+		row = lastLogits(t, m, []int64{next}, cache, dev)
+	}
+	agree := 0
+	for agree < len(greedy) && greedy[agree] == greedyRef[agree] {
+		agree++
+	}
+	t.Logf("greedy %v (first %d of %d agree with transformers BF16)", greedy, agree, len(greedy))
+	if agree < 12 {
+		t.Errorf("greedy %v diverges from transformers BF16 %v after %d tokens", greedy, greedyRef, agree)
 	}
 }
