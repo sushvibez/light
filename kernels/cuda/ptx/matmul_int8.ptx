@@ -11,6 +11,7 @@
 .address_size 64
 
 	// .globl	matmul_int8_perchan_f32
+// _ZZ20quantize_rows_i8_f32E3red has been demoted
 
 .visible .entry matmul_int8_perchan_f32(
 	.param .u64 matmul_int8_perchan_f32_param_0,
@@ -148,6 +149,208 @@ $L__BB0_9:
 	st.global.f32 	[%rd44], %f26;
 
 $L__BB0_10:
+	ret;
+
+}
+	// .globl	quantize_rows_i8_f32
+.visible .entry quantize_rows_i8_f32(
+	.param .u64 quantize_rows_i8_f32_param_0,
+	.param .u64 quantize_rows_i8_f32_param_1,
+	.param .u64 quantize_rows_i8_f32_param_2,
+	.param .u32 quantize_rows_i8_f32_param_3,
+	.param .u32 quantize_rows_i8_f32_param_4
+)
+{
+	.reg .pred 	%p<11>;
+	.reg .f32 	%f<27>;
+	.reg .b32 	%r<19>;
+	.reg .b64 	%rd<26>;
+	// demoted variable
+	.shared .align 4 .b8 _ZZ20quantize_rows_i8_f32E3red[1024];
+
+	ld.param.u64 	%rd8, [quantize_rows_i8_f32_param_0];
+	ld.param.u64 	%rd6, [quantize_rows_i8_f32_param_1];
+	ld.param.u64 	%rd7, [quantize_rows_i8_f32_param_2];
+	ld.param.u32 	%r13, [quantize_rows_i8_f32_param_3];
+	ld.param.u32 	%r12, [quantize_rows_i8_f32_param_4];
+	cvta.to.global.u64 	%rd1, %rd8;
+	mov.u32 	%r1, %ctaid.x;
+	setp.ge.s32 	%p1, %r1, %r13;
+	@%p1 bra 	$L__BB1_15;
+
+	cvt.s64.s32 	%rd2, %r1;
+	mul.wide.s32 	%rd3, %r12, %r1;
+	mov.u32 	%r18, %tid.x;
+	mov.f32 	%f25, 0f00000000;
+	setp.lt.s32 	%p2, %r18, %r12;
+	@%p2 bra 	$L__BB1_2;
+	bra.uni 	$L__BB1_4;
+
+$L__BB1_2:
+	mov.u32 	%r3, %ntid.x;
+	mov.u32 	%r16, %r18;
+
+$L__BB1_3:
+	cvt.s64.s32 	%rd9, %r16;
+	add.s64 	%rd10, %rd3, %rd9;
+	shl.b64 	%rd11, %rd10, 2;
+	add.s64 	%rd12, %rd1, %rd11;
+	ld.global.nc.f32 	%f9, [%rd12];
+	abs.ftz.f32 	%f10, %f9;
+	max.ftz.f32 	%f25, %f25, %f10;
+	add.s32 	%r16, %r16, %r3;
+	setp.lt.s32 	%p3, %r16, %r12;
+	@%p3 bra 	$L__BB1_3;
+
+$L__BB1_4:
+	mul.wide.u32 	%rd13, %r18, 4;
+	mov.u64 	%rd14, _ZZ20quantize_rows_i8_f32E3red;
+	add.s64 	%rd4, %rd14, %rd13;
+	st.shared.f32 	[%rd4], %f25;
+	bar.sync 	0;
+	mov.u32 	%r6, %ntid.x;
+	shr.u32 	%r17, %r6, 1;
+	setp.eq.s32 	%p4, %r17, 0;
+	@%p4 bra 	$L__BB1_8;
+
+$L__BB1_5:
+	setp.ge.u32 	%p5, %r18, %r17;
+	@%p5 bra 	$L__BB1_7;
+
+	ld.shared.f32 	%f11, [%rd4];
+	add.s32 	%r14, %r17, %r18;
+	mul.wide.u32 	%rd15, %r14, 4;
+	add.s64 	%rd17, %rd14, %rd15;
+	ld.shared.f32 	%f12, [%rd17];
+	max.ftz.f32 	%f13, %f11, %f12;
+	st.shared.f32 	[%rd4], %f13;
+
+$L__BB1_7:
+	bar.sync 	0;
+	shr.u32 	%r17, %r17, 1;
+	setp.ne.s32 	%p6, %r17, 0;
+	@%p6 bra 	$L__BB1_5;
+
+$L__BB1_8:
+	ld.shared.f32 	%f15, [_ZZ20quantize_rows_i8_f32E3red];
+	mov.f32 	%f16, 0f42FE0000;
+	div.approx.ftz.f32 	%f4, %f15, %f16;
+	setp.leu.ftz.f32 	%p7, %f4, 0f00000000;
+	mov.f32 	%f26, 0f00000000;
+	@%p7 bra 	$L__BB1_10;
+
+	rcp.approx.ftz.f32 	%f26, %f4;
+
+$L__BB1_10:
+	setp.ne.s32 	%p8, %r18, 0;
+	@%p8 bra 	$L__BB1_12;
+
+	cvta.to.global.u64 	%rd18, %rd7;
+	shl.b64 	%rd19, %rd2, 2;
+	add.s64 	%rd20, %rd18, %rd19;
+	st.global.f32 	[%rd20], %f4;
+
+$L__BB1_12:
+	setp.ge.s32 	%p9, %r18, %r12;
+	@%p9 bra 	$L__BB1_15;
+
+	cvta.to.global.u64 	%rd5, %rd6;
+
+$L__BB1_14:
+	cvt.s64.s32 	%rd21, %r18;
+	add.s64 	%rd22, %rd3, %rd21;
+	shl.b64 	%rd23, %rd22, 2;
+	add.s64 	%rd24, %rd1, %rd23;
+	ld.global.nc.f32 	%f17, [%rd24];
+	mul.ftz.f32 	%f18, %f26, %f17;
+	cvt.rni.f32.f32 	%f19, %f18;
+	mov.f32 	%f20, 0fC2FE0000;
+	max.ftz.f32 	%f21, %f20, %f19;
+	mov.f32 	%f22, 0f42FE0000;
+	min.ftz.f32 	%f23, %f22, %f21;
+	cvt.rzi.ftz.s32.f32 	%r15, %f23;
+	add.s64 	%rd25, %rd5, %rd22;
+	st.global.u8 	[%rd25], %r15;
+	add.s32 	%r18, %r18, %r6;
+	setp.lt.s32 	%p10, %r18, %r12;
+	@%p10 bra 	$L__BB1_14;
+
+$L__BB1_15:
+	ret;
+
+}
+	// .globl	dequant_i32_rowcol_f32
+.visible .entry dequant_i32_rowcol_f32(
+	.param .u64 dequant_i32_rowcol_f32_param_0,
+	.param .u64 dequant_i32_rowcol_f32_param_1,
+	.param .u64 dequant_i32_rowcol_f32_param_2,
+	.param .u64 dequant_i32_rowcol_f32_param_3,
+	.param .u64 dequant_i32_rowcol_f32_param_4,
+	.param .u64 dequant_i32_rowcol_f32_param_5
+)
+{
+	.reg .pred 	%p<3>;
+	.reg .f32 	%f<6>;
+	.reg .b32 	%r<10>;
+	.reg .b64 	%rd<33>;
+
+
+	ld.param.u64 	%rd8, [dequant_i32_rowcol_f32_param_0];
+	ld.param.u64 	%rd9, [dequant_i32_rowcol_f32_param_1];
+	ld.param.u64 	%rd10, [dequant_i32_rowcol_f32_param_2];
+	ld.param.u64 	%rd11, [dequant_i32_rowcol_f32_param_3];
+	ld.param.u64 	%rd13, [dequant_i32_rowcol_f32_param_4];
+	ld.param.u64 	%rd12, [dequant_i32_rowcol_f32_param_5];
+	mov.u32 	%r1, %ctaid.x;
+	mov.u32 	%r2, %ntid.x;
+	mul.wide.u32 	%rd14, %r1, %r2;
+	mov.u32 	%r3, %tid.x;
+	cvt.u64.u32 	%rd15, %r3;
+	add.s64 	%rd1, %rd14, %rd15;
+	mul.lo.s64 	%rd16, %rd12, %rd13;
+	setp.ge.s64 	%p1, %rd1, %rd16;
+	@%p1 bra 	$L__BB2_5;
+
+	or.b64  	%rd17, %rd1, %rd12;
+	and.b64  	%rd18, %rd17, -4294967296;
+	setp.eq.s64 	%p2, %rd18, 0;
+	@%p2 bra 	$L__BB2_3;
+
+	div.s64 	%rd31, %rd1, %rd12;
+	mul.lo.s64 	%rd19, %rd31, %rd12;
+	sub.s64 	%rd32, %rd1, %rd19;
+	bra.uni 	$L__BB2_4;
+
+$L__BB2_3:
+	cvt.u32.u64 	%r4, %rd12;
+	cvt.u32.u64 	%r5, %rd1;
+	div.u32 	%r6, %r5, %r4;
+	mul.lo.s32 	%r7, %r6, %r4;
+	sub.s32 	%r8, %r5, %r7;
+	cvt.u64.u32 	%rd31, %r6;
+	cvt.u64.u32 	%rd32, %r8;
+
+$L__BB2_4:
+	cvta.to.global.u64 	%rd20, %rd8;
+	shl.b64 	%rd21, %rd1, 2;
+	add.s64 	%rd22, %rd20, %rd21;
+	ld.global.nc.u32 	%r9, [%rd22];
+	cvt.rn.f32.s32 	%f1, %r9;
+	cvta.to.global.u64 	%rd23, %rd9;
+	shl.b64 	%rd24, %rd31, 2;
+	add.s64 	%rd25, %rd23, %rd24;
+	ld.global.nc.f32 	%f2, [%rd25];
+	mul.ftz.f32 	%f3, %f2, %f1;
+	cvta.to.global.u64 	%rd26, %rd10;
+	shl.b64 	%rd27, %rd32, 2;
+	add.s64 	%rd28, %rd26, %rd27;
+	ld.global.nc.f32 	%f4, [%rd28];
+	mul.ftz.f32 	%f5, %f3, %f4;
+	cvta.to.global.u64 	%rd29, %rd11;
+	add.s64 	%rd30, %rd29, %rd21;
+	st.global.f32 	[%rd30], %f5;
+
+$L__BB2_5:
 	ret;
 
 }

@@ -339,6 +339,32 @@ func GemmExRowMajor(h *BlasHandle, m, n, k int, a, b, c uintptr, aType, bType, c
 	return nil
 }
 
+// GemmInt8RowMajorTransB computes C (M, N) int32 = A (M, K) int8 @ Bᵀ with
+// B (N, K) int8, row-major, int32 accumulation (cublasGemmEx with
+// CUBLAS_COMPUTE_32I: the IMMA path on Turing and later). cuBLAS wants the
+// int8 leading dimensions (K here) to be multiples of 4.
+func GemmInt8RowMajorTransB(h *BlasHandle, m, n, k int, a, b, c uintptr) error {
+	tally(&counters.Gemms)
+	alpha := C.int(1)
+	beta := C.int(0)
+	rc := C.cublasGemmEx(
+		h.handle,
+		C.CUBLAS_OP_T, C.CUBLAS_OP_N,
+		C.int(n), C.int(m), C.int(k),
+		unsafe.Pointer(&alpha),
+		unsafe.Pointer(b), C.CUDA_R_8I, C.int(k),
+		unsafe.Pointer(a), C.CUDA_R_8I, C.int(k),
+		unsafe.Pointer(&beta),
+		unsafe.Pointer(c), C.CUDA_R_32I, C.int(n),
+		C.CUBLAS_COMPUTE_32I,
+		C.CUBLAS_GEMM_DEFAULT,
+	)
+	if rc != C.CUBLAS_STATUS_SUCCESS {
+		return fmt.Errorf("cublasGemmEx(int8×int8→int32, m=%d n=%d k=%d): status %d", m, n, k, int(rc))
+	}
+	return nil
+}
+
 // GemmStridedBatchedExRowMajor computes C[i] = A[i] @ B[i] for `count`
 // row-major slices with a single storage dtype (F16 / BF16 / F32) and F32
 // accumulation.
