@@ -3,11 +3,14 @@ package models
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 
 	"light/device"
 	"light/dtype"
+	"light/ops"
+	"light/tensor"
 )
 
 // FluxVAE is a Flux / SD3 AutoencoderKL decoder with its latent
@@ -17,6 +20,10 @@ type FluxVAE struct {
 	Decoder       *VAEDecoder
 	ScalingFactor float32
 	ShiftFactor   float32
+	// FLUX.2 (AutoencoderKLFlux2): the BatchNorm statistics of the 2 x 2
+	// patchified latents (running mean, sqrt(running var + eps)); nil
+	// otherwise.
+	BNMean, BNStd []float32
 }
 
 type autoencoderKLConfig struct {
@@ -26,6 +33,7 @@ type autoencoderKLConfig struct {
 	UsePostQuantConv *bool   `json:"use_post_quant_conv"`
 	ScalingFactor    float32 `json:"scaling_factor"`
 	ShiftFactor      float32 `json:"shift_factor"`
+	BatchNormEps     float64 `json:"batch_norm_eps"`
 }
 
 // LoadFluxVAE loads the decoder of an AutoencoderKL from a directory with
@@ -51,5 +59,33 @@ func LoadFluxVAE(dir string, dev device.Device) (*FluxVAE, error) {
 	if err != nil {
 		return nil, fmt.Errorf("LoadFluxVAE: %w", err)
 	}
-	return &FluxVAE{Decoder: d, ScalingFactor: c.ScalingFactor, ShiftFactor: c.ShiftFactor}, nil
+	v := &FluxVAE{Decoder: d, ScalingFactor: c.ScalingFactor, ShiftFactor: c.ShiftFactor}
+	if mean, ok := w["bn.running_mean"]; ok {
+		vr, ok := w["bn.running_var"]
+		if !ok {
+			return nil, fmt.Errorf("LoadFluxVAE: bn.running_mean without bn.running_var")
+		}
+		f32 := func(t *tensor.Tensor) ([]float32, error) {
+			c, err := ops.Cast(t, dtype.F32)
+			if err != nil {
+				return nil, err
+			}
+			if c, err = c.To(device.CPU()); err != nil {
+				return nil, err
+			}
+			return append([]float32(nil), tensor.MustSlice[float32](c)...), nil
+		}
+		if v.BNMean, err = f32(mean); err != nil {
+			return nil, err
+		}
+		vs, err := f32(vr)
+		if err != nil {
+			return nil, err
+		}
+		v.BNStd = make([]float32, len(vs))
+		for i, x := range vs {
+			v.BNStd[i] = float32(math.Sqrt(float64(x + float32(c.BatchNormEps))))
+		}
+	}
+	return v, nil
 }

@@ -58,6 +58,28 @@ func LoadFlowMatchEuler(dir string) (*FlowMatchEuler, error) {
 	return s, nil
 }
 
+// SigmasMu is Sigmas with an explicit time-shift mu (FLUX.2's empirical
+// mu from the sequence length and step count) under dynamic shifting.
+func (s *FlowMatchEuler) SigmasMu(n int, mu float64) []float32 {
+	out := make([]float32, n+1)
+	for i := range n {
+		var lin float64 = 1
+		if n > 1 {
+			lin = 1 + (1/float64(n)-1)*float64(i)/float64(n-1)
+		}
+		sg := float32(lin)
+		if s.UseDynamicShifting {
+			e := float32(math.Exp(mu))
+			sg = e / (e + (1/sg - 1))
+		} else {
+			sh := float32(s.Shift)
+			sg = sh * sg / (1 + (sh-1)*sg)
+		}
+		out[i] = sg
+	}
+	return out
+}
+
 // Sigmas is the schedule for n steps over imageSeqLen latent tokens, as
 // FluxPipeline sets it: linspace(1, 1/n, n), shifted (exponential time
 // shift with mu from the sequence length, or the static shift), in F32,

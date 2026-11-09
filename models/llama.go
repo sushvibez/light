@@ -309,8 +309,12 @@ type Llama struct {
 	maskT      int
 	maskWindow int
 	maskBlock  int
-	maskDev    device.Device
-	maskCache  *tensor.Tensor
+	maskValid  int
+	// keyValid > 0 masks keys at positions >= keyValid for every query
+	// (HiddenStates' right padding, as an HF attention_mask does).
+	keyValid  int
+	maskDev   device.Device
+	maskCache *tensor.Tensor
 
 	// Block-diffusion decoding state for the current ForwardDiffusion call
 	// (SDAR): diffBlock > 0 selects the block-bidirectional mask, diffStore
@@ -590,6 +594,64 @@ func (m *Llama) ForwardWithCache(tokens *tensor.Tensor, cache *KVCache) (*tensor
 		}
 	}
 	return m.ForwardEmbeds(h, cache)
+}
+
+// HiddenStates runs tokens (1, T) without a cache and returns the hidden
+// states after the given numbers of layers (transformers'
+// output_hidden_states[k]: k = 0 is the embedding, k = n the output of
+// layer n, before the final norm unless n is the last layer, whose entry
+// transformers normalises). Keys at positions >= valid (right padding) are
+// masked for every query, as an HF attention_mask does; valid <= 0 or >= T
+// means no padding. Used by diffusion pipelines that condition on an LM's
+// intermediate layers (FLUX.2 klein: Qwen3 layers 9, 18, 27).
+func (m *Llama) HiddenStates(tokens *tensor.Tensor, layers []int, valid int) ([]*tensor.Tensor, error) {
+	if tokens.Rank() != 2 || tokens.DType() != dtype.I64 {
+		return nil, fmt.Errorf("Llama.HiddenStates: tokens must be (B, T) I64, got %v %v", tokens.Shape(), tokens.DType())
+	}
+	B, T := tokens.Dim(0), tokens.Dim(1)
+	dev := tokens.Device()
+	if valid > 0 && valid < T {
+		m.keyValid = valid
+		defer func() { m.keyValid = 0 }()
+	}
+	h, err := m.TokenEmb.Forward(tokens)
+	if err != nil {
+		return nil, err
+	}
+	if m.Cfg.EmbedMultiplier != 0 {
+		if h, err = mulScalarF32(h, m.Cfg.EmbedMultiplier); err != nil {
+			return nil, err
+		}
+	}
+	out := make([]*tensor.Tensor, len(layers))
+	take := func(n int) {
+		for i, k := range layers {
+			if k == n {
+				out[i] = h
+			}
+		}
+	}
+	take(0)
+	maxL := 0
+	for _, k := range layers {
+		if k < 0 || k > len(m.Blocks) {
+			return nil, fmt.Errorf("Llama.HiddenStates: layer %d out of range (0..%d)", k, len(m.Blocks))
+		}
+		maxL = max(maxL, k)
+	}
+	for i, blk := range m.Blocks[:maxL] {
+		if h, err = m.runBlock(blk, h, B, T, 0, dev, nil, i); err != nil {
+			return nil, err
+		}
+		if i+1 == len(m.Blocks) {
+			if h, err = m.FinalNorm.Forward(h); err != nil {
+				return nil, err
+			}
+		}
+		take(i + 1)
+		prefillGC(dev, T, i)
+	}
+	return out, nil
 }
 
 // Embed returns the token embeddings (B, T, D) for tokens (B, T) I64, in
@@ -1115,7 +1177,7 @@ func trimKV(x *tensor.Tensor, start, length int) (*tensor.Tensor, error) {
 func (m *Llama) queryKeyMask(T, prior, window int, dev device.Device) (*tensor.Tensor, error) {
 	totalT := prior + T
 	block := m.diffBlock
-	if m.maskCache != nil && m.maskTotal == totalT && m.maskPrior == prior && m.maskT == T && m.maskWindow == window && m.maskBlock == block && m.maskDev != nil && m.maskDev.SameAs(dev) {
+	if m.maskCache != nil && m.maskTotal == totalT && m.maskPrior == prior && m.maskT == T && m.maskWindow == window && m.maskBlock == block && m.maskValid == m.keyValid && m.maskDev != nil && m.maskDev.SameAs(dev) {
 		return m.maskCache, nil
 	}
 	negInf := float32(math.Inf(-1))
@@ -1138,6 +1200,11 @@ func (m *Llama) queryKeyMask(T, prior, window int, dev device.Device) (*tensor.T
 				data[i*totalT+j] = negInf
 			}
 		}
+		if m.keyValid > 0 {
+			for j := m.keyValid; j < totalT; j++ {
+				data[i*totalT+j] = negInf
+			}
+		}
 	}
 	mask, err := tensor.New(data, []int{T, totalT}, dev)
 	if err != nil {
@@ -1155,6 +1222,7 @@ func (m *Llama) queryKeyMask(T, prior, window int, dev device.Device) (*tensor.T
 	m.maskT = T
 	m.maskWindow = window
 	m.maskBlock = block
+	m.maskValid = m.keyValid
 	m.maskDev = dev
 	return mask, nil
 }

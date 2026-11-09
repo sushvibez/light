@@ -267,6 +267,15 @@ func TestSoftmaxParity(t *testing.T) {
 	})
 }
 
+// ops.UpsampleNearest by 2 x 2 and 3 x 1.
+func TestUpsampleNearestParity(t *testing.T) {
+	cpu := device.CPU()
+	x := mustNew(t, randF32(2*3*5*7, 81), []int{2, 3, 5, 7}, cpu)
+	for _, s := range [][2]int{{2, 2}, {3, 1}} {
+		parity1(t, "upsample_nearest", x, func(a *tensor.Tensor) (*tensor.Tensor, error) { return ops.UpsampleNearest(a, s) }, 0)
+	}
+}
+
 // ops.Clamp with finite and infinite bounds.
 func TestClampParity(t *testing.T) {
 	cpu := device.CPU()
