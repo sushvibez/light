@@ -203,6 +203,24 @@ func TestGatedDeltaRuleCUDAMatchesTransformers(t *testing.T) {
 	if err != nil {
 		t.Skip(err)
 	}
+	gdGPUParity(t, gpu)
+}
+
+// The WebGPU kernels (recurrent form only, f32) against the same goldens.
+func TestGatedDeltaRuleWebGPUMatchesTransformers(t *testing.T) {
+	gpu, err := device.WebGPU(0)
+	if err != nil {
+		t.Skip(err)
+	}
+	gdGPUParity(t, gpu)
+}
+
+// gdGPUParity checks the Gated DeltaNet ops on a GPU device against the
+// transformers goldens: every fixture, prefill + one-token decode through
+// the carried state, the short conv whole and split, and softplus.
+func gdGPUParity(t *testing.T, gpu device.Device) {
+	t.Helper()
+	label := gpu.String()
 	toGPU := func(x *tensor.Tensor) *tensor.Tensor {
 		if x == nil {
 			return nil
@@ -236,10 +254,10 @@ func TestGatedDeltaRuleCUDAMatchesTransformers(t *testing.T) {
 				t.Fatal(err)
 			}
 			if d := gdMaxDiff(t, toCPU(out), f["out"]); d > 2e-5 {
-				t.Errorf("CUDA output differs from transformers by %.2e", d)
+				t.Errorf("%s output differs from transformers by %.2e", label, d)
 			}
 			if d := gdMaxDiff(t, toCPU(final), f["final"]); d > 2e-5 {
-				t.Errorf("CUDA final state differs from transformers by %.2e", d)
+				t.Errorf("%s final state differs from transformers by %.2e", label, d)
 			}
 		})
 	}
@@ -252,18 +270,18 @@ func TestGatedDeltaRuleCUDAMatchesTransformers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if d := gdMaxDiff(t, toCPU(o), gdNarrow(t, f["out"], 1, 0, 100)); d > 2e-5 {
-		t.Errorf("CUDA prefill piece: %.2e", d)
+		t.Errorf("%s prefill piece: %.2e", label, d)
 	}
 	for i := 100; i < q.Dim(1); i++ {
 		if o, s, err = ops.GatedDeltaRule(piece(q, i, 1), piece(k, i, 1), piece(v, i, 1), piece(g, i, 1), piece(beta, i, 1), s, ops.GatedDeltaOptions{QKL2Norm: true}); err != nil {
 			t.Fatal(err)
 		}
 		if d := gdMaxDiff(t, toCPU(o), gdNarrow(t, f["out"], 1, i, 1)); d > 2e-5 {
-			t.Fatalf("CUDA decode step %d: %.2e", i, d)
+			t.Fatalf("%s decode step %d: %.2e", label, i, d)
 		}
 	}
 	if d := gdMaxDiff(t, toCPU(s), f["final"]); d > 2e-5 {
-		t.Errorf("CUDA state after prefill + decode: %.2e", d)
+		t.Errorf("%s state after prefill + decode: %.2e", label, d)
 	}
 
 	// Short conv (whole and split) and softplus.
@@ -274,7 +292,7 @@ func TestGatedDeltaRuleCUDAMatchesTransformers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if d := gdMaxDiff(t, toCPU(co), c["out"]); d > 1e-5 {
-		t.Errorf("CUDA conv: %.2e", d)
+		t.Errorf("%s conv: %.2e", label, d)
 	}
 	co, cs, err := ops.CausalConv1dDepthwise(gdNarrow(t, x, 2, 0, 7), w, nil, true)
 	if err != nil {
@@ -285,7 +303,7 @@ func TestGatedDeltaRuleCUDAMatchesTransformers(t *testing.T) {
 			t.Fatal(err)
 		}
 		if d := gdMaxDiff(t, toCPU(co), gdNarrow(t, c["out"], 2, i, 1)); d > 1e-5 {
-			t.Fatalf("CUDA conv step %d: %.2e", i, d)
+			t.Fatalf("%s conv step %d: %.2e", label, i, d)
 		}
 	}
 	in, _ := tensor.New([]float32{-30, -1, 0, 1, 19.5, 25}, []int{6}, device.CPU())
@@ -298,7 +316,7 @@ func TestGatedDeltaRuleCUDAMatchesTransformers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if d := gdMaxDiff(t, toCPU(got), want); d > 1e-5 {
-		t.Errorf("CUDA softplus: %.2e", d)
+		t.Errorf("%s softplus: %.2e", label, d)
 	}
 }
 

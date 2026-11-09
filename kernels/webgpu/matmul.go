@@ -18,6 +18,10 @@ func init() {
 
 const matmulTile = 16
 
+// gemvMaxM is MAXM in gemv.wgsl: x · Wᵀ with at most this many rows runs
+// the GEMV kernel.
+const gemvMaxM = 8
+
 func matmulF32(ctx *registry.Context) error {
 	a, b, out := ctx.Inputs[0], ctx.Inputs[1], ctx.Output
 	if a.Rank() != 2 || b.Rank() != 2 {
@@ -47,6 +51,16 @@ func matmulF32(ctx *registry.Context) error {
 	}
 	if m == 0 || n == 0 {
 		return nil
+	}
+	if transB == 1 && m <= gemvMaxM {
+		// Decode: one workgroup per output column reading the weight row.
+		params, err := d.Uniform(uint32(m), uint32(n), uint32(k), 0)
+		if err != nil {
+			return err
+		}
+		defer params.Release()
+		gx, gy := d.Rows(uint64(n))
+		return d.Run("gemv", shader("gemv"), []wgpudev.Binding{rd(raw(a)), rd(raw(b)), rw(raw(out)), uni(params)}, gx, gy, 1)
 	}
 	params, err := d.Uniform(uint32(m), uint32(n), uint32(k), transB)
 	if err != nil {

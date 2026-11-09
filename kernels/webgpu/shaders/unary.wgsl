@@ -2,6 +2,7 @@
 // params: [op, len, 0, 0]
 // op: 0=relu 1=sigmoid 2=tanh 3=neg 4=exp 5=log 6=sqrt 7=gelu(tanh approx)
 //     8=silu 9=abs 10=sin 11=cos 12=tan 13=floor 14=ceil 15=round(half away from zero)
+//     16=softplus
 
 @group(0) @binding(0) var<storage, read>       input: array<f32>;
 @group(0) @binding(1) var<storage, read_write> out: array<f32>;
@@ -43,6 +44,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         case 13u: { out[idx] = floor(x); }
         case 14u: { out[idx] = ceil(x); }
         case 15u: { out[idx] = sign(x) * floor(abs(x) + 0.5); }
+        case 16u: { // softplus with torch's threshold 20; exp(x) where log1p(e) ~ e
+            if (x > 20.0) {
+                out[idx] = x;
+            } else if (x < -15.0) {
+                out[idx] = exp(x);
+            } else {
+                out[idx] = log(1.0 + exp(x));
+            }
+        }
         default: {}
     }
 }

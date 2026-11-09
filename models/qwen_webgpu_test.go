@@ -93,3 +93,41 @@ func TestQwen2GGUFWebGPUMatchesCPU(t *testing.T) {
 		t.Errorf("greedy decode differs")
 	}
 }
+
+// Qwen3.5-0.8B (Gated DeltaNet + gated attention) on WebGPU (F32) against
+// the CPU: prefill logits and 12 greedy steps through the recurrent state
+// and the KV cache.
+func TestQwen35WebGPUMatchesCPU(t *testing.T) {
+	g, err := device.WebGPU(0)
+	if err != nil {
+		t.Skip(err)
+	}
+	cpu := device.CPU()
+	const repo = "Qwen/Qwen3.5-0.8B"
+	mc, err := LoadQwen35FromHF(repo, cpu, dtype.F32)
+	if err != nil {
+		t.Skip(err)
+	}
+	mg, err := LoadQwen35FromHF(repo, g, dtype.F32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := qwen35SmallChatIDs
+	cc, cg := NewKVCache(mc.NumLayers()), NewKVCache(mg.NumLayers())
+	rc, rg := lastLogits(t, mc, ids, cc, cpu), lastLogits(t, mg, ids, cg, g)
+	if d := maxAbsDiff(rc, rg); d > 1e-2 {
+		t.Fatalf("prefill logits differ by %.3g", d)
+	} else {
+		t.Logf("prefill logits max |cpu - webgpu| %.3g", d)
+	}
+	var tc, tg []int64
+	for range 12 {
+		nc, ng := int64(top5(rc)[0]), int64(top5(rg)[0])
+		tc, tg = append(tc, nc), append(tg, ng)
+		rc, rg = lastLogits(t, mc, []int64{nc}, cc, cpu), lastLogits(t, mg, []int64{ng}, cg, g)
+	}
+	t.Logf("greedy cpu %v\n       webgpu %v", tc, tg)
+	if !slices.Equal(tc, tg) {
+		t.Errorf("greedy decode differs")
+	}
+}
