@@ -25,5 +25,11 @@ func int4RowAVX2(codes *uint32, s *float32, z *float32, dst *float32, groups, wp
 //go:noescape
 func bf16RowAVX2(src *uint16, dst *float32, n int)
 
+//go:noescape
+func f16RowF16C(src *uint16, dst *float32, n int)
+
+// decodeF16C gates f16RowF16C.
+var decodeF16C = simd.F16C()
+
 // The AVX2 decoders use AVX2 integer ops and the same CPU check as simd.
 var decodeAVX2 = simd.Accelerated()

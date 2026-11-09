@@ -110,3 +110,30 @@ func BenchmarkRowDecode(b *testing.B) {
 		}
 	})
 }
+
+// f16RowF16C widens every F16 bit pattern exactly as dtype.Half.ToF32
+// (NaNs compared by NaN-ness).
+func TestF16RowF16C(t *testing.T) {
+	if !decodeF16C {
+		t.Skip("no F16C")
+	}
+	src := make([]uint16, 1<<16)
+	for i := range src {
+		src[i] = uint16(i)
+	}
+	dst := make([]float32, len(src))
+	f16RowF16C(&src[0], &dst[0], len(src))
+	for i, h := range src {
+		want := dtype.Half(h).ToF32()
+		got := dst[i]
+		if math.IsNaN(float64(want)) {
+			if !math.IsNaN(float64(got)) {
+				t.Fatalf("%#04x: got %v, want NaN", h, got)
+			}
+			continue
+		}
+		if math.Float32bits(got) != math.Float32bits(want) {
+			t.Fatalf("%#04x: got %v (%#08x), want %v (%#08x)", h, got, math.Float32bits(got), want, math.Float32bits(want))
+		}
+	}
+}
