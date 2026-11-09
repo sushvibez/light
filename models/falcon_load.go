@@ -88,9 +88,10 @@ func fetchFalconConfig(repo string) (FalconConfig, error) {
 	return cfg, nil
 }
 
-// loadFalconTensors reads the checkpoint: sharded or single safetensors,
+// loadCheckpointTensors reads a checkpoint (an HF repo or a local directory):
+// sharded or single safetensors,
 // else pytorch_model.bin (falcon-rw-1b ships only the torch zip).
-func loadFalconTensors(repo string) (map[string]*tensor.Tensor, error) {
+func loadCheckpointTensors(repo string) (map[string]*tensor.Tensor, error) {
 	if st, err := os.Stat(repo); err == nil && st.IsDir() {
 		if sts, _ := filepath.Glob(filepath.Join(repo, "*.safetensors")); len(sts) > 0 {
 			t, _, err := safetensors.LoadFiles(sts, device.CPU())
@@ -117,7 +118,7 @@ func LoadFalconFromHF(repo string, dev device.Device, weightDT dtype.DType) (*Fa
 		return nil, err
 	}
 	cfg.WeightDType = weightDT
-	hf, err := loadFalconTensors(repo)
+	hf, err := loadCheckpointTensors(repo)
 	if err != nil {
 		return nil, err
 	}

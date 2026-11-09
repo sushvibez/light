@@ -76,7 +76,7 @@ GPTQ / AWQ) is complete as of 2026-11-08 except for the items below.
   with byte-level BPE + position offset), T5 / Flan-T5 (relative position
   bias), Nemotron-3.5-Embed-1B (after a Ministral-3 backbone).
 - Other Candle modules not ported: phi (1 / 1.5 / 2), gemma v1, starcoder2,
-  mpt, olmo / olmo2, granite, stable_lm, lfm2, SmolLM3, chatglm / codegeex4,
+  mpt, olmo / olmo2, stable_lm, lfm2, SmolLM3, chatglm / codegeex4,
   mamba / mamba2 / rwkv / recurrent_gemma (SSM scans), distilbert, jina_bert,
   xlm_roberta, marian, blip / llava / moondream / paligemma / pixtral,
   wuerstchen.
@@ -128,6 +128,9 @@ validation bar.
 - Missing kernels: `conv1d`, `gather`, `cumsum`, compare ops, `groupnorm`,
   `where`, `flash_attention`.
 - Remaining per-token cost after dispatch batching.
+- **Perf pass:** the Q8_0 GEMV decodes 35% slower than the 16-bit one on the
+  Intel iGPU (granite 2.9 vs 4.4 tok/s) although it reads about half the
+  bytes; `q8_0` should beat `w16` once it is vectorised.
 
 ### CUDA
 
