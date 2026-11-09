@@ -16,8 +16,11 @@ import (
 // Embedding is a lookup table: indices (..., K) → (..., K, EmbDim).
 type Embedding struct {
 	Weight *tensor.Tensor // (NumEmbeddings, EmbDim)
-	numEmb int
-	embDim int
+	// WidenF32 casts the gathered rows to F32: a 16-bit table kept for
+	// memory under an F32 model (exact widening).
+	WidenF32 bool
+	numEmb   int
+	embDim   int
 }
 
 // NewEmbedding initialises a table with small uniform values so the network
@@ -85,6 +88,11 @@ func (e *Embedding) Forward(indices *tensor.Tensor) (*tensor.Tensor, error) {
 		}
 	} else if looked, err = autograd.IndexSelect(e.Weight, flat); err != nil {
 		return nil, err
+	}
+	if e.WidenF32 && looked.DType() != dtype.F32 {
+		if looked, err = ops.Cast(looked, dtype.F32); err != nil {
+			return nil, err
+		}
 	}
 	// Reshape result back: indices shape + (embDim,)
 	newShape := append([]int{}, indices.Shape().Dims()...)

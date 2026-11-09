@@ -11,3 +11,6 @@ import (
 func allocWebGPUStorage(dt dtype.DType, nelems int, dev device.Device) (*storage.Storage, error) {
 	return nil, errNoWebGPU
 }
+
+// TrimWebGPU is a no-op in builds without WebGPU.
+func TrimWebGPU() {}

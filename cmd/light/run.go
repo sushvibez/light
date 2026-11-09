@@ -20,7 +20,7 @@ type modelFlags struct{ device, dtype string }
 
 func (f *modelFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.device, "device", "", "gpu (CUDA), webgpu (any GPU through wgpu-native) or cpu (default: CUDA when present, else cpu)")
-	fs.StringVar(&f.dtype, "dtype", "", "f32 or bf16 for safetensors weights (default: bf16 on the GPU, f32 on the CPU up to 6 GB)")
+	fs.StringVar(&f.dtype, "dtype", "", "f32 or bf16 for safetensors weights; on WebGPU bf16 / f16 store the matmul weights in 16 bits under F32 compute (default: bf16 on the GPU and WebGPU, f32 on the CPU up to 6 GB)")
 }
 
 // spec is e's load spec with the flags applied. On the CPU, safetensors
@@ -36,7 +36,7 @@ func (f *modelFlags) spec(e engine.Entry) engine.Spec {
 	case f.dtype != "":
 		s.DType = f.dtype
 	case s.Device == "webgpu":
-		s.DType = "f32" // WebGPU runs F32 only (whatever the checkpoint's size)
+		s.DType = "bf16" // F32 compute over BF16 weight storage (half the memory of f32)
 	case s.Device == "cpu" && (e.Kind == "safetensors" || e.Kind == "pytorch") && e.SizeBytes <= 6<<30:
 		s.DType = "f32" // the CPU BF16 path is slower than F32 for models that fit
 	}
