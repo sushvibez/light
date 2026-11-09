@@ -54,6 +54,7 @@ type hfRopeParams struct {
 	AttentionFactor      float64   `json:"attention_factor"`
 	MScale               float64   `json:"mscale"`
 	MScaleAllDim         float64   `json:"mscale_all_dim"`
+	Llama4ScalingBeta    float64   `json:"llama_4_scaling_beta"` // Llama 4 / Ministral 3 query scaling
 }
 
 // scaling converts the block to a RopeScaling (nil for plain RoPE).
@@ -234,6 +235,7 @@ func fetchLlamaConfig(repo string) (LlamaConfig, error) {
 	if err != nil {
 		return LlamaConfig{}, err
 	}
+	raw = textConfigJSON(raw)
 	var hf llamaHFConfig
 	if err := json.Unmarshal(raw, &hf); err != nil {
 		return LlamaConfig{}, fmt.Errorf("fetchLlamaConfig: parse: %w", err)
@@ -249,6 +251,13 @@ func fetchLlamaConfig(repo string) (LlamaConfig, error) {
 	if full != nil {
 		if full.RopeTheta > 0 {
 			cfg.RopeBase = full.RopeTheta
+		}
+		if full.Llama4ScalingBeta != 0 {
+			cfg.Llama4ScalingBeta = full.Llama4ScalingBeta
+			cfg.Llama4ScalingOrig = full.OriginalMaxPositions
+			if cfg.Llama4ScalingOrig == 0 {
+				cfg.Llama4ScalingOrig = hf.OriginalMaxPositions
+			}
 		}
 		if cfg.RopeScaling == nil {
 			if cfg.RopeScaling, err = full.scaling(hf.OriginalMaxPositions, hf.MaxPositions); err != nil {
@@ -383,10 +392,12 @@ func LoadCausalLMFromHF(repo string, dev device.Device, weightDT dtype.DType) (*
 		return LoadGLMFromHF(repo, dev, weightDT)
 	case "nemotron":
 		return LoadNemotronFromHF(repo, dev, weightDT)
+	case "mistral3", "ministral3", "ministral":
+		return LoadMinistralFromHF(repo, dev, weightDT)
 	case "granite", "granitemoehybrid":
 		return LoadGraniteFromHF(repo, dev, weightDT)
 	default:
-		return nil, fmt.Errorf("LoadCausalLMFromHF: model_type %q not supported (llama, mistral, qwen2, qwen3, qwen3_moe, mellum, sdar, phi3, glm, glm4, nemotron, mimo, granite, granitemoehybrid)", hf.ModelType)
+		return nil, fmt.Errorf("LoadCausalLMFromHF: model_type %q not supported (llama, mistral, qwen2, qwen3, qwen3_moe, mellum, sdar, phi3, glm, glm4, nemotron, mimo, granite, granitemoehybrid, mistral3, ministral3)", hf.ModelType)
 	}
 }
 
@@ -530,4 +541,18 @@ func HFModelType(repo string) (string, error) {
 		return "", err
 	}
 	return hf.ModelType, nil
+}
+
+// textConfigJSON returns the text_config object of a multimodal wrapper
+// config (mistral3, …) whose language-model fields are nested there, or
+// raw itself when the top level already describes the decoder.
+func textConfigJSON(raw []byte) []byte {
+	var top struct {
+		HiddenSize int             `json:"hidden_size"`
+		TextConfig json.RawMessage `json:"text_config"`
+	}
+	if json.Unmarshal(raw, &top) == nil && top.HiddenSize == 0 && len(top.TextConfig) > 0 {
+		return top.TextConfig
+	}
+	return raw
 }

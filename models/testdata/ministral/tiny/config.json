@@ -1,0 +1,125 @@
+{
+  "transformers_version": "5.21.0",
+  "architectures": [
+    "Mistral3ForConditionalGeneration"
+  ],
+  "output_hidden_states": false,
+  "return_dict": true,
+  "dtype": null,
+  "chunk_size_feed_forward": 0,
+  "is_encoder_decoder": false,
+  "id2label": {
+    "0": "LABEL_0",
+    "1": "LABEL_1"
+  },
+  "label2id": {
+    "LABEL_0": 0,
+    "LABEL_1": 1
+  },
+  "problem_type": null,
+  "vision_config": {
+    "architectures": null,
+    "output_hidden_states": false,
+    "return_dict": true,
+    "dtype": null,
+    "chunk_size_feed_forward": 0,
+    "is_encoder_decoder": false,
+    "id2label": {
+      "0": "LABEL_0",
+      "1": "LABEL_1"
+    },
+    "label2id": {
+      "LABEL_0": 0,
+      "LABEL_1": 1
+    },
+    "problem_type": null,
+    "hidden_size": 32,
+    "intermediate_size": 64,
+    "num_hidden_layers": 1,
+    "num_attention_heads": 2,
+    "num_channels": 3,
+    "image_size": 56,
+    "patch_size": 14,
+    "hidden_act": "gelu",
+    "attention_dropout": 0.0,
+    "rope_parameters": {
+      "rope_theta": 10000.0,
+      "rope_type": "axial"
+    },
+    "initializer_range": 0.02,
+    "head_dim": 16,
+    "_name_or_path": "",
+    "model_type": "pixtral",
+    "output_attentions": false
+  },
+  "text_config": {
+    "architectures": null,
+    "output_hidden_states": false,
+    "return_dict": true,
+    "dtype": null,
+    "chunk_size_feed_forward": 0,
+    "is_encoder_decoder": false,
+    "id2label": {
+      "0": "LABEL_0",
+      "1": "LABEL_1"
+    },
+    "label2id": {
+      "LABEL_0": 0,
+      "LABEL_1": 1
+    },
+    "problem_type": null,
+    "vocab_size": 512,
+    "hidden_size": 64,
+    "intermediate_size": 128,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 16,
+    "hidden_act": "silu",
+    "max_position_embeddings": 4096,
+    "initializer_range": 0.02,
+    "rms_norm_eps": 1e-05,
+    "use_cache": true,
+    "pad_token_id": 11,
+    "bos_token_id": 1,
+    "eos_token_id": 2,
+    "tie_word_embeddings": true,
+    "rope_parameters": {
+      "rope_type": "yarn",
+      "type": "yarn",
+      "rope_theta": 1000000.0,
+      "factor": 16.0,
+      "original_max_position_embeddings": 8,
+      "beta_fast": 32.0,
+      "beta_slow": 1.0,
+      "mscale": 1.0,
+      "mscale_all_dim": 1.0,
+      "llama_4_scaling_beta": 0.1
+    },
+    "sliding_window": null,
+    "attention_dropout": 0.0,
+    "_name_or_path": "",
+    "model_type": "ministral3",
+    "output_attentions": false
+  },
+  "image_token_index": 10,
+  "projector_hidden_act": "gelu",
+  "vision_feature_layer": -1,
+  "multimodal_projector_bias": false,
+  "spatial_merge_size": 2,
+  "tie_word_embeddings": true,
+  "_name_or_path": "",
+  "model_type": "mistral3",
+  "output_attentions": false,
+  "quantization_config": {
+    "quant_method": "fp8",
+    "activation_scheme": "static",
+    "weight_block_size": null,
+    "dequantize": false,
+    "modules_to_not_convert": [
+      "model.vision_tower",
+      "model.multi_modal_projector",
+      "lm_head"
+    ]
+  }
+}

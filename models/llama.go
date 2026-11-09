@@ -52,8 +52,14 @@ type LlamaConfig struct {
 	AttnScale          float64
 	ResidualMultiplier float64
 	LogitsScaling      float64
-	LayerNorm1P        bool // Nemotron: LayerNorm (mean-centred, with bias) instead of RMSNorm; loaders store gamma as 1 + w
-	ReLU2MLP           bool // Nemotron: non-gated MLP down(relu(up(x))²); GateProj is nil
+	// Llama 4 / Ministral 3 position-dependent query scaling (0 = off): q at
+	// absolute position p is multiplied by
+	// 1 + Llama4ScalingBeta · log(1 + floor(p / Llama4ScalingOrig)),
+	// i.e. exactly 1 below Llama4ScalingOrig.
+	Llama4ScalingBeta float64
+	Llama4ScalingOrig int
+	LayerNorm1P       bool // Nemotron: LayerNorm (mean-centred, with bias) instead of RMSNorm; loaders store gamma as 1 + w
+	ReLU2MLP          bool // Nemotron: non-gated MLP down(relu(up(x))²); GateProj is nil
 	// Mixture-of-experts FFN (Qwen3-MoE / Mixtral / DeepSeek-style). NumExperts
 	// > 0 turns the FFN of every layer selected by DecoderSparseStep /
 	// MLPOnlyLayers into an nn.SparseMoE with NumExpertsPerTok routed experts
@@ -713,6 +719,9 @@ func (m *Llama) runBlock(blk *llamaBlock, x *tensor.Tensor, B, T, prior int, dev
 	if err != nil {
 		return nil, err
 	}
+	if q, err = m.llama4QScale(q, T, prior, dev); err != nil {
+		return nil, err
+	}
 	k, err = m.applyRoPE(k, pos, prior+T, layerIdx, dev)
 	if err != nil {
 		return nil, err
@@ -916,6 +925,32 @@ attend:
 		}
 	}
 	return m.residual(x, mlpOut)
+}
+
+// llama4QScale applies the Llama 4 query scaling to q (B, NH, T, HD) at
+// positions prior … prior+T−1: the factor is formed in F32 and cast to q's
+// dtype before the multiply, as transformers' get_llama_4_attn_scale(…)
+// .to(query_states.dtype) does. A no-op while every position is below
+// Llama4ScalingOrig (the factor is exactly 1 there).
+func (m *Llama) llama4QScale(q *tensor.Tensor, T, prior int, dev device.Device) (*tensor.Tensor, error) {
+	beta, orig := m.Cfg.Llama4ScalingBeta, m.Cfg.Llama4ScalingOrig
+	if beta == 0 || orig <= 0 || prior+T <= orig {
+		return q, nil
+	}
+	f := make([]float32, T)
+	for t := range T {
+		f[t] = float32(1 + beta*math.Log(1+math.Floor(float64(prior+t)/float64(orig))))
+	}
+	ft, err := tensor.New(f, []int{1, 1, T, 1}, dev)
+	if err != nil {
+		return nil, err
+	}
+	if q.DType() != dtype.F32 {
+		if ft, err = ops.Cast(ft, q.DType()); err != nil {
+			return nil, err
+		}
+	}
+	return ops.Mul(q, ft)
 }
 
 // residual is x + branch, the branch scaled by ResidualMultiplier first
