@@ -91,6 +91,7 @@ status are in the commits (and, up to 2026-11-09, the
 | Model | File | Status | Notes |
 |-------|------|--------|-------|
 | **Stable Diffusion 1.5** | `models/sd*.go` | Done — pretrained | CLIP text encoder + UNet2DCondition + VAE decoder + DDIM; BF16 on RTX 5060 Ti. `LoadSD15FromHF`; `examples/37_sd15_txt2img` |
+| **SDXL base** | `models/sdxl.go`, `sdxl_load.go` (UNet / CLIP generalised in `sd_unet.go`, `sd_clip.go`) | ✅ Verified 2026-11-09 | CLIP-L + OpenCLIP bigG (penultimate states, projected pooled), 3-level UNet with 1/2/10 transformer depth, text-time add-embedding, SDXL VAE; both encoders match diffusers to 1e-4, UNet step within 1.1 % (BF16 vs fp16); 1024² in 34 s / 30 DDIM steps on the RTX 5060 Ti (10.3 GB). `LoadSDXLFromHF`; `examples/43_sdxl_txt2img`; `scripts/verify/ref_sdxl.py` |
 
 ### 1.4 Vision (classification and detection)
 

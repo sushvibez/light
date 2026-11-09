@@ -219,9 +219,18 @@ func (s *StableDiffusion) Generate(opts SDGenerateOpts, dev device.Device) (*ten
 	if err != nil {
 		return nil, fmt.Errorf("vae decode: %w", err)
 	}
+	return sdImageFromDecoded(decoded)
+}
+
+// sdImageFromDecoded clamps a VAE output (1, 3, H, W) in [-1, 1] to an
+// (H, W, 3) F32 image in [0, 1] on the CPU.
+func sdImageFromDecoded(decoded *tensor.Tensor) (*tensor.Tensor, error) {
+	var err error
 	// VAE may produce BF16; cast to F32 for the CPU pixel-pack loop below.
-	if decoded, err = maybeCast(decoded, dtype.F32); err != nil {
-		return nil, err
+	if decoded.DType() != dtype.F32 {
+		if decoded, err = ops.Cast(decoded, dtype.F32); err != nil {
+			return nil, err
+		}
 	}
 	// Clamp to [-1, 1] then rescale to [0, 1] and reshape (B, C, H, W) → (H, W, C).
 	cpu, err := decoded.To(device.CPU())

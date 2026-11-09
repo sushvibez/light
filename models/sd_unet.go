@@ -175,12 +175,12 @@ func (b *basicTransformerBlock) parameters() []*tensor.Tensor {
 type transformer2DModel struct {
 	GN      *nn.GroupNorm
 	ProjIn  *nn.Linear
-	Block   *basicTransformerBlock
+	Blocks  []*basicTransformerBlock // SD 1.5: one; SDXL: 1 / 2 / 10 per level
 	ProjOut *nn.Linear
 	c       int
 }
 
-func newTransformer2DModel(channels, numHeads, ctxDim int, wdt dtype.DType, dev device.Device) (*transformer2DModel, error) {
+func newTransformer2DModel(channels, numHeads, ctxDim, depth int, wdt dtype.DType, dev device.Device) (*transformer2DModel, error) {
 	gn, err := nn.NewGroupNormWithDType(channels, 32, 1e-6, wdt, dev)
 	if err != nil {
 		return nil, err
@@ -189,15 +189,20 @@ func newTransformer2DModel(channels, numHeads, ctxDim int, wdt dtype.DType, dev 
 	if err != nil {
 		return nil, err
 	}
-	b, err := newBasicTransformerBlock(channels, numHeads, ctxDim, wdt, dev)
-	if err != nil {
-		return nil, err
+	if depth < 1 {
+		depth = 1
+	}
+	blocks := make([]*basicTransformerBlock, depth)
+	for i := range blocks {
+		if blocks[i], err = newBasicTransformerBlock(channels, numHeads, ctxDim, wdt, dev); err != nil {
+			return nil, err
+		}
 	}
 	po, err := nn.NewLinearUninit(channels, channels, true, wdt, dev)
 	if err != nil {
 		return nil, err
 	}
-	return &transformer2DModel{GN: gn, ProjIn: pi, Block: b, ProjOut: po, c: channels}, nil
+	return &transformer2DModel{GN: gn, ProjIn: pi, Blocks: blocks, ProjOut: po, c: channels}, nil
 }
 
 func (t *transformer2DModel) forward(x, ctx *tensor.Tensor) (*tensor.Tensor, error) {
@@ -227,9 +232,10 @@ func (t *transformer2DModel) forward(x, ctx *tensor.Tensor) (*tensor.Tensor, err
 	if err != nil {
 		return nil, err
 	}
-	h, err = t.Block.forward(h, ctx)
-	if err != nil {
-		return nil, err
+	for _, blk := range t.Blocks {
+		if h, err = blk.forward(h, ctx); err != nil {
+			return nil, err
+		}
 	}
 	h, err = t.ProjOut.Forward(h)
 	if err != nil {
@@ -266,7 +272,9 @@ func (t *transformer2DModel) parameters() []*tensor.Tensor {
 	var ps []*tensor.Tensor
 	ps = append(ps, t.GN.Parameters()...)
 	ps = append(ps, t.ProjIn.Parameters()...)
-	ps = append(ps, t.Block.parameters()...)
+	for _, blk := range t.Blocks {
+		ps = append(ps, blk.parameters()...)
+	}
 	ps = append(ps, t.ProjOut.Parameters()...)
 	return ps
 }
@@ -279,7 +287,7 @@ type crossAttnDownBlock struct {
 	Downsample *downsample2D // nil for the last down block
 }
 
-func newCrossAttnDownBlock(in, out, layers, numHeads, ctxDim, tembDim int, addDown bool, wdt dtype.DType, dev device.Device) (*crossAttnDownBlock, error) {
+func newCrossAttnDownBlock(in, out, layers, numHeads, ctxDim, depth, tembDim int, addDown bool, wdt dtype.DType, dev device.Device) (*crossAttnDownBlock, error) {
 	rs := make([]*resnetBlock2D, layers)
 	as := make([]*transformer2DModel, layers)
 	for i := 0; i < layers; i++ {
@@ -291,7 +299,7 @@ func newCrossAttnDownBlock(in, out, layers, numHeads, ctxDim, tembDim int, addDo
 		if err != nil {
 			return nil, err
 		}
-		a, err := newTransformer2DModel(out, numHeads, ctxDim, wdt, dev)
+		a, err := newTransformer2DModel(out, numHeads, ctxDim, depth, wdt, dev)
 		if err != nil {
 			return nil, err
 		}
@@ -415,12 +423,12 @@ type unetMidBlockCrossAttn struct {
 	R1   *resnetBlock2D
 }
 
-func newUNetMidBlockCrossAttn(channels, numHeads, ctxDim, tembDim int, wdt dtype.DType, dev device.Device) (*unetMidBlockCrossAttn, error) {
+func newUNetMidBlockCrossAttn(channels, numHeads, ctxDim, depth, tembDim int, wdt dtype.DType, dev device.Device) (*unetMidBlockCrossAttn, error) {
 	r0, err := newResnetBlock2D(channels, channels, tembDim, sdResnetEpsUNet, wdt, dev)
 	if err != nil {
 		return nil, err
 	}
-	a, err := newTransformer2DModel(channels, numHeads, ctxDim, wdt, dev)
+	a, err := newTransformer2DModel(channels, numHeads, ctxDim, depth, wdt, dev)
 	if err != nil {
 		return nil, err
 	}
@@ -476,7 +484,7 @@ func resInChannels(i, numLayers, prevOut, out, in int) int {
 	return resnetIn + skipCh
 }
 
-func newCrossAttnUpBlock(prevOut, out, in, layers, numHeads, ctxDim, tembDim int, addUp bool, wdt dtype.DType, dev device.Device) (*crossAttnUpBlock, error) {
+func newCrossAttnUpBlock(prevOut, out, in, layers, numHeads, ctxDim, depth, tembDim int, addUp bool, wdt dtype.DType, dev device.Device) (*crossAttnUpBlock, error) {
 	rs := make([]*resnetBlock2D, layers)
 	as := make([]*transformer2DModel, layers)
 	for i := 0; i < layers; i++ {
@@ -485,7 +493,7 @@ func newCrossAttnUpBlock(prevOut, out, in, layers, numHeads, ctxDim, tembDim int
 		if err != nil {
 			return nil, err
 		}
-		a, err := newTransformer2DModel(out, numHeads, ctxDim, wdt, dev)
+		a, err := newTransformer2DModel(out, numHeads, ctxDim, depth, wdt, dev)
 		if err != nil {
 			return nil, err
 		}
@@ -612,13 +620,48 @@ func (b *upBlock) parameters() []*tensor.Tensor {
 type SDUNetConfig struct {
 	InChannels        int
 	OutChannels       int
-	BlockOutChannels  []int       // {320, 640, 1280, 1280} for SD 1.5
+	BlockOutChannels  []int       // {320, 640, 1280, 1280} for SD 1.5; {320, 640, 1280} for SDXL
 	LayersPerBlock    int         // 2
-	NumHeads          int         // 8 for SD 1.5
-	CrossAttentionDim int         // 768 (CLIP-L hidden)
+	NumHeads          int         // 8 for SD 1.5 (every level); ignored when HeadDim > 0
+	HeadDim           int         // SDXL: 64 → heads = channels / 64 per level (5, 10, 20)
+	CrossAttentionDim int         // 768 (CLIP-L hidden); 2048 for SDXL (CLIP-L ⊕ bigG)
 	TimeEmbDim        int         // 1280 = 4 * BlockOutChannels[0]
 	NormGroups        int         // 32
 	WeightDType       dtype.DType // BF16 for half-memory inference; defaults to F32
+	// CrossAttn says which levels carry Transformer2D blocks (down_block_types
+	// / up_block_types; nil = every level but the last, SD 1.5).
+	CrossAttn []bool
+	// TransformerDepth is transformer_layers_per_block per level (nil = 1).
+	TransformerDepth []int
+	// AddEmbedDim > 0 enables the "text_time" addition embedding (SDXL):
+	// a (B, AddEmbedDim) vector of pooled text embedding ⊕ embedded
+	// time ids goes through linear_1 → SiLU → linear_2 and is added to the
+	// time embedding. 2816 = 1280 + 6 × 256 for SDXL base.
+	AddEmbedDim int
+}
+
+// crossAttn reports whether level i has cross-attention transformers.
+func (c SDUNetConfig) crossAttn(i int) bool {
+	if c.CrossAttn == nil {
+		return i < len(c.BlockOutChannels)-1
+	}
+	return c.CrossAttn[i]
+}
+
+// depth is the transformer depth at level i.
+func (c SDUNetConfig) depth(i int) int {
+	if c.TransformerDepth == nil {
+		return 1
+	}
+	return c.TransformerDepth[i]
+}
+
+// heads is the attention head count at level i.
+func (c SDUNetConfig) heads(i int) int {
+	if c.HeadDim > 0 {
+		return c.BlockOutChannels[i] / c.HeadDim
+	}
+	return c.NumHeads
 }
 
 // SDUNetSD15 returns the SD 1.5 default UNet config.
@@ -644,6 +687,8 @@ type SDUNet struct {
 	ConvIn     *nn.Conv2d
 	TimeEmbed1 *nn.Linear
 	TimeEmbed2 *nn.Linear
+	AddEmbed1  *nn.Linear // SDXL add_embedding.linear_1 (nil without AddEmbedDim)
+	AddEmbed2  *nn.Linear
 	DownBlocks []sdDownBlock // mixed types: crossAttnDownBlock or downBlock
 	Mid        *unetMidBlockCrossAttn
 	UpBlocks   []sdUpBlock // mixed: crossAttnUpBlock or upBlock
@@ -695,8 +740,12 @@ func (b sdUpBlock) parameters() []*tensor.Tensor {
 // specified by `cfg.WeightDType` (F32 default; BF16 supported for half-mem
 // inference). Loaders are expected to overwrite values immediately.
 func NewSDUNet(cfg SDUNetConfig, dev device.Device) (*SDUNet, error) {
-	if len(cfg.BlockOutChannels) != 4 {
-		return nil, fmt.Errorf("SDUNet: expect 4 block_out_channels, got %d", len(cfg.BlockOutChannels))
+	L := len(cfg.BlockOutChannels)
+	if L < 2 {
+		return nil, fmt.Errorf("SDUNet: expect at least 2 block_out_channels, got %d", L)
+	}
+	if (cfg.CrossAttn != nil && len(cfg.CrossAttn) != L) || (cfg.TransformerDepth != nil && len(cfg.TransformerDepth) != L) {
+		return nil, fmt.Errorf("SDUNet: CrossAttn / TransformerDepth must have one entry per level (%d)", L)
 	}
 	wdt := cfg.WeightDType
 	if wdt == dtype.F16 { // F16 is the dtype enum's zero-value; treat as "default to F32"
@@ -715,15 +764,24 @@ func NewSDUNet(cfg SDUNetConfig, dev device.Device) (*SDUNet, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Down blocks: 3 cross-attn, 1 plain.
-	downBlocks := make([]sdDownBlock, 4)
+	var add1, add2 *nn.Linear
+	if cfg.AddEmbedDim > 0 {
+		if add1, err = nn.NewLinearUninit(cfg.AddEmbedDim, cfg.TimeEmbDim, true, wdt, dev); err != nil {
+			return nil, err
+		}
+		if add2, err = nn.NewLinearUninit(cfg.TimeEmbDim, cfg.TimeEmbDim, true, wdt, dev); err != nil {
+			return nil, err
+		}
+	}
+	// Down blocks: cross-attn where the config says so (SD 1.5: 3 + 1 plain).
+	downBlocks := make([]sdDownBlock, L)
 	prev := bOC[0]
-	for i := 0; i < 4; i++ {
+	for i := 0; i < L; i++ {
 		out := bOC[i]
-		isLast := i == 3
+		isLast := i == L-1
 		addDown := !isLast
-		if i < 3 {
-			b, err := newCrossAttnDownBlock(prev, out, cfg.LayersPerBlock, cfg.NumHeads, cfg.CrossAttentionDim, cfg.TimeEmbDim, addDown, wdt, dev)
+		if cfg.crossAttn(i) {
+			b, err := newCrossAttnDownBlock(prev, out, cfg.LayersPerBlock, cfg.heads(i), cfg.CrossAttentionDim, cfg.depth(i), cfg.TimeEmbDim, addDown, wdt, dev)
 			if err != nil {
 				return nil, fmt.Errorf("down block %d: %w", i, err)
 			}
@@ -737,33 +795,29 @@ func NewSDUNet(cfg SDUNetConfig, dev device.Device) (*SDUNet, error) {
 		}
 		prev = out
 	}
-	mid, err := newUNetMidBlockCrossAttn(bOC[3], cfg.NumHeads, cfg.CrossAttentionDim, cfg.TimeEmbDim, wdt, dev)
+	mid, err := newUNetMidBlockCrossAttn(bOC[L-1], cfg.heads(L-1), cfg.CrossAttentionDim, cfg.depth(L-1), cfg.TimeEmbDim, wdt, dev)
 	if err != nil {
 		return nil, err
 	}
-	// Up blocks: reversed channel layout, layers_per_block + 1 = 3 resnets.
-	upBlocks := make([]sdUpBlock, 4)
-	revOC := []int{bOC[3], bOC[2], bOC[1], bOC[0]}
-	prev = bOC[3] // mid output
-	for i := 0; i < 4; i++ {
-		out := revOC[i]
-		var in int
-		if i+1 >= 4 {
-			in = revOC[3]
-		} else {
-			in = revOC[i+1]
-		}
-		isLast := i == 3
+	// Up blocks: reversed channel layout, layers_per_block + 1 = 3 resnets;
+	// up block i works at level L-1-i.
+	upBlocks := make([]sdUpBlock, L)
+	prev = bOC[L-1] // mid output
+	for i := 0; i < L; i++ {
+		level := L - 1 - i
+		out := bOC[level]
+		in := bOC[max(level-1, 0)]
+		isLast := i == L-1
 		addUp := !isLast
 		layers := cfg.LayersPerBlock + 1
-		if i == 0 {
+		if !cfg.crossAttn(level) {
 			b, err := newUpBlock(prev, out, in, layers, cfg.TimeEmbDim, addUp, wdt, dev)
 			if err != nil {
 				return nil, fmt.Errorf("up block %d: %w", i, err)
 			}
 			upBlocks[i] = sdUpBlock{Plain: b}
 		} else {
-			b, err := newCrossAttnUpBlock(prev, out, in, layers, cfg.NumHeads, cfg.CrossAttentionDim, cfg.TimeEmbDim, addUp, wdt, dev)
+			b, err := newCrossAttnUpBlock(prev, out, in, layers, cfg.heads(level), cfg.CrossAttentionDim, cfg.depth(level), cfg.TimeEmbDim, addUp, wdt, dev)
 			if err != nil {
 				return nil, fmt.Errorf("up block %d: %w", i, err)
 			}
@@ -780,7 +834,7 @@ func NewSDUNet(cfg SDUNetConfig, dev device.Device) (*SDUNet, error) {
 		return nil, err
 	}
 	return &SDUNet{
-		Cfg: cfg, ConvIn: convIn, TimeEmbed1: t1, TimeEmbed2: t2,
+		Cfg: cfg, ConvIn: convIn, TimeEmbed1: t1, TimeEmbed2: t2, AddEmbed1: add1, AddEmbed2: add2,
 		DownBlocks: downBlocks, Mid: mid, UpBlocks: upBlocks,
 		NormOut: normOut, ConvOut: convOut,
 	}, nil
@@ -790,6 +844,14 @@ func NewSDUNet(cfg SDUNetConfig, dev device.Device) (*SDUNet, error) {
 // of current diffusion step indices; the time-embedding MLP is applied
 // internally. `ctx` is the (B, T, ctxDim) cross-attention context.
 func (m *SDUNet) Forward(latent, timestepEmb, ctx *tensor.Tensor) (*tensor.Tensor, error) {
+	return m.ForwardAug(latent, timestepEmb, ctx, nil)
+}
+
+// ForwardAug is Forward with SDXL's addition embedding: addEmb (B,
+// AddEmbedDim) = pooled text embedding ⊕ embedded time ids, mapped by
+// add_embedding (linear → SiLU → linear) and added to the time embedding.
+// nil addEmb is SD 1.5.
+func (m *SDUNet) ForwardAug(latent, timestepEmb, ctx, addEmb *tensor.Tensor) (*tensor.Tensor, error) {
 	// Time-embed MLP: (B, BlockOut[0]) → (B, TimeEmbDim) → SiLU → (B, TimeEmbDim)
 	t, err := m.TimeEmbed1.Forward(timestepEmb)
 	if err != nil {
@@ -802,6 +864,24 @@ func (m *SDUNet) Forward(latent, timestepEmb, ctx *tensor.Tensor) (*tensor.Tenso
 	temb, err := m.TimeEmbed2.Forward(t)
 	if err != nil {
 		return nil, err
+	}
+	if m.AddEmbed1 != nil {
+		if addEmb == nil {
+			return nil, fmt.Errorf("SDUNet: this UNet needs the (B, %d) addition embedding", m.Cfg.AddEmbedDim)
+		}
+		a, err := m.AddEmbed1.Forward(addEmb)
+		if err != nil {
+			return nil, err
+		}
+		if a, err = autograd.SiLU(a); err != nil {
+			return nil, err
+		}
+		if a, err = m.AddEmbed2.Forward(a); err != nil {
+			return nil, err
+		}
+		if temb, err = autograd.Add(temb, a); err != nil {
+			return nil, err
+		}
 	}
 	// conv_in
 	h, err := m.ConvIn.Forward(latent)
@@ -848,6 +928,10 @@ func (m *SDUNet) Parameters() []*tensor.Tensor {
 	ps = append(ps, m.ConvIn.Parameters()...)
 	ps = append(ps, m.TimeEmbed1.Parameters()...)
 	ps = append(ps, m.TimeEmbed2.Parameters()...)
+	if m.AddEmbed1 != nil {
+		ps = append(ps, m.AddEmbed1.Parameters()...)
+		ps = append(ps, m.AddEmbed2.Parameters()...)
+	}
 	for _, b := range m.DownBlocks {
 		ps = append(ps, b.parameters()...)
 	}
