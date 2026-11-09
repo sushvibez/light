@@ -1,8 +1,8 @@
 # Light
 
 Light is a Go port of [Hugging Face Candle](https://github.com/huggingface/candle):
-a tensor library and model runtime for machine learning with CPU and CUDA
-backends, a PyTorch-style autograd, loaders for safetensors / GGUF / npz /
+a tensor library and model runtime for machine learning with CPU, CUDA and
+WebGPU backends, a PyTorch-style autograd, loaders for safetensors / GGUF / npz /
 PyTorch checkpoints, HF-compatible tokenizers, and ports of the transformer,
 vision, diffusion and speech models that Candle ships, each verified against
 the reference implementation on real weights.
@@ -18,16 +18,18 @@ app, Light Studio (Wails v3 + React), lives in its own repository,
 | Area | Highlights |
 |---|---|
 | Tensors | 12 dtypes (F32/F64/F16/BF16/F8, ints, bool) plus GGUF block-quantized formats; views, broadcasting, reductions, indexing, sorting, scans |
-| Ops | Every op has a CPU and a CUDA implementation with parity tests; cuBLAS / cuBLASLt (FP8) / cuDNN where they help, fused dequant-matmul kernels for Q4/Q5/Q6/Q8 weights |
+| Ops | Every op has a CPU and a CUDA implementation with parity tests; cuBLAS / cuBLASLt (FP8) / cuDNN where they help, fused dequant-matmul kernels for GGUF, GPTQ / AWQ 4-bit and block-scaled FP8 weights; AVX2 SIMD multithreaded CPU kernels; WebGPU without cgo for LLM inference |
 | Autograd | Define-by-run graph (`autograd/`), optimizers and training loop examples (`training/`) |
-| Models | Llama 3.x, Qwen2/2.5/3 (+MoE), Mistral, Phi-3/3.5/4-mini, Gemma 2/3/4, EmbeddingGemma 2, Falcon, GPT-2, BERT, Whisper, Qwen3-ASR, Mimi, Moshi, SDAR (diffusion LM), Stable Diffusion 1.5, ResNet / MobileNet / ViT / VGG / YOLOv5 — see [`MODELS.md`](MODELS.md) for what each was verified against |
-| Formats | safetensors (sharded), GGUF (weights kept quantized, embedded tokenizer), `.npy`/`.npz`, PyTorch `.pth`/`.bin`, Hugging Face Hub downloads with resume |
+| Models | Llama 3.x, Qwen2/2.5/3 (+MoE), Qwen3.5 (Gated DeltaNet, up to 27B), DeepSeek-V2/V3, GLM-4, Nemotron, MiMo, MiniMax-Text-01, Muse Glimmer 30B, Mellum 2.1, Phi-3/3.5/4-mini, Gemma 2/3/4, EmbeddingGemma 2, Falcon, GPT-2, BERT, Whisper, Qwen3-ASR, Mimi, Moshi (real-time speech-to-speech), SDAR (diffusion LM), Stable Diffusion 1.5, ResNet / MobileNet / ViT / VGG / YOLOv5 — see [`STATUS.md`](STATUS.md) for what each was verified against |
+| Formats | safetensors (sharded, FP8, GPTQ / AWQ), GGUF (weights kept quantized, embedded tokenizer), `.npy`/`.npz`, PyTorch `.pth`/`.bin`, Hugging Face Hub downloads with resume |
 | Tokenizers | HF `tokenizer.json` (BPE, byte-level, SentencePiece-BPE, Unigram), raw SentencePiece `.model`, GGUF-embedded vocabularies |
 | Engine | Catalog of cached checkpoints, chat templates, streaming generation, `/v1/chat/completions`, `/v1/audio/transcriptions`, `/v1/embeddings`, `/v1/audio/conversations` |
 
-Progress and design notes: [`FEATURES.md`](FEATURES.md), [`CHECKPOINTS.md`](CHECKPOINTS.md),
-[`docs/PARITY-CANDLE.md`](docs/PARITY-CANDLE.md) (module-by-module parity with Candle),
-[`docs/design/`](docs/design/) and [`docs/plans/`](docs/plans/).
+Documentation: [`STATUS.md`](STATUS.md) (what works: models, features, kernel
+matrix, comparison with Candle), [`ROADMAP.md`](ROADMAP.md) (open work),
+[`CHECKPOINTS.md`](CHECKPOINTS.md) (dated work log, the source of truth),
+[`docs/design/`](docs/design/) (live design notes) and
+[`docs/history/`](docs/history/) (original design, plan and GoLight porting notes).
 
 ## Requirements
 

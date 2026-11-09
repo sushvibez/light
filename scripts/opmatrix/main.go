@@ -1,6 +1,6 @@
 // Command opmatrix prints the op × device × dtype coverage matrix from the
 // live kernel registry. It is the source for the "Kernel coverage" section of
-// FEATURES.md: run it after adding kernels and paste the table.
+// STATUS.md (§3): run it after adding kernels and paste the table.
 //
 //	go run ./scripts/opmatrix              # CPU + CUDA (default build)
 //	go run ./scripts/opmatrix              # includes the WebGPU column

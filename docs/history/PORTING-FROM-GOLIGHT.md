@@ -5,7 +5,7 @@ Decision 2026-10-27: this repo is the main line. `workspace/accelerate/light`
 is archived. Reason: with CUDA 13.1 reinstalled, this repo ran Qwen2-0.5B at
 ~31 tok/s and SD 1.5 correctly on the RTX 5060 Ti, while GoLight's CUDA path
 was wrong on Qwen and ~300x slower. GoLight's reusable assets are being
-ported here; its parity planning doc is kept at `docs/archive-golight/parity.md`.
+ported here; its parity planning doc is kept at `docs/history/golight-parity.md`.
 
 ## State preserved
 
@@ -24,7 +24,7 @@ ported here; its parity planning doc is kept at `docs/archive-golight/parity.md`
 | LayerNorm / RMSNorm take the autograd path when a gradient is wanted (training through norms had silently broken in May) | `nn/norm.go` | `TestGradCheckTransformerBlock` passes again; SD 1.5 BF16 still renders |
 | `cudart.MemInfo` stub for `-tags nocuda` so examples 35/36/37 build without CUDA | `internal/cudart/meminfo_nocuda.go` | `go build -tags nocuda ./...` |
 | WordPiece + Unigram tokenizers, `tokenizer.Load` dispatch, BERT post-processor | `tokenizer/{tokenizer,wordpiece,unigram,normalizer,postprocessor,specials,accents_table}.go` | exact match vs HF `tokenizers` on bge-small-en-v1.5 (10 sentences) and a synthetic Unigram |
-| GoLight parity doc + verification harness | `docs/archive-golight/parity.md`, `scripts/verify/` | |
+| GoLight parity doc + verification harness | `docs/history/golight-parity.md`, `scripts/verify/` | |
 | SDPA + CausalMask / SlidingWindowMask / ALiBi | `nn/sdpa.go` | SDPA == MultiHeadAttention to 1e-5; slopes match paper |
 | FlashAttention (CPU online softmax; CUDA tiled kernels for D∈{32,64,128}, generic D≤256) | `ops/flash_attention.go`, `kernels/cuda/src/flash_attn.cu` | CPU↔CUDA and FA↔SDPA parity over S∈{1,7,64,257}×D∈{32,64,128}; S=1024 D=64: 0.84 ms vs 13.5 ms SDPA (16×), causal 4.0× |
 | Pad / Flip / Roll / Sort / Lp Norm | `ops/shape_ops.go` (+ CUDA F32 kernels; Sort is a host round-trip on CUDA) | parity tests |

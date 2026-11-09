@@ -4,7 +4,7 @@
 **Status:** Draft
 **Goal:** Run `model_type: qwen3_5` checkpoints (Qwen3.5-0.8B … Qwen3.8-27B) as text-only causal LMs, verified against transformers 5.21, by adding one new op family (the gated delta rule) and a hybrid model that reuses the existing Llama attention pieces.
 
-Roadmap item 11 in `MODELS.md` ("Gated DeltaNet + gated attention + MRoPE"); "Revised next-5" #2.
+Roadmap item 11 of the 2026-10-27 inference roadmap ("Gated DeltaNet + gated attention + MRoPE"; "Revised next-5" #2), formerly in `MODELS.md`. Done as of 2026-11-08; results in [`STATUS.md`](../../STATUS.md).
 
 ---
 
@@ -80,7 +80,7 @@ So decode memory per linear layer is constant: about 3 MB per sequence on the 27
 
 Loader `LoadQwen35FromHF(repo, dev, dtype)`: `text_config`, the `model.language_model.` prefix, `layer_types`; it skips `mtp.*` / `model.visual.*`. Route `qwen3_5` / `qwen3_5_text` in `LoadCausalLMFromHF`; add both to the engine catalog.
 
-### 2.3 Verification (bar from MODELS.md: top-5 on a ≥15-token chat prompt)
+### 2.3 Verification (bar from STATUS.md: top-5 on a ≥15-token chat prompt)
 
 1. **Op level:** golden tensors from transformers' own `torch_recurrent_gated_delta_rule` / `torch_chunk_gated_delta_rule` on random inputs (several T, including T not a multiple of 64, with and without an initial state), as `.npy` fixtures through `light/npy`. Chunked must equal recurrent within 1e-5 F32.
 2. **Tiny-random model:** `scripts/verify/ref_qwen35.py --make-tiny`, the same pattern as `ref_falcon.py` / `ref_mellum.py`. Two of each layer type, Hv > Hk to cover the repeat, partial RoPE, vocab 512, a ~1 MB fixture. Top-5 + greedy + chunked-vs-single-shot on CPU, and a CUDA parity check.
