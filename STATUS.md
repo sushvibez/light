@@ -498,19 +498,20 @@ Legend: ✅ have · ⚠️ partial · ❌ missing · — not applicable.
 
 ### 4.4 Models
 
-Candle `candle-transformers/src/models` (main, Oct 2026), grouped, with Light's status. **2026 Candle additions in bold.**
+Candle's `candle-transformers/src/models` (Oct 2026) by group; details per model in §1.
 
-**LLMs (dense):** llama ✅, mistral ✅ (Mistral 7B v0.3 BF16, 2026-11-09), phi ❌ (Candle's `phi` = Phi-1/1.5/2 parallel-block architecture; not ported), phi3 ✅ (Phi-3.5-mini; Phi-4-mini with partial rotary 0.75 + longrope + tied head + GPT-4o tokenizer, which Candle's phi3 lacks), gemma3 ✅ (1B, 4B text-only; SigLIP vision input open), gemma2 ✅, **gemma4** ✅ (E2B text with PLE and KV sharing; Candle's gemma4 text port lacks PLE/KV sharing, so Light is ahead on E2B/E4B), gemma (v1) ❌, qwen2 ✅, qwen3 ✅ (dense via Qwen3-ASR/SDAR bodies; standalone checkpoint logit check open), deepseek2 ✅ (2026-11-08: V2-Lite-Chat verified; V2 group-limited and V3 sigmoid routing tiny-verified), **falcon** ✅ (all three decoder layouts incl. ALiBi and the 40B grouped-K/V architecture, which Candle's falcon.rs rejects), chatglm / glm4 / glm4_new / codegeex4: glm4 ✅ (GLM-4-9B-0414 verified 2026-11-08; `glm` tiny-verified; chatglm / codegeex4 ❌), bigcode / starcoder2 ❌, mpt ❌, persimmon ❌, stable_lm ❌, yi ❌ (= llama), olmo / olmo2 ❌, granite ❌, helium ❌, **lfm2** ❌, **smol** (SmolLM3) ❌, llama2_c ❌, mixformer (phi-1/2) ❌.
-**LLMs (MoE / recurrent):** qwen3_moe ✅ (HF + GGUF + 4-bit experts), mixtral / qwen2_moe ⚠️ (same `nn.SparseMoE` block, HF loaders not wired), granitemoehybrid ⚠️ (attention-only layers, e.g. granite-4.0-micro; Mamba layers ❌), based, mamba, **mamba2**, rwkv_v5/v6/**v7**, recurrent_gemma ❌ (Light has gated-delta and lightning-attention scans, not Mamba / RWKV ones).
-**Light models without a Candle module in this list:** Qwen3.5 (Gated DeltaNet hybrid, 0.8B–27B), Muse Glimmer 30B, Mellum 2.1, Nemotron, MiMo (+ MTP speculative decoding), MiniMax-Text-01 (tiny-verified), SDAR (block-diffusion LM), Qwen3-ASR, EmbeddingGemma 2.
-**Quantized GGUF variants:** 19 modules in Candle; Light: `LoadLlamaGGUF` covering the llama / qwen2 / qwen3 / mistral / qwen3moe GGUF architectures with quantized embedding, tied head and MoE experts, plus `LoadQwen35GGUF`, `LoadMuseGlimmerGGUF` and `LoadMoshiGGUF`; verified against llama.cpp tokenizer fixtures and transformers logits (Qwen2 0.5B, Llama-3.2, Qwen3-MoE, Qwen3.5-27B, Muse Glimmer 30B).
-**Encoders / embeddings:** bert ✅, **embedding_gemma2** ✅ (Candle has no port, Light ahead), distilbert ❌, jina_bert ❌, **nomic_bert** ❌, modernbert ❌, debertav2 ❌, xlm_roberta ❌, stella_en_v5 ❌, nvembed_v2 ❌, colpali ❌, t5 ❌, marian ❌.
-**Vision:** resnet ✅, vgg ✅ (random init), vit ✅, beit / dinov2 / dinov2reg4 / eva2 ❌, convnext ❌, convmixer ❌, efficientnet / efficientvit ❌, mobileone / mobilenetv4 / fastvit ❌ (we have mobilenetv2 instead), hiera ❌, repvgg ❌, segformer ❌, segment_anything ❌, depth_anything_v2 ❌, trocr ❌. Light-only: yolov5 (random init), resnet9, lenet, alexnet.
-**Multimodal:** clip ⚠️ (SD text tower only), openclip / chinese_clip / siglip / mobileclip ❌, blip ❌, llava ❌, moondream ❌, paligemma ❌, pixtral ❌, qwen3_vl ❌, **paddleocr_vl** ❌, voxtral ❌.
-**Diffusion:** stable_diffusion ⚠️ (1.5 only; Candle: 1.5/2.1/XL/Turbo), mmdit (SD3) ❌, flux ❌, wuerstchen ❌, **z_image** ❌.
-**Audio:** whisper ✅, Light-only qwen3_asr ✅, **mimi** ✅ (+ streaming), **moshi** ✅ (Q8 GGUF, verified vs Rust moshi-core; full-duplex protocol, real time on an L4); encodec, dac, snac, metavoice, parler_tts, csm ❌.
+| Group | Light ✅ | Partial ⚠️ | Missing ❌ |
+|-------|---------|------------|-----------|
+| LLMs (dense) | llama, mistral, phi3 (+ Phi-4-mini), gemma / 2 / 3 / 4, qwen2, qwen3, deepseek2, falcon, glm4, granite | — | phi-1/2 (mixformer), gemma v1, chatglm, codegeex4, starcoder2, mpt, persimmon, stable_lm, olmo, helium, lfm2, smol, llama2_c |
+| LLMs (MoE / recurrent) | qwen3_moe | mixtral, qwen2_moe (loaders not wired), granitemoehybrid (no Mamba layers) | mamba / mamba2, rwkv v5–v7, based, recurrent_gemma |
+| GGUF | llama / qwen2 / qwen3 / mistral / qwen3moe, qwen35, muse-glimmer, moshi | — | the other Candle quantized modules |
+| Encoders | bert, embedding_gemma2 | — | distilbert, jina / nomic / modern bert, deberta, xlm-roberta, stella, nvembed, colpali, t5, marian |
+| Vision | resnet, vgg, vit (+ mobilenetv2, yolov5) | — | dinov2, beit, eva2, convnext, efficientnet, mobileone, fastvit, hiera, repvgg, segformer, SAM, depth-anything, trocr |
+| Multimodal | — | clip (SD text tower) | siglip, blip, llava, moondream, paligemma, pixtral, qwen3_vl, paddleocr_vl, voxtral |
+| Diffusion | — | stable_diffusion (1.5 only) | SD 2.1 / XL, mmdit (SD3), flux, wuerstchen, z_image |
+| Audio | whisper, mimi, moshi (+ qwen3_asr) | — | encodec, dac, snac, metavoice, parler_tts, csm |
 
-Validated with real weights (2026-11-08): Candle ~110 modules (its examples run them). Light: the 24 of 2026-11-06 (Moshi LM, Mimi, Phi-4-mini, Falcon, GPT-2, Qwen2, Llama-3.2, Phi-3.5, BERT/bge-small, SD 1.5, ResNet-50, MobileNetV2, ViT-B/16, MercyLM, Whisper-tiny, Qwen3-ASR-1.7B, Qwen3-MoE (tiny-random), SDAR-1.7B, Gemma 3 1B, Gemma 3 4B, Gemma 2 2B, Gemma 4 E2B, EmbeddingGemma 2, plus GPT-2 on WebGPU) and since then Mellum 2.1 12B, Qwen3.5 0.8B / 9B / 27B (BF16, FP8, GGUF), Muse Glimmer 30B (GGUF), DeepSeek-V2-Lite-Chat, GLM-4-9B-0414, Nemotron-4-Mini 4B, MiMo-7B-RL, and the GPTQ / AWQ checkpoints of Qwen2.5-0.5B-Instruct and TinyLlama-1.1B; MiniMax-Text-01 on a tiny-random checkpoint.
+Light-only: Qwen3.5, Muse Glimmer, Mellum, Nemotron, MiMo (+ MTP), MiniMax-Text-01, SDAR, Qwen3-ASR, EmbeddingGemma 2, Ministral 3.
 
 ### 4.5 Quantization and precision
 
