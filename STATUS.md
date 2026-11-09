@@ -595,6 +595,8 @@ The user-requested list on all three backends. Laptop: CLI defaults (`w16`), "Wh
 | granite-4.0-micro | 2.1 | 4.0 | 258 / 25 |
 | Ministral-3-3B-Instruct-2512 | 1.5 | 3.7 | 987 (567-token prompt) / 35 |
 
+CUDA decode after the per-token overhead pass (2026-11-09, `desktop/cuda`: uninitialised op outputs, no repeat_kv, in-place kᵀ, device-side argmax / top-k sampling, allocation-pressure GC): Qwen3.5-0.8B 120, Qwen3.5-2B 86, Coder-3B 54, gemma-3-1b 93, gemma-4-E2B 57, Llama-3.2-3B 60, DeepSeek-R1-1.5B 87, Phi-4-mini 47, granite-4.0-micro 41, Ministral-3-3B 49 tok/s; Llama-3.2-1B 144.
+
 ### Colab L4 / A100
 
 | Workload | Result |
