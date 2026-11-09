@@ -1,4 +1,7 @@
-# Checkpoints Log
+# Checkpoints Log (archived)
+
+The dated work log kept from 2026-04-17 to 2026-11-09, frozen here. New work
+is recorded in commit messages; what works is in [`STATUS.md`](../../STATUS.md).
 
 | Timestamp (UTC)     | Step  | Result |
 |---------------------|-------|--------|

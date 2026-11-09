@@ -1,8 +1,8 @@
 # Light — Roadmap
 
 Open work only, in priority order. What already works is in
-[`STATUS.md`](STATUS.md); finished items move there (and get a dated row in
-[`CHECKPOINTS.md`](CHECKPOINTS.md)) when they meet the validation bar:
+[`STATUS.md`](STATUS.md); finished items move there (with the evidence in
+the commit message) when they meet the validation bar:
 top-5 next-token logits vs the reference on a ≥15-token chat prompt with real
 weights, greedy agreement, CPU = CUDA.
 

@@ -1,9 +1,9 @@
 # Light — Status
 
-What works today, with the evidence for it. Open work lives in
-[`ROADMAP.md`](ROADMAP.md); the dated work log in
-[`CHECKPOINTS.md`](CHECKPOINTS.md) is the source of truth, and every status
-here agrees with it as of **2026-11-09**.
+What works today, as of **2026-11-09**. Open work lives in
+[`ROADMAP.md`](ROADMAP.md). The evidence behind each status is in the commit
+that landed it (`git log`); the work log kept until 2026-11-09 is archived in
+[`docs/history/checkpoints-2026.md`](docs/history/checkpoints-2026.md).
 
 This file merges the former `MODELS.md` (model catalogue), `FEATURES.md`
 (feature checklist and kernel matrix) and `docs/PARITY-CANDLE.md`
@@ -40,7 +40,8 @@ LLMs implement `models.CausalLM` and are routed by `model_type` through
 `LoadCausalLMFromHF` / `LoadChatModelFromHF` (safetensors) and
 `LoadChatModelGGUF` (dispatch on `general.architecture`), and the engine
 catalog lists them. Notes are one-line summaries; the numbers behind each
-status are in the dated rows of [`CHECKPOINTS.md`](CHECKPOINTS.md).
+status are in the commits (and, up to 2026-11-09, the
+[archived work log](docs/history/checkpoints-2026.md)).
 
 ### 1.1 Language models
 
