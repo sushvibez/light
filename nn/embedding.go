@@ -75,6 +75,14 @@ func (e *Embedding) Forward(indices *tensor.Tensor) (*tensor.Tensor, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A table kept in host memory under a device model (too large for one
+	// device buffer): gather on the host, ship only the rows.
+	outDev := indices.Device()
+	if !outDev.SameAs(e.Weight.Device()) {
+		if flat, err = flat.To(e.Weight.Device()); err != nil {
+			return nil, err
+		}
+	}
 	var looked *tensor.Tensor
 	if e.Weight.DType().IsQuantized() {
 		// GGUF table kept in its block format: gather the rows' blocks, then
@@ -91,6 +99,11 @@ func (e *Embedding) Forward(indices *tensor.Tensor) (*tensor.Tensor, error) {
 	}
 	if e.WidenF32 && looked.DType() != dtype.F32 {
 		if looked, err = ops.Cast(looked, dtype.F32); err != nil {
+			return nil, err
+		}
+	}
+	if !outDev.SameAs(looked.Device()) {
+		if looked, err = looked.To(outDev); err != nil {
 			return nil, err
 		}
 	}

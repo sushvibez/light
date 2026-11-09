@@ -25,3 +25,18 @@ func TrimWebGPU() {
 	d.Synchronize()
 	d.PoolClear()
 }
+
+// WebGPUMaxTensorBytes is the largest tensor the WebGPU device can hold in
+// one bound buffer (the smaller of the buffer and storage-binding caps), or
+// 0 when no WebGPU device is up.
+func WebGPUMaxTensorBytes() int64 {
+	d, err := wgpudev.Get()
+	if err != nil {
+		return 0
+	}
+	n := d.MaxBufferSize
+	if d.MaxStorageBufferBindingSize < n {
+		n = d.MaxStorageBufferBindingSize
+	}
+	return int64(n)
+}

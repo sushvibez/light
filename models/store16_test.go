@@ -102,3 +102,31 @@ func TestStoreWeights16WebGPU(t *testing.T) {
 		})
 	}
 }
+
+// Loaded on the CPU, moved to WebGPU with BF16 weight storage (the engine's
+// WebGPU bf16 path), against the CPU at F32.
+func TestMoveToDevice16WebGPU(t *testing.T) {
+	g, err := device.WebGPU(0)
+	if err != nil {
+		t.Skip(err)
+	}
+	cpu := device.CPU()
+	for _, c := range store16Cases {
+		t.Run(c.repo, func(t *testing.T) {
+			ref, err := c.load(cpu)
+			if err != nil {
+				t.Skip(err)
+			}
+			got, err := c.load(cpu)
+			if err != nil {
+				t.Fatal(err)
+			}
+			n, err := MoveToDevice16(got, g, dtype.BF16)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("%d tensors narrowed", n)
+			compareStore16(t, ref, got, cpu, g, c.ids, 1e-2)
+		})
+	}
+}

@@ -163,9 +163,15 @@ func Load(spec Spec) (*Model, error) {
 		if strings.EqualFold(spec.DType, "bf16") && !w16 {
 			wdt = dtype.BF16
 		}
-		lm, err = models.LoadChatModelFromHF(spec.Repo, dev, wdt)
-		if err == nil && w16 {
-			_, err = models.StoreWeights16(lm, store16)
+		if w16 {
+			// Load on the host and move with the weights narrowed, so no F32
+			// weight (nor one over the device's buffer cap) reaches the GPU.
+			lm, err = models.LoadChatModelFromHF(spec.Repo, device.CPU(), dtype.F32)
+			if err == nil {
+				_, err = models.MoveToDevice16(lm, dev, store16)
+			}
+		} else {
+			lm, err = models.LoadChatModelFromHF(spec.Repo, dev, wdt)
 		}
 	}
 	if err != nil {
