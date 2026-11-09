@@ -55,11 +55,15 @@ func NewEmbeddingFromWeight(w *tensor.Tensor) (*Embedding, error) {
 // `dev`. Use this when a loader is about to overwrite the weight — for a
 // 3B-param model this skips ~300M random draws and a CPU→GPU transfer.
 func NewEmbeddingUninit(numEmbeddings, embDim int, wdt dtype.DType, dev device.Device) (*Embedding, error) {
-	w, err := tensor.Zeros(wdt, []int{numEmbeddings, embDim}, dev)
+	wd, w16 := weightDType16(wdt, embDim) // 16-bit storage loads
+	if w16 {
+		dev = embeddingDevice16(wd, numEmbeddings*embDim, dev)
+	}
+	w, err := tensor.Zeros(wd, []int{numEmbeddings, embDim}, dev)
 	if err != nil {
 		return nil, err
 	}
-	return &Embedding{Weight: w, numEmb: numEmbeddings, embDim: embDim}, nil
+	return &Embedding{Weight: w, WidenF32: w16, numEmb: numEmbeddings, embDim: embDim}, nil
 }
 
 // Forward looks up embeddings by the given I64 indices tensor of arbitrary

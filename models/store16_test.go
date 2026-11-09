@@ -6,6 +6,7 @@ import (
 
 	"light/device"
 	"light/dtype"
+	"light/nn"
 )
 
 // store16Case loads one cached checkpoint at F32 on a device.
@@ -127,6 +128,41 @@ func TestMoveToDevice16WebGPU(t *testing.T) {
 			}
 			t.Logf("%d tensors narrowed", n)
 			compareStore16(t, ref, got, cpu, g, c.ids, 1e-2)
+		})
+	}
+}
+
+// Loaded straight into BF16 weight storage (nn.WithWeightStorage16, the
+// engine's w16 path) on the CPU and on WebGPU, against the CPU at F32.
+func TestLoadWeightStorage16(t *testing.T) {
+	cpu := device.CPU()
+	devs := []device.Device{cpu}
+	if g, err := device.WebGPU(0); err == nil {
+		devs = append(devs, g)
+	}
+	for _, c := range store16Cases {
+		t.Run(c.repo, func(t *testing.T) {
+			ref, err := c.load(cpu)
+			if err != nil {
+				t.Skip(err)
+			}
+			for _, dev := range devs {
+				var got CausalLM
+				err := nn.WithWeightStorage16(dtype.BF16, func() error {
+					var err error
+					got, err = c.load(dev)
+					return err
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				n, err := StoreWeights16(got, dtype.BF16)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Logf("%v: %d tensors left to narrow after the load", dev, n)
+				compareStore16(t, ref, got, cpu, dev, c.ids, 1e-2)
+			}
 		})
 	}
 }

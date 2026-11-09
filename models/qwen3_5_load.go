@@ -194,13 +194,14 @@ func LoadQwen35FromHF(repo string, dev device.Device, weightDT dtype.DType) (*Qw
 		}
 		return src.To(dev)
 	}
-	emb, err := toDev(prefix+"embed_tokens.weight", act)
+	emb, err := toDev(prefix+"embed_tokens.weight", nn.WeightStorageDType(act, cfg.HiddenSize))
 	if err != nil {
 		return nil, err
 	}
 	if m.TokenEmb, err = nn.NewEmbeddingFromWeight(emb); err != nil {
 		return nil, err
 	}
+	m.TokenEmb.WidenF32 = emb.DType() != act
 	// setLinear installs a projection weight: block-scaled FP8 as stored
 	// when the checkpoint has its weight_scale_inv, else at the activation dtype.
 	setLinear := func(l *nn.Linear, name string) error {
@@ -222,7 +223,7 @@ func LoadQwen35FromHF(repo string, dev device.Device, weightDT dtype.DType) (*Qw
 			l.WBlockScale, l.WBlock = sc, cfg.fp8Block
 			return nil
 		}
-		w, err := toDev(name, act)
+		w, err := toDev(name, nn.WeightStorageDType(act, l.InFeatures()))
 		if err != nil {
 			return err
 		}

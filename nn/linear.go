@@ -153,7 +153,8 @@ func newLinearImpl(inFeatures, outFeatures int, bias bool, wdt dtype.DType, dev 
 		// Allocate directly on `dev` at the target dtype. One cudaMalloc, no
 		// CPU pass, no Kaiming init — the loader is expected to fill values
 		// before any forward.
-		w, err = tensor.Zeros(wdt, []int{outFeatures, inFeatures}, dev)
+		wd, _ := weightDType16(wdt, inFeatures) // 16-bit storage loads
+		w, err = tensor.Zeros(wd, []int{outFeatures, inFeatures}, dev)
 		if err != nil {
 			return nil, err
 		}

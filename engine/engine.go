@@ -20,6 +20,7 @@ import (
 	"light/dtype"
 	"light/hub"
 	"light/models"
+	"light/nn"
 	"light/tensor"
 	"light/tokenizer"
 )
@@ -108,20 +109,22 @@ func Load(spec Spec) (*Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	// WebGPU computes in F32 only; "bf16" / "f16" there keep the matmul
-	// weights in 16-bit storage (W16A32, exact for a checkpoint stored in
-	// that dtype) in half the memory.
+	// "w16" (any device) keeps the matmul weights in BF16 storage under F32
+	// compute (W16A32): exact for a BF16 checkpoint, in half the memory of
+	// f32. WebGPU computes in F32 only, so "bf16" / "f16" there mean the same
+	// (BF16 / F16 storage).
 	var store16 dtype.DType
 	w16 := false
-	if device.IsWebGPU(dev) && spec.GGUF == "" {
-		switch strings.ToLower(spec.DType) {
-		case "", "f32":
-		case "bf16":
+	if spec.GGUF == "" {
+		switch dt := strings.ToLower(spec.DType); {
+		case dt == "w16":
 			store16, w16 = dtype.BF16, true
-		case "f16":
+		case device.IsWebGPU(dev) && dt == "bf16":
+			store16, w16 = dtype.BF16, true
+		case device.IsWebGPU(dev) && dt == "f16":
 			store16, w16 = dtype.F16, true
-		default:
-			return nil, fmt.Errorf("engine: WebGPU loads dtype f32, bf16 or f16 (16-bit weight storage), got %q", spec.DType)
+		case device.IsWebGPU(dev) && dt != "" && dt != "f32":
+			return nil, fmt.Errorf("engine: WebGPU loads dtype f32, bf16 / w16 or f16 (16-bit weight storage), got %q", spec.DType)
 		}
 	}
 	var tok *tokenizer.BPE
@@ -164,11 +167,16 @@ func Load(spec Spec) (*Model, error) {
 			wdt = dtype.BF16
 		}
 		if w16 {
-			// Load on the host and move with the weights narrowed, so no F32
-			// weight (nor one over the device's buffer cap) reaches the GPU.
-			lm, err = models.LoadChatModelFromHF(spec.Repo, device.CPU(), dtype.F32)
+			// The weights are allocated at 16 bits as the loader builds the
+			// model, so no F32 copy of them exists; StoreWeights16 then
+			// narrows any a loader built another way.
+			err = nn.WithWeightStorage16(store16, func() error {
+				var err error
+				lm, err = models.LoadChatModelFromHF(spec.Repo, dev, dtype.F32)
+				return err
+			})
 			if err == nil {
-				_, err = models.MoveToDevice16(lm, dev, store16)
+				_, err = models.StoreWeights16(lm, store16)
 			}
 		} else {
 			lm, err = models.LoadChatModelFromHF(spec.Repo, dev, wdt)
