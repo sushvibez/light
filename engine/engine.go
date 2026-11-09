@@ -124,8 +124,8 @@ func Load(spec Spec) (*Model, error) {
 			store16, w16 = dtype.BF16, true
 		case device.IsWebGPU(dev) && dt == "f16":
 			store16, w16 = dtype.F16, true
-		case device.IsWebGPU(dev) && dt != "" && dt != "f32":
-			return nil, fmt.Errorf("engine: WebGPU loads dtype f32, bf16 / w16 or f16 (16-bit weight storage), got %q", spec.DType)
+		case device.IsWebGPU(dev) && dt != "" && dt != "f32" && dt != "q8_0":
+			return nil, fmt.Errorf("engine: WebGPU loads dtype f32, bf16 / w16 or f16 (16-bit weight storage) or q8_0, got %q", spec.DType)
 		}
 	}
 	var tok *tokenizer.BPE
@@ -167,7 +167,25 @@ func Load(spec Spec) (*Model, error) {
 		if strings.EqualFold(spec.DType, "bf16") && !w16 {
 			wdt = dtype.BF16
 		}
-		if w16 {
+		if strings.EqualFold(spec.DType, "q8_0") {
+			// Q8_0 weights (load-time quantization): load on the host in the
+			// checkpoint's 16-bit storage, quantize each matmul weight and
+			// move it to the device.
+			dt16, ok := w16StorageDType(spec.Repo)
+			load := func() error {
+				var err error
+				lm, err = models.LoadChatModelFromHF(spec.Repo, device.CPU(), dtype.F32)
+				return err
+			}
+			if ok {
+				err = nn.WithWeightStorage16(dt16, load)
+			} else {
+				err = load()
+			}
+			if err == nil {
+				_, err = models.MoveToDeviceQ8(lm, dev)
+			}
+		} else if w16 {
 			// The weights are allocated at 16 bits as the loader builds the
 			// model, so no F32 copy of them exists; StoreWeights16 then
 			// narrows any a loader built another way.

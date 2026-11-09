@@ -129,3 +129,49 @@ func TestGGUFKernelsParity(t *testing.T) {
 		}
 	}
 }
+
+// A prefill-shaped quantized matmul whose F32 expansion (287 MB) exceeds
+// the chunk bound runs in row blocks and matches the CPU.
+func TestMatMulQChunkedPrefill(t *testing.T) {
+	g, err := device.WebGPU(0)
+	if err != nil {
+		t.Skip(err)
+	}
+	cpu := device.CPU()
+	rng := rand.New(rand.NewPCG(7, 8))
+	const M, N, K = 12, 70000, 1024
+	w32 := make([]float32, N*K)
+	for i := range w32 {
+		w32[i] = float32(rng.NormFloat64()) * 0.05
+	}
+	x32 := make([]float32, M*K)
+	for i := range x32 {
+		x32[i] = float32(rng.NormFloat64())
+	}
+	wf, _ := tensor.New(w32, []int{N, K}, cpu)
+	wq, err := quant.Quantize(wf, dtype.Q8_0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	xc, _ := tensor.New(x32, []int{M, K}, cpu)
+	want, err := ops.MatMulQ(xc, wq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wg, _ := wq.To(g)
+	xg, _ := xc.To(g)
+	got, err := ops.MatMulQ(xg, wg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gc, _ := got.To(cpu)
+	a, b := tensor.MustSlice[float32](want), tensor.MustSlice[float32](gc)
+	md := 0.0
+	for i := range a {
+		md = math.Max(md, math.Abs(float64(a[i]-b[i])))
+	}
+	t.Logf("max |cpu - webgpu| %.3g", md)
+	if md > 1e-3 {
+		t.Fatalf("max diff %g", md)
+	}
+}

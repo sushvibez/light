@@ -166,3 +166,46 @@ func TestLoadWeightStorage16(t *testing.T) {
 		})
 	}
 }
+
+// Q8_0 load-time quantization (the engine's q8_0 path: 16-bit load on the
+// host, then MoveToDeviceQ8) on the CPU and WebGPU against the CPU at F32.
+// Q8_0 is lossy: the prefill top-1 must agree and the logits stay close.
+func TestMoveToDeviceQ8(t *testing.T) {
+	cpu := device.CPU()
+	devs := []device.Device{cpu}
+	if g, err := device.WebGPU(0); err == nil {
+		devs = append(devs, g)
+	}
+	for _, c := range store16Cases {
+		t.Run(c.repo, func(t *testing.T) {
+			ref, err := c.load(cpu)
+			if err != nil {
+				t.Skip(err)
+			}
+			rr := lastLogits(t, ref, c.ids, NewKVCache(ref.NumLayers()), cpu)
+			for _, dev := range devs {
+				var got CausalLM
+				if err := nn.WithWeightStorage16(dtype.BF16, func() error {
+					var err error
+					got, err = c.load(cpu)
+					return err
+				}); err != nil {
+					t.Fatal(err)
+				}
+				n, err := MoveToDeviceQ8(got, dev)
+				if err != nil {
+					t.Fatal(err)
+				}
+				rg := lastLogits(t, got, c.ids, NewKVCache(got.NumLayers()), dev)
+				d := maxAbsDiff(rr, rg)
+				t.Logf("%v: %d tensors quantized; prefill logits max diff %.3g; top-5 ref %v q8 %v", dev, n, d, top5(rr), top5(rg))
+				if top5(rr)[0] != top5(rg)[0] {
+					t.Errorf("%v: top-1 differs", dev)
+				}
+				if d > 1.5 {
+					t.Errorf("%v: logits differ by %.3g", dev, d)
+				}
+			}
+		})
+	}
+}

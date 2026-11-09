@@ -145,16 +145,61 @@ func matmulQ(ctx *registry.Context) error {
 		gx, gy := d.Rows(uint64(N))
 		return d.Run(name, code, []wgpudev.Binding{rd(raw(w)), rd(raw(x)), rw(raw(out)), uni(params)}, gx, gy, 1)
 	}
-	dq, err := tensor.Zeros(dtype.F32, []int{N, K}, x.Device())
-	if err != nil {
-		return err
+	chunk := N
+	if max := ggufPrefillChunkBytes / (4 * K); chunk > max {
+		chunk = max
 	}
-	if err := dequantRows(d, w, nil, dq, N, K); err != nil {
-		return err
+	if chunk == N {
+		dq, err := tensor.Zeros(dtype.F32, []int{N, K}, x.Device())
+		if err != nil {
+			return err
+		}
+		if err := dequantRows(d, w, nil, dq, N, K); err != nil {
+			return err
+		}
+		dqT, err := dq.Transpose(0, 1)
+		if err != nil {
+			return err
+		}
+		return matmulF32(&registry.Context{Inputs: []*tensor.Tensor{x, dqT}, Output: out})
 	}
-	dqT, err := dq.Transpose(0, 1)
-	if err != nil {
-		return err
+	// A weight whose F32 expansion is large (a 200k-vocabulary LM head is
+	// 2.4 GB, over the buffer cap): dequantize and multiply a block of rows
+	// at a time, then lay the column blocks side by side.
+	var parts []*tensor.Tensor
+	for n0 := 0; n0 < N; n0 += chunk {
+		c := min(chunk, N-n0)
+		ids := make([]int32, c)
+		for i := range ids {
+			ids[i] = int32(n0 + i)
+		}
+		idT, err := tensor.New(ids, []int{c}, x.Device())
+		if err != nil {
+			return err
+		}
+		dq, err := tensor.Zeros(dtype.F32, []int{c, K}, x.Device())
+		if err != nil {
+			return err
+		}
+		if err := dequantRows(d, w, idT, dq, c, K); err != nil {
+			return err
+		}
+		dqT, err := dq.Transpose(0, 1)
+		if err != nil {
+			return err
+		}
+		part, err := tensor.Zeros(dtype.F32, []int{M, c}, x.Device())
+		if err != nil {
+			return err
+		}
+		if err := matmulF32(&registry.Context{Inputs: []*tensor.Tensor{x, dqT}, Output: part}); err != nil {
+			return err
+		}
+		parts = append(parts, part)
 	}
-	return matmulF32(&registry.Context{Inputs: []*tensor.Tensor{x, dqT}, Output: out})
+	return concat(&registry.Context{Inputs: parts, Output: out, Attrs: map[string]any{"axis": 1}})
 }
+
+// ggufPrefillChunkBytes bounds the F32 expansion of a quantized weight
+// during prefill (it must also stay under the device's buffer cap).
+const ggufPrefillChunkBytes = 256 << 20

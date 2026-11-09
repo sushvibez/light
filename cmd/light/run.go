@@ -20,7 +20,7 @@ type modelFlags struct{ device, dtype string }
 
 func (f *modelFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.device, "device", "", "gpu (CUDA), webgpu (any GPU through wgpu-native) or cpu (default: CUDA when present, else cpu)")
-	fs.StringVar(&f.dtype, "dtype", "", "f32, bf16 or w16 (the checkpoint's 16-bit weights under F32 compute) for safetensors weights; WebGPU computes in F32, so bf16 / f16 there mean 16-bit storage (default: bf16 on the GPU, w16 on the CPU and WebGPU)")
+	fs.StringVar(&f.dtype, "dtype", "", "f32, bf16, w16 (the checkpoint's 16-bit weights under F32 compute) or q8_0 (weights quantized to Q8_0 at load: half of w16's memory, slightly lossy) for safetensors weights; WebGPU computes in F32, so bf16 / f16 there mean 16-bit storage (default: bf16 on the GPU, w16 on the CPU and WebGPU)")
 }
 
 // spec is e's load spec with the flags applied. Safetensors models on the
