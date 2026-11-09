@@ -368,7 +368,7 @@ func (m *Model) Generate(ctx context.Context, msgs []Message, opts GenOpts, onTo
 	defer cache.Reset()
 
 	t0 := time.Now()
-	row, err := m.step(toI64(ids), cache)
+	row, err := m.stepLast(toI64(ids), cache)
 	if err != nil {
 		return "", st, fmt.Errorf("prefill: %w", err)
 	}
@@ -385,7 +385,10 @@ func (m *Model) Generate(ctx context.Context, msgs []Message, opts GenOpts, onTo
 			st.Stop = "cancel"
 			break
 		}
-		next := models.SampleLogits(row, sample)
+		next, err := m.sampleDevice(row, sample)
+		if err != nil {
+			return out.String(), st, fmt.Errorf("sample step %d: %w", step, err)
+		}
 		if m.eos[int64(next)] {
 			st.Stop = "eos"
 			break
@@ -396,7 +399,7 @@ func (m *Model) Generate(ctx context.Context, msgs []Message, opts GenOpts, onTo
 		if step+1 == opts.MaxTokens {
 			break
 		}
-		row, err = m.step([]int64{int64(next)}, cache)
+		row, err = m.stepLast([]int64{int64(next)}, cache)
 		if err != nil {
 			return out.String(), st, fmt.Errorf("decode step %d: %w", step, err)
 		}

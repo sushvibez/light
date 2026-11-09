@@ -22,7 +22,7 @@ func init() {
 	registry.Register(registry.Key{Op: "l2norm", Dev: device.KindCUDA, DType: dtype.F64}, l2NormLauncher("reduce_l2_f64", 8))
 	registry.Register(registry.Key{Op: "all", Dev: device.KindCUDA, DType: dtype.U8}, u8ReduceLauncher("reduce_all_u8"))
 	registry.Register(registry.Key{Op: "any", Dev: device.KindCUDA, DType: dtype.U8}, u8ReduceLauncher("reduce_any_u8"))
-	registry.Register(registry.Key{Op: "argmax", Dev: device.KindCUDA, DType: dtype.F32}, argLaunchF32("argmax_last_f32"))
+	registry.Register(registry.Key{Op: "argmax", Dev: device.KindCUDA, DType: dtype.F32}, argmaxRowF32)
 	registry.Register(registry.Key{Op: "argmin", Dev: device.KindCUDA, DType: dtype.F32}, argLaunchF32("argmin_last_f32"))
 	registry.Register(registry.Key{Op: "logsoftmax", Dev: device.KindCUDA, DType: dtype.F32}, logsoftmaxF32CUDA)
 }
