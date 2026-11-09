@@ -31,3 +31,12 @@ var useAVX2 = func() bool {
 	_, b7, _, _ := cpuid(7, 0)
 	return b7&(1<<5) != 0 // AVX2
 }()
+
+// hasF16C: useAVX2 plus the F16C half-precision conversions.
+var hasF16C = func() bool {
+	if !useAVX2 {
+		return false
+	}
+	_, _, c1, _ := cpuid(1, 0)
+	return c1&(1<<29) != 0
+}()

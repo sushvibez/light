@@ -20,12 +20,12 @@ type modelFlags struct{ device, dtype string }
 
 func (f *modelFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.device, "device", "", "gpu (CUDA), webgpu (any GPU through wgpu-native) or cpu (default: CUDA when present, else cpu)")
-	fs.StringVar(&f.dtype, "dtype", "", "f32, bf16 or w16 (BF16 weight storage under F32 compute) for safetensors weights; WebGPU computes in F32, so bf16 / f16 there mean 16-bit storage (default: bf16 on the GPU and WebGPU; on the CPU f32 up to 6 GB, w16 above)")
+	fs.StringVar(&f.dtype, "dtype", "", "f32, bf16 or w16 (the checkpoint's 16-bit weights under F32 compute) for safetensors weights; WebGPU computes in F32, so bf16 / f16 there mean 16-bit storage (default: bf16 on the GPU, w16 on the CPU and WebGPU)")
 }
 
-// spec is e's load spec with the flags applied. On the CPU, safetensors
-// models up to 6 GB load in F32 unless -dtype says otherwise: the CPU BF16
-// path is several times slower.
+// spec is e's load spec with the flags applied. Safetensors models on the
+// CPU and every model on WebGPU default to w16 (F32 compute over the
+// checkpoint's 16-bit weights); CUDA keeps the catalog's dtype.
 func (f *modelFlags) spec(e engine.Entry) engine.Spec {
 	s := e.Spec
 	s.Device = f.device
@@ -35,12 +35,10 @@ func (f *modelFlags) spec(e engine.Entry) engine.Spec {
 	switch {
 	case f.dtype != "":
 		s.DType = f.dtype
-	case s.Device == "webgpu":
-		s.DType = "bf16" // F32 compute over BF16 weight storage (half the memory of f32)
-	case s.Device == "cpu" && (e.Kind == "safetensors" || e.Kind == "pytorch") && e.SizeBytes <= 6<<30:
-		s.DType = "f32" // the CPU BF16 path is slower than F32 for models that fit
-	case s.Device == "cpu" && (e.Kind == "safetensors" || e.Kind == "pytorch"):
-		s.DType = "w16" // F32 compute over BF16 weight storage: F32's answers in half the memory
+	case s.Device == "webgpu", s.Device == "cpu" && (e.Kind == "safetensors" || e.Kind == "pytorch"):
+		// F32 compute over the checkpoint's 16-bit weights: F32's answers in
+		// half the memory, and on the CPU a little faster than f32.
+		s.DType = "w16"
 	}
 	return s
 }

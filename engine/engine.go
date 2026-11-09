@@ -109,16 +109,17 @@ func Load(spec Spec) (*Model, error) {
 	if err != nil {
 		return nil, err
 	}
-	// "w16" (any device) keeps the matmul weights in BF16 storage under F32
-	// compute (W16A32): exact for a BF16 checkpoint, in half the memory of
-	// f32. WebGPU computes in F32 only, so "bf16" / "f16" there mean the same
+	// "w16" (any device) keeps the matmul weights in the checkpoint's 16-bit
+	// dtype under F32 compute (W16A32): F32's answers in half the memory. WebGPU computes in F32 only, so "bf16" / "f16" there mean the same
 	// (BF16 / F16 storage).
 	var store16 dtype.DType
 	w16 := false
 	if spec.GGUF == "" {
 		switch dt := strings.ToLower(spec.DType); {
 		case dt == "w16":
-			store16, w16 = dtype.BF16, true
+			// The checkpoint's own 16-bit dtype (lossless); F32 checkpoints
+			// load at F32.
+			store16, w16 = w16StorageDType(spec.Repo)
 		case device.IsWebGPU(dev) && dt == "bf16":
 			store16, w16 = dtype.BF16, true
 		case device.IsWebGPU(dev) && dt == "f16":

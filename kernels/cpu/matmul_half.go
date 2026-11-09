@@ -56,6 +56,8 @@ func matmulHalfFast(a, b, out *tensor.Tensor, roundA bool) bool {
 			for k, v := range src {
 				dst[k] = math.Float32frombits(uint32(v) << 16)
 			}
+		case decodeF16C && K%8 == 0:
+			f16RowF16C(&src[0], &dst[0], K)
 		default:
 			for k, v := range src {
 				dst[k] = dtype.Half(v).ToF32()
@@ -104,6 +106,8 @@ func matmulW16CPU(ctx *registry.Context) error {
 			for k, v := range src {
 				dst[k] = math.Float32frombits(uint32(v) << 16)
 			}
+		case decodeF16C && K%8 == 0:
+			f16RowF16C(&src[0], &dst[0], K)
 		default:
 			for k, v := range src {
 				dst[k] = dtype.Half(v).ToF32()

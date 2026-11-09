@@ -311,3 +311,29 @@ bf16tail:
 bf16done:
 	VZEROUPPER
 	RET
+
+// func f16RowF16C(src *uint16, dst *float32, n int)
+// F16 → F32 (exact) with VCVTPH2PS; n a multiple of 8.
+TEXT ·f16RowF16C(SB), NOSPLIT, $0-24
+	MOVQ src+0(FP), SI
+	MOVQ dst+8(FP), DI
+	MOVQ n+16(FP), CX
+f16loop:
+	CMPQ CX, $16
+	JL   f16tail
+	VCVTPH2PS (SI), Y1
+	VCVTPH2PS 16(SI), Y2
+	VMOVUPS   Y1, (DI)
+	VMOVUPS   Y2, 32(DI)
+	ADDQ $32, SI
+	ADDQ $64, DI
+	SUBQ $16, CX
+	JMP  f16loop
+f16tail:
+	CMPQ CX, $8
+	JL   f16done
+	VCVTPH2PS (SI), Y1
+	VMOVUPS   Y1, (DI)
+f16done:
+	VZEROUPPER
+	RET

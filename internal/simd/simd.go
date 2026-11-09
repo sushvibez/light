@@ -32,6 +32,9 @@ func Axpy(alpha float32, x, y []float32) {
 // Accelerated reports whether the vector path is in use.
 func Accelerated() bool { return useAVX2 }
 
+// F16C reports AVX2 plus the F16C half-precision conversions (VCVTPH2PS).
+func F16C() bool { return hasF16C }
+
 func dotGo(a, b []float32) float32 {
 	var s0, s1, s2, s3 float32
 	i := 0
