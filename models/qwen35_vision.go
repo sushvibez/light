@@ -201,12 +201,19 @@ func (m *Qwen35Vision) visionRoPE(rows, cols []int, dev device.Device) (*tensor.
 
 // rotateHalfRoPE is x·cos + rotate_half(x)·sin for x (n, H, Dh).
 func rotateHalfRoPE(x, cos, sin *tensor.Tensor) (*tensor.Tensor, error) {
-	Dh := x.Dim(2)
-	x1, err := x.Narrow(2, 0, Dh/2)
+	return rotateHalfLast(x, cos, sin)
+}
+
+// rotateHalfLast is x·cos + rotate_half(x)·sin over x's last axis, with
+// cos / sin broadcast against x.
+func rotateHalfLast(x, cos, sin *tensor.Tensor) (*tensor.Tensor, error) {
+	ax := x.Rank() - 1
+	Dh := x.Dim(ax)
+	x1, err := x.Narrow(ax, 0, Dh/2)
 	if err != nil {
 		return nil, err
 	}
-	x2, err := x.Narrow(2, Dh/2, Dh/2)
+	x2, err := x.Narrow(ax, Dh/2, Dh/2)
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +221,7 @@ func rotateHalfRoPE(x, cos, sin *tensor.Tensor) (*tensor.Tensor, error) {
 	if err != nil {
 		return nil, err
 	}
-	rot, err := ops.Concat([]*tensor.Tensor{n2, x1}, 2)
+	rot, err := ops.Concat([]*tensor.Tensor{n2, x1}, ax)
 	if err != nil {
 		return nil, err
 	}

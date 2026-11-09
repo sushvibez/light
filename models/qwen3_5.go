@@ -24,6 +24,8 @@ type Qwen35Config struct {
 	// a per-head sigmoid output gate packed into q_proj.
 	NumHeads, NumKVHeads, HeadDim int
 	PartialRotary                 float64 // fraction of HeadDim RoPE rotates (0.25); 0 or 1 = all
+	MRoPESection                  []int   // interleaved MRoPE frequencies per (t, h, w) stream, e.g. 11, 11, 10
+	ImageTokenID                  int64   // the image placeholder token of the multimodal checkpoint
 	RopeBase                      float64
 	AttnOutputGate                bool
 
@@ -106,6 +108,11 @@ type Qwen35 struct {
 	// for prefill and recurrent for decode. Tests force one form to check
 	// the two agree on a real checkpoint.
 	deltaMode ops.GatedDeltaMode
+
+	// mrope, when set (during ForwardMultimodal), holds per-token cos / sin
+	// tables (T, rotaryDim) for three-stream positions; rope uses them
+	// instead of the 1-D positions.
+	mrope *[2]*tensor.Tensor
 }
 
 // NewQwen35 allocates an uninitialised model; LoadQwen35FromHF fills it.
@@ -279,6 +286,12 @@ func (m *Qwen35) ForwardWithCache(tokens *tensor.Tensor, cache *KVCache) (*tenso
 	if err != nil {
 		return nil, err
 	}
+	return m.forwardHidden(h, B, T, prior, dev, cache)
+}
+
+// forwardHidden runs the decoder on input embeddings h (B, T, D).
+func (m *Qwen35) forwardHidden(h *tensor.Tensor, B, T, prior int, dev device.Device, cache *KVCache) (*tensor.Tensor, error) {
+	var err error
 	posData := make([]int64, T)
 	for i := range posData {
 		posData[i] = int64(prior + i)
@@ -631,6 +644,23 @@ func (m *Qwen35) deltaNet(blk *qwen35Block, h *tensor.Tensor, B, T int, cache *K
 // plain RoPE over those dims.
 func (m *Qwen35) rope(x, pos *tensor.Tensor) (*tensor.Tensor, error) {
 	rot := m.Cfg.rotaryDim()
+	if m.mrope != nil {
+		r, err := narrowContig(x, 3, 0, rot)
+		if err != nil {
+			return nil, err
+		}
+		if r, err = rotateHalfLast(r, m.mrope[0], m.mrope[1]); err != nil {
+			return nil, err
+		}
+		if rot >= m.Cfg.HeadDim {
+			return r, nil
+		}
+		pass, err := x.Narrow(3, rot, m.Cfg.HeadDim-rot)
+		if err != nil {
+			return nil, err
+		}
+		return ops.Concat([]*tensor.Tensor{r, pass}, 3)
+	}
 	if rot >= m.Cfg.HeadDim {
 		return ops.RoPE(x, pos, m.Cfg.RopeBase)
 	}
