@@ -465,15 +465,23 @@ func loadSDVAESD15(repo string, wdt dtype.DType, dev device.Device) (*VAEDecoder
 	if err != nil {
 		return nil, err
 	}
-	v, err := NewVAEDecoder(true, wdt, dev)
+	return loadVAEDecoder(weights, VAEDecoderSD15(), wdt, dev)
+}
+
+// loadVAEDecoder builds a decoder for cfg and fills it from an
+// AutoencoderKL state dict (diffusers naming).
+func loadVAEDecoder(weights map[string]*tensor.Tensor, cfg VAEDecoderConfig, wdt dtype.DType, dev device.Device) (*VAEDecoder, error) {
+	v, err := NewVAEDecoderWith(cfg, wdt, dev)
 	if err != nil {
 		return nil, err
 	}
-	if err := copyExactCast(v.PostQuantConv.Weight, weights, "post_quant_conv.weight"); err != nil {
-		return nil, err
-	}
-	if err := copyExactCast(v.PostQuantConv.Bias, weights, "post_quant_conv.bias"); err != nil {
-		return nil, err
+	if v.PostQuantConv != nil {
+		if err := copyExactCast(v.PostQuantConv.Weight, weights, "post_quant_conv.weight"); err != nil {
+			return nil, err
+		}
+		if err := copyExactCast(v.PostQuantConv.Bias, weights, "post_quant_conv.bias"); err != nil {
+			return nil, err
+		}
 	}
 	if err := copyExactCast(v.ConvIn.Weight, weights, "decoder.conv_in.weight"); err != nil {
 		return nil, err

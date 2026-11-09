@@ -2,6 +2,7 @@
 """Flux transformer reference (diffusers, CPU, F32) for models/flux_test.go.
 
     .venv/bin/python scripts/verify/ref_flux.py --make-tiny <dir> <out.json>
+    .venv/bin/python scripts/verify/ref_flux.py --make-tiny-vae <dir> <out.json>
 
 Writes a seeded tiny-random FluxTransformer2DModel (2 double + 2 single
 blocks, guidance embedder, 3-axis RoPE) to <dir> with save_pretrained, runs
@@ -12,8 +13,31 @@ import json, sys
 import torch
 from diffusers import FluxTransformer2DModel
 
-assert sys.argv[1] == "--make-tiny"
 out_dir, out_json = sys.argv[2], sys.argv[3]
+r = lambda a: [round(v, 7) for v in a.flatten().tolist()]
+if sys.argv[1] == "--make-tiny-vae":
+    # A tiny Flux-style AutoencoderKL: 16 latent channels, no post-quant conv.
+    from diffusers import AutoencoderKL
+    torch.manual_seed(1)
+    vae = AutoencoderKL(in_channels=3, out_channels=3, latent_channels=16, block_out_channels=(32, 64),
+                        down_block_types=("DownEncoderBlock2D",) * 2, up_block_types=("UpDecoderBlock2D",) * 2,
+                        layers_per_block=1, norm_num_groups=32, use_quant_conv=False, use_post_quant_conv=False,
+                        scaling_factor=0.3611, shift_factor=0.1159).eval()
+    with torch.no_grad():
+        for name, p in vae.named_parameters():
+            p.add_(0.05 * torch.randn_like(p))
+    vae.save_pretrained(out_dir, safe_serialization=True)
+    # Keep only the decoder (the test decodes; the encoder would triple the file).
+    from safetensors.torch import load_file, save_file
+    f = out_dir + "/diffusion_pytorch_model.safetensors"
+    save_file({k: v for k, v in load_file(f).items() if k.startswith("decoder.")}, f)
+    z = torch.randn(1, 16, 3, 5)
+    with torch.no_grad():
+        img = vae.decode(z).sample
+    print("image", tuple(img.shape), "mean abs", img.abs().mean().item())
+    json.dump({"z": r(z), "z_shape": list(z.shape), "image": r(img), "image_shape": list(img.shape)}, open(out_json, "w"))
+    sys.exit(0)
+assert sys.argv[1] == "--make-tiny"
 torch.manual_seed(0)
 cfg = dict(patch_size=1, in_channels=16, out_channels=None, num_layers=2, num_single_layers=2,
            attention_head_dim=16, num_attention_heads=2, joint_attention_dim=32,
@@ -42,7 +66,6 @@ with torch.no_grad():
     y = m(hidden_states=x, encoder_hidden_states=txt, pooled_projections=pooled, timestep=t,
           img_ids=img_ids, txt_ids=txt_ids, guidance=g, return_dict=False)[0]
 print("out", tuple(y.shape), "mean abs", y.abs().mean().item())
-r = lambda a: [round(v, 7) for v in a.flatten().tolist()]
 json.dump({"x": r(x), "x_shape": list(x.shape), "txt": r(txt), "txt_shape": list(txt.shape),
            "pooled": r(pooled), "timestep": t.tolist(), "guidance": g.tolist(),
            "img_ids": r(img_ids), "txt_ids": r(txt_ids), "out": r(y), "out_shape": list(y.shape)},

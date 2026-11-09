@@ -134,41 +134,62 @@ type VAEDecoder struct {
 	ConvOut       *nn.Conv2d
 }
 
+// VAEDecoderConfig is the decoder half of diffusers' AutoencoderKL config.
+type VAEDecoderConfig struct {
+	LatentChannels int   // 4 (SD 1.x / 2.x / XL), 16 (Flux, SD3)
+	BlockOut       []int // block_out_channels in encoder order, e.g. 128, 256, 512, 512
+	LayersPerBlock int   // the decoder runs LayersPerBlock+1 resnets per block
+	PostQuantConv  bool  // use_post_quant_conv (false for Flux / SD3)
+}
+
+// VAEDecoderSD15 is the SD 1.x decoder (also SD 2.x and SDXL's layout).
+func VAEDecoderSD15() VAEDecoderConfig {
+	return VAEDecoderConfig{LatentChannels: 4, BlockOut: []int{128, 256, 512, 512}, LayersPerBlock: 2, PostQuantConv: true}
+}
+
 // NewVAEDecoder constructs the decoder with the SD 1.5 channel schedule.
 // `wdt` is the storage dtype for Conv2d weights (F32 default; BF16 for
 // half-memory inference). Loaders are expected to overwrite values, so all
 // allocations are zero-init. `skipInit` is currently always honoured.
 func NewVAEDecoder(skipInit bool, wdt dtype.DType, dev device.Device) (*VAEDecoder, error) {
-	_ = skipInit // we always zero-init via the *Uninit constructors below
-	postQ, err := nn.NewConv2dUninit(4, 4, 1, 1, [2]int{1, 1}, [2]int{0, 0}, true, wdt, dev)
+	return NewVAEDecoderWith(VAEDecoderSD15(), wdt, dev)
+}
+
+// NewVAEDecoderWith constructs a zero-initialised decoder for cfg.
+func NewVAEDecoderWith(cfg VAEDecoderConfig, wdt dtype.DType, dev device.Device) (*VAEDecoder, error) {
+	n := len(cfg.BlockOut)
+	top := cfg.BlockOut[n-1]
+	var postQ *nn.Conv2d
+	var err error
+	if cfg.PostQuantConv {
+		if postQ, err = nn.NewConv2dUninit(cfg.LatentChannels, cfg.LatentChannels, 1, 1, [2]int{1, 1}, [2]int{0, 0}, true, wdt, dev); err != nil {
+			return nil, err
+		}
+	}
+	convIn, err := nn.NewConv2dUninit(cfg.LatentChannels, top, 3, 3, [2]int{1, 1}, [2]int{1, 1}, true, wdt, dev)
 	if err != nil {
 		return nil, err
 	}
-	convIn, err := nn.NewConv2dUninit(4, 512, 3, 3, [2]int{1, 1}, [2]int{1, 1}, true, wdt, dev)
+	mid, err := newVAEMidBlock(top, wdt, dev)
 	if err != nil {
 		return nil, err
 	}
-	mid, err := newVAEMidBlock(512, wdt, dev)
-	if err != nil {
-		return nil, err
-	}
-	channels := []int{512, 512, 256, 128}
-	ups := make([]*upDecoderBlock2D, 4)
-	prev := 512
-	for i, c := range channels {
-		useUp := i < 3
-		b, err := newUpDecoderBlock2D(prev, c, 3, useUp, wdt, dev)
+	ups := make([]*upDecoderBlock2D, n)
+	prev := top
+	for i := range n {
+		c := cfg.BlockOut[n-1-i] // reversed
+		b, err := newUpDecoderBlock2D(prev, c, cfg.LayersPerBlock+1, i < n-1, wdt, dev)
 		if err != nil {
 			return nil, err
 		}
 		ups[i] = b
 		prev = c
 	}
-	normOut, err := nn.NewGroupNormWithDType(128, 32, 1e-6, wdt, dev)
+	normOut, err := nn.NewGroupNormWithDType(cfg.BlockOut[0], 32, 1e-6, wdt, dev)
 	if err != nil {
 		return nil, err
 	}
-	convOut, err := nn.NewConv2dUninit(128, 3, 3, 3, [2]int{1, 1}, [2]int{1, 1}, true, wdt, dev)
+	convOut, err := nn.NewConv2dUninit(cfg.BlockOut[0], 3, 3, 3, [2]int{1, 1}, [2]int{1, 1}, true, wdt, dev)
 	if err != nil {
 		return nil, err
 	}
@@ -183,9 +204,12 @@ func NewVAEDecoder(skipInit bool, wdt dtype.DType, dev device.Device) (*VAEDecod
 // caller should divide the latent by 0.18215 before passing it in, or use
 // `DecodeWithScaling` which folds that division in.
 func (v *VAEDecoder) Decode(latent *tensor.Tensor) (*tensor.Tensor, error) {
-	h, err := v.PostQuantConv.Forward(latent)
-	if err != nil {
-		return nil, err
+	h := latent
+	var err error
+	if v.PostQuantConv != nil {
+		if h, err = v.PostQuantConv.Forward(latent); err != nil {
+			return nil, err
+		}
 	}
 	h, err = v.ConvIn.Forward(h)
 	if err != nil {
@@ -238,7 +262,9 @@ func (v *VAEDecoder) DecodeWithScaling(latent *tensor.Tensor, scalingFactor floa
 // Parameters returns every learnable tensor.
 func (v *VAEDecoder) Parameters() []*tensor.Tensor {
 	var ps []*tensor.Tensor
-	ps = append(ps, v.PostQuantConv.Parameters()...)
+	if v.PostQuantConv != nil {
+		ps = append(ps, v.PostQuantConv.Parameters()...)
+	}
 	ps = append(ps, v.ConvIn.Parameters()...)
 	ps = append(ps, v.Mid.parameters()...)
 	for _, b := range v.Up {

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"light/device"
+	"light/dtype"
 	"light/tensor"
 )
 
@@ -74,5 +75,59 @@ func TestFluxTransformerTinyMatchesDiffusers(t *testing.T) {
 		if md > 1e-4 {
 			t.Errorf("%v: output differs by %.3g", dev, md)
 		}
+	}
+}
+
+// A tiny Flux-style AutoencoderKL decoder (16 latent channels, no
+// post-quant conv, 2 blocks) against diffusers' decode, on the CPU.
+func TestFluxVAETinyMatchesDiffusers(t *testing.T) {
+	raw, err := os.ReadFile("testdata/refs/flux-tiny-vae.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ref struct {
+		Z      []float32 `json:"z"`
+		ZShape []int     `json:"z_shape"`
+		Image  []float32 `json:"image"`
+	}
+	if err := json.Unmarshal(raw, &ref); err != nil {
+		t.Fatal(err)
+	}
+	cpu := device.CPU()
+	v, err := LoadFluxVAE("testdata/flux-tiny-vae", cpu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	z, err := tensor.New(ref.Z, ref.ZShape, cpu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := v.Decoder.Decode(z)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := tensor.MustSlice[float32](img)
+	if len(got) != len(ref.Image) {
+		t.Fatalf("%d values, want %d", len(got), len(ref.Image))
+	}
+	md := 0.0
+	for i := range got {
+		md = math.Max(md, math.Abs(float64(got[i]-ref.Image[i])))
+	}
+	t.Logf("max |light - diffusers| %.3g over %d values", md, len(got))
+	if md > 1e-4 {
+		t.Errorf("image differs by %.3g", md)
+	}
+}
+
+// The SD 1.5 decoder built through VAEDecoderConfig has diffusers'
+// parameter count (decoder + post_quant_conv of the default AutoencoderKL).
+func TestVAEDecoderSD15ParamCount(t *testing.T) {
+	v, err := NewVAEDecoder(true, dtype.F32, device.CPU())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := v.ParamCount(), 49490199; got != want {
+		t.Fatalf("ParamCount %d, want %d", got, want)
 	}
 }
