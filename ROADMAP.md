@@ -20,11 +20,7 @@ GPTQ / AWQ) is complete as of 2026-11-08 except for the items below.
 2. **Flux / SD3 (MMDiT)** — structurally different from the UNet path: joint
    text/image transformer blocks, flow-matching schedulers. Unlocks the DiT
    family (Qwen-Image, Z-Image, Krea, the user-queued FLUX checkpoint).
-3. **Mistral 7B validation on a real checkpoint** — loader (`model_type:
-   mistral`), sliding-window attention and rotating KV cache exist and were
-   verified on Qwen2 with `use_sliding_window`; a Mistral 7B checkpoint
-   (14 GB HF / 4.4 GB GGUF Q4) has never been run against the bar.
-4. **INT8 W8A8 GEMM** — `cublasGemmEx(CUBLAS_COMPUTE_32I)` for
+3. **INT8 W8A8 GEMM** — `cublasGemmEx(CUBLAS_COMPUTE_32I)` for
    SmoothQuant-style int8 weights × int8 activations; today int8 is
    per-column weights × F32 activations only (`ops.MatMulInt8`).
 
@@ -122,10 +118,12 @@ validation bar.
 
 ### WebGPU
 
-- Gated DeltaNet ops (`gated_delta_rule`, `causal_conv1d_depthwise`,
-  `softplus`) so Qwen3.5 runs there.
-- BF16 / F16 storage and arithmetic (BF16 / F16 checkpoints load as F32
-  today; no F64 either).
+- Opt-in load-time Q8_0 (`-dtype q8_0`) for models whose 16-bit weights
+  still do not fit shared memory.
+- BF16 / F16 arithmetic (16-bit weights are stored and widened inside the
+  matmul since 2026-11-09; activations are F32; no F64 either).
+- Load-time memory: the CPU loads the checkpoint's 16-bit weights directly,
+  but Gemma-4-E2B still peaks at ~16 GB working set on the iGPU.
 - MoE kernels (`moe_gemm`, routing).
 - Missing kernels: `conv1d`, `gather`, `cumsum`, compare ops, `groupnorm`,
   `where`, `flash_attention`.
