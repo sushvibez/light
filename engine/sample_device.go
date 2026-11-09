@@ -5,6 +5,7 @@ import (
 	"math/rand/v2"
 
 	"light/device"
+	"light/internal/cudart"
 	"light/models"
 	"light/ops"
 	"light/tensor"
@@ -99,4 +100,12 @@ func (m *Model) sampleDevice(logits *tensor.Tensor, opts models.SampleOpts) (int
 		return 0, err
 	}
 	return models.SampleLogits(tensor.MustSlice[float32](cpu), opts), nil
+}
+
+// sync waits for the device's queued work (a no-op on the CPU).
+func (m *Model) sync() error {
+	if device.IsCUDA(m.Dev) {
+		return cudart.DeviceSynchronize()
+	}
+	return nil
 }

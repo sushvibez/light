@@ -37,8 +37,16 @@ func TestDecodeStepProfile(t *testing.T) {
 	}{
 		{"meta-llama/Llama-3.2-1B-Instruct", func(r string, d device.Device, dt dtype.DType) (CausalLM, error) { return LoadCausalLMFromHF(r, d, dt) }},
 		{"Qwen/Qwen3.5-0.8B", func(r string, d device.Device, dt dtype.DType) (CausalLM, error) { return LoadQwen35FromHF(r, d, dt) }},
+		{"gguf:llama-3.2-1b-instruct-q4_k_m.gguf", func(r string, d device.Device, dt dtype.DType) (CausalLM, error) {
+			return LoadLlamaGGUF(filepath.Join(ggufSearchDir(), strings.TrimPrefix(r, "gguf:")), d)
+		}},
 	} {
-		if !hfCached(tc.repo) {
+		if strings.HasPrefix(tc.repo, "gguf:") {
+			if _, err := os.Stat(filepath.Join(ggufSearchDir(), strings.TrimPrefix(tc.repo, "gguf:"))); err != nil {
+				t.Logf("%s not on disk, skipped", tc.repo)
+				continue
+			}
+		} else if !hfCached(tc.repo) {
 			t.Logf("%s not cached, skipped", tc.repo)
 			continue
 		}

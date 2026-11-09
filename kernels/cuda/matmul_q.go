@@ -27,6 +27,9 @@ var matmulQKernels = map[dtype.DType]string{
 // M == 1 and K % 64 == 0 (rows 4-byte aligned).
 var matmulQMVKernels = map[dtype.DType]string{
 	dtype.Q8_0: "matmul_q8_0_f32_mv",
+	dtype.Q4_K: "matmul_q4_k_f32_mv",
+	dtype.Q5_K: "matmul_q5_k_f32_mv",
+	dtype.Q6_K: "matmul_q6_k_f32_mv",
 }
 
 func init() {

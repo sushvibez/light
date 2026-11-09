@@ -49,6 +49,15 @@ func MatMulQ(x, w *tensor.Tensor) (*tensor.Tensor, error) {
 	if err != nil {
 		return nil, err
 	}
+	if device.IsCUDA(x.Device()) && M >= MatMulQDequantMinRows {
+		// Prefill: the fused CUDA kernels decode each weight block once per
+		// 4-row tile of x with one lane per block, which is bandwidth-cheap
+		// for decode but compute-bound for a prompt (a 46-token Llama-3.2-1B
+		// Q4_K_M prefill took 0.83 s on the RTX 5060 Ti). Materialising the
+		// F32 weight and running cuBLAS costs ~8 bytes per weight of traffic
+		// once per matmul, amortised over the rows.
+		return matMulQFallback(xC, w)
+	}
 	k, err := registry.Lookup(registry.Key{Op: "matmul_q", Dev: x.Device().Kind(), DType: w.DType()})
 	if err != nil {
 		if !errors.Is(err, registry.ErrKernelNotFound) {
@@ -68,6 +77,11 @@ func MatMulQ(x, w *tensor.Tensor) (*tensor.Tensor, error) {
 
 // matMulQFallback dequantizes w to F32 and runs the ordinary matmul. Exact
 // up to summation order; used on CPU and for formats without a fused kernel.
+// MatMulQDequantMinRows is the row count from which the CUDA path
+// dequantizes the weight and runs a cuBLAS GEMM instead of the fused
+// quantized kernels (see MatMulQ).
+var MatMulQDequantMinRows = 8
+
 func matMulQFallback(x, w *tensor.Tensor) (*tensor.Tensor, error) {
 	wf, err := quant.Dequantize(w)
 	if err != nil {

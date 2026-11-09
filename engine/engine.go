@@ -390,6 +390,12 @@ func (m *Model) Generate(ctx context.Context, msgs []Message, opts GenOpts, onTo
 	if err != nil {
 		return "", st, fmt.Errorf("prefill: %w", err)
 	}
+	// Launches are asynchronous: wait for the prompt's GPU work so PrefillMS
+	// is the prefill and not its issue time (and the first decode token does
+	// not inherit it).
+	if err := m.sync(); err != nil {
+		return "", st, fmt.Errorf("prefill: %w", err)
+	}
 	st.PrefillMS = float64(time.Since(t0).Microseconds()) / 1000
 
 	var gen []int32
