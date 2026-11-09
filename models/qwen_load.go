@@ -189,7 +189,13 @@ func fetchQwenConfig(repo string) (LlamaConfig, error) {
 }
 
 func mapHFToLlama(m *Llama, hf map[string]*tensor.Tensor) error {
-	return mapHFToLlamaPrefix(m, hf, "model.")
+	prefix := "model."
+	if _, ok := hf["model.embed_tokens.weight"]; !ok {
+		if _, ok := hf["embed_tokens.weight"]; ok {
+			prefix = "" // a bare base model (Qwen3Model: a diffusion text encoder)
+		}
+	}
+	return mapHFToLlamaPrefix(m, hf, prefix)
 }
 
 // mapHFToLlamaPrefix copies a HF Llama-family decoder whose tensors start
@@ -277,6 +283,9 @@ func mapHFToLlamaPrefix(m *Llama, hf map[string]*tensor.Tensor, prefix string) e
 		return err
 	}
 	if !m.Cfg.TieEmbed {
+		if _, ok := hf["lm_head.weight"]; !ok && prefix == "" {
+			return nil // headless base model: only its hidden states are used
+		}
 		if err := lin(m.LMHead, "lm_head.weight"); err != nil {
 			return err
 		}

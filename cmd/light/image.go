@@ -30,7 +30,7 @@ func cmdImage(args []string) error {
 	var refs stringList
 	fs.Var(&refs, "image", "reference image for editing (FLUX.2 klein; repeatable; the output size defaults to the first's)")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: light image [flags] <org/repo> <prompt>\n\nPipelines: Flux2KleinPipeline (FLUX.2 klein), FluxPipeline (FLUX.1).\n\nflags:")
+		fmt.Fprintln(os.Stderr, "usage: light image [flags] <org/repo> <prompt>\n\nPipelines: Flux2KleinPipeline (FLUX.2 klein, text-to-image and editing), ZImagePipeline (Z-Image / Turbo), FluxPipeline (FLUX.1).\n\nflags:")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -84,6 +84,23 @@ func cmdImage(args []string) error {
 		}
 		fmt.Fprintf(os.Stderr, "generated in %.1f s\n", time.Since(t1).Seconds())
 		img = diffusion.Image{Pixels: res.Image}
+	case "ZImagePipeline":
+		if len(refs) > 0 {
+			return fmt.Errorf("%s: reference images need FLUX.2 klein", repo)
+		}
+		p, err := diffusion.LoadZImage(repo, d, diffusion.ZImageLoadOptions{Storage16: !*f32})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "loaded %s in %.1f s\n", repo, time.Since(t0).Seconds())
+		t1 := time.Now()
+		res, err := p.Generate(diffusion.ZImageOptions{Prompt: prompt, Width: *width, Height: *height,
+			Steps: *steps, Guidance: float32(*guidance), Seed: *seed})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "generated in %.1f s\n", time.Since(t1).Seconds())
+		img = diffusion.Image{Pixels: res.Image}
 	case "FluxPipeline":
 		if len(refs) > 0 {
 			return fmt.Errorf("%s: reference images need FLUX.2 klein", repo)
@@ -99,7 +116,7 @@ func cmdImage(args []string) error {
 		}
 		img = diffusion.Image{Pixels: res.Image}
 	default:
-		return fmt.Errorf("%s: pipeline %q not supported (Flux2KleinPipeline, FluxPipeline)", repo, mi.Class)
+		return fmt.Errorf("%s: pipeline %q not supported (Flux2KleinPipeline, ZImagePipeline, FluxPipeline)", repo, mi.Class)
 	}
 	if err := img.SavePNG(*out); err != nil {
 		return err
