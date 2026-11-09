@@ -80,3 +80,6 @@ Thumbs.db
 *.gop.go
 *.xgo.go
 xgo_autogen.go
+
+# Generated images and other local outputs (examples get curated into the repo later)
+/scratch/
