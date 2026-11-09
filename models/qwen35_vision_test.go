@@ -3,6 +3,8 @@ package models
 import (
 	"encoding/binary"
 	"encoding/json"
+	"image"
+	"image/png"
 	"math"
 	"os"
 	"slices"
@@ -185,4 +187,78 @@ func lastLogitsRow(t *testing.T, logits *tensor.Tensor) []float32 {
 	all := tensor.MustSlice[float32](l)
 	V := l.Dim(-1)
 	return all[len(all)-V:]
+}
+
+// The Go preprocessor against the transformers processor: the aligned
+// 320 x 256 image (no resize) gives identical patches; the 300 x 221 one
+// is resized (antialiased bicubic) to the same grid with every pixel
+// within one uint8 level.
+func TestQwen35ImagePatches(t *testing.T) {
+	const dir = "testdata/qwen35-vision/"
+	cfg := Qwen35ImageConfig{PatchSize: 16, TemporalPatchSize: 2, MergeSize: 2, MinPixels: 65536, MaxPixels: 16777216}
+	load := func(name string) image.Image {
+		f, err := os.Open(dir + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		img, err := png.Decode(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return img
+	}
+	got, grid, err := Qwen35ImagePatches(load("image.png"), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := readF32File(t, dir+"pixel_values.f32")
+	if grid != [3]int{1, 16, 20} || !slices.Equal(got, want) {
+		t.Fatalf("aligned image: grid %v, patches equal %v", grid, slices.Equal(got, want))
+	}
+
+	raw, err := os.ReadFile(dir + "odd.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta struct {
+		Grid [][3]int `json:"grid_thw"`
+	}
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := os.ReadFile(dir + "odd.u8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, grid, err = Qwen35ImagePatches(load("odd.png"), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grid != meta.Grid[0] {
+		t.Fatalf("odd image grid %v, want %v", grid, meta.Grid[0])
+	}
+	const P, T = 16, 2
+	n := len(got) / (3 * T * P * P)
+	maxd, off := 0, 0
+	for p := range n {
+		for c := range 3 {
+			for i := range P * P {
+				v := got[((p*3+c)*T)*P*P+i]
+				u := int(math.Round(float64(v)*127.5 + 127.5))
+				d := u - int(ref[(p*3+c)*P*P+i])
+				if d < 0 {
+					d = -d
+				}
+				if d > 0 {
+					off++
+				}
+				maxd = max(maxd, d)
+			}
+		}
+	}
+	t.Logf("odd image: grid %v, %d of %d pixels off by up to %d", grid, off, n*3*P*P, maxd)
+	if maxd > 1 {
+		t.Errorf("resized pixels differ by up to %d levels", maxd)
+	}
 }
