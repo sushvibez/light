@@ -20,7 +20,7 @@ GPTQ / AWQ) is complete as of 2026-11-08 except for the items below.
 2. **Flux / SD3 (MMDiT)** — structurally different from the UNet path: joint
    text/image transformer blocks, flow-matching schedulers. Unlocks the DiT
    family (Qwen-Image, Z-Image, Krea, the user-queued FLUX checkpoint).
-3. **INT8 W8A8 GEMM** — `cublasGemmEx(CUBLAS_COMPUTE_32I)` for
+3. **INT8 W8A8 GEMM** (desktop) — `cublasGemmEx(CUBLAS_COMPUTE_32I)` for
    SmoothQuant-style int8 weights × int8 activations; today int8 is
    per-column weights × F32 activations only (`ops.MatMulInt8`).
 
