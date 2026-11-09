@@ -108,6 +108,9 @@ func Load(spec Spec) (*Model, error) {
 	if err != nil {
 		return nil, err
 	}
+	if device.IsWebGPU(dev) && spec.GGUF == "" && spec.DType != "" && !strings.EqualFold(spec.DType, "f32") {
+		return nil, fmt.Errorf("engine: WebGPU runs F32 weights only (got dtype %q); load with dtype f32 or use the CPU / CUDA", spec.DType)
+	}
 	var tok *tokenizer.BPE
 	var ggufVocab *tokenizer.GGUFVocab
 	tokPath := spec.TokenizerPath

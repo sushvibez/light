@@ -35,8 +35,10 @@ func (f *modelFlags) spec(e engine.Entry) engine.Spec {
 	switch {
 	case f.dtype != "":
 		s.DType = f.dtype
-	case (s.Device == "cpu" || s.Device == "webgpu") && (e.Kind == "safetensors" || e.Kind == "pytorch") && e.SizeBytes <= 6<<30:
-		s.DType = "f32" // WebGPU is F32-only; the CPU BF16 path is slow
+	case s.Device == "webgpu":
+		s.DType = "f32" // WebGPU runs F32 only (whatever the checkpoint's size)
+	case s.Device == "cpu" && (e.Kind == "safetensors" || e.Kind == "pytorch") && e.SizeBytes <= 6<<30:
+		s.DType = "f32" // the CPU BF16 path is slower than F32 for models that fit
 	}
 	return s
 }
