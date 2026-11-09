@@ -13,7 +13,8 @@ import (
 
 func init() {
 	// The gather kernel moves 32-bit words, so any 4- or 8-byte dtype works.
-	for _, dt := range []dtype.DType{dtype.F32, dtype.I32, dtype.U32, dtype.F64, dtype.I64, dtype.U64} {
+	// 16-bit tables move as word pairs: rows must hold an even element count.
+	for _, dt := range []dtype.DType{dtype.F32, dtype.I32, dtype.U32, dtype.F64, dtype.I64, dtype.U64, dtype.BF16, dtype.F16} {
 		registry.Register(registry.Key{Op: "index_select", Dev: device.KindWebGPU, DType: dt}, indexSelect)
 	}
 	for _, dt := range []dtype.DType{dtype.F32, dtype.I32, dtype.U32, dtype.F64, dtype.I64, dtype.U64} {
@@ -47,6 +48,9 @@ func indexSelect(ctx *registry.Context) error {
 	rowSize := 1
 	for _, s := range src.Shape().Dims()[1:] {
 		rowSize *= s
+	}
+	if rowSize*src.DType().Size()%4 != 0 {
+		return fmt.Errorf("webgpu index_select: %v rows of %d elements are not whole 32-bit words", src.DType(), rowSize)
 	}
 	rowWords := rowSize * src.DType().Size() / 4
 	numIdx := idx.Dim(0)

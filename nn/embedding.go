@@ -16,8 +16,11 @@ import (
 // Embedding is a lookup table: indices (..., K) → (..., K, EmbDim).
 type Embedding struct {
 	Weight *tensor.Tensor // (NumEmbeddings, EmbDim)
-	numEmb int
-	embDim int
+	// WidenF32 casts the gathered rows to F32: a 16-bit table kept for
+	// memory under an F32 model (exact widening).
+	WidenF32 bool
+	numEmb   int
+	embDim   int
 }
 
 // NewEmbedding initialises a table with small uniform values so the network
@@ -52,11 +55,15 @@ func NewEmbeddingFromWeight(w *tensor.Tensor) (*Embedding, error) {
 // `dev`. Use this when a loader is about to overwrite the weight — for a
 // 3B-param model this skips ~300M random draws and a CPU→GPU transfer.
 func NewEmbeddingUninit(numEmbeddings, embDim int, wdt dtype.DType, dev device.Device) (*Embedding, error) {
-	w, err := tensor.Zeros(wdt, []int{numEmbeddings, embDim}, dev)
+	wd, w16 := weightDType16(wdt, embDim) // 16-bit storage loads
+	if w16 {
+		dev = embeddingDevice16(wd, numEmbeddings*embDim, dev)
+	}
+	w, err := tensor.Zeros(wd, []int{numEmbeddings, embDim}, dev)
 	if err != nil {
 		return nil, err
 	}
-	return &Embedding{Weight: w, numEmb: numEmbeddings, embDim: embDim}, nil
+	return &Embedding{Weight: w, WidenF32: w16, numEmb: numEmbeddings, embDim: embDim}, nil
 }
 
 // Forward looks up embeddings by the given I64 indices tensor of arbitrary
@@ -72,6 +79,14 @@ func (e *Embedding) Forward(indices *tensor.Tensor) (*tensor.Tensor, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A table kept in host memory under a device model (too large for one
+	// device buffer): gather on the host, ship only the rows.
+	outDev := indices.Device()
+	if !outDev.SameAs(e.Weight.Device()) {
+		if flat, err = flat.To(e.Weight.Device()); err != nil {
+			return nil, err
+		}
+	}
 	var looked *tensor.Tensor
 	if e.Weight.DType().IsQuantized() {
 		// GGUF table kept in its block format: gather the rows' blocks, then
@@ -85,6 +100,16 @@ func (e *Embedding) Forward(indices *tensor.Tensor) (*tensor.Tensor, error) {
 		}
 	} else if looked, err = autograd.IndexSelect(e.Weight, flat); err != nil {
 		return nil, err
+	}
+	if e.WidenF32 && looked.DType() != dtype.F32 {
+		if looked, err = ops.Cast(looked, dtype.F32); err != nil {
+			return nil, err
+		}
+	}
+	if !outDev.SameAs(looked.Device()) {
+		if looked, err = looked.To(outDev); err != nil {
+			return nil, err
+		}
 	}
 	// Reshape result back: indices shape + (embDim,)
 	newShape := append([]int{}, indices.Shape().Dims()...)

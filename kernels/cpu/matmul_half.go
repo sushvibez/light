@@ -3,7 +3,9 @@ package cpu
 import (
 	"math"
 
+	"light/device"
 	"light/dtype"
+	"light/internal/registry"
 	"light/tensor"
 )
 
@@ -77,4 +79,36 @@ func matmulHalfFast(a, b, out *tensor.Tensor, roundA bool) bool {
 		return false
 	}
 	return true
+}
+
+func init() {
+	for _, dt := range []dtype.DType{dtype.BF16, dtype.F16} {
+		registry.Register(registry.Key{Op: "matmul_w16", Dev: device.KindCPU, DType: dt}, matmulW16CPU)
+	}
+}
+
+// matmulW16CPU is ops.MatMulW16 on the CPU: F32 x (M, K) times a 16-bit
+// weight (N, K) widened row by row (exactly), tiled, F32 out.
+func matmulW16CPU(ctx *registry.Context) error {
+	x, w, out := ctx.Inputs[0], ctx.Inputs[1], ctx.Output
+	M, K, N := x.Dim(0), x.Dim(1), w.Dim(0)
+	xs := asSlice[float32](x)[x.Offset():]
+	ws := asSlice[uint16](w)[w.Offset():]
+	bf16 := w.DType() == dtype.BF16
+	rowsTimesX(xs, asSlice[float32](out), M, K, N, func(n int, dst []float32) {
+		src := ws[n*K : n*K+K]
+		switch {
+		case bf16 && decodeAVX2 && K%8 == 0:
+			bf16RowAVX2(&src[0], &dst[0], K)
+		case bf16:
+			for k, v := range src {
+				dst[k] = math.Float32frombits(uint32(v) << 16)
+			}
+		default:
+			for k, v := range src {
+				dst[k] = dtype.Half(v).ToF32()
+			}
+		}
+	})
+	return nil
 }

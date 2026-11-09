@@ -20,6 +20,7 @@ import (
 	"light/dtype"
 	"light/hub"
 	"light/models"
+	"light/nn"
 	"light/tensor"
 	"light/tokenizer"
 )
@@ -108,6 +109,24 @@ func Load(spec Spec) (*Model, error) {
 	if err != nil {
 		return nil, err
 	}
+	// "w16" (any device) keeps the matmul weights in BF16 storage under F32
+	// compute (W16A32): exact for a BF16 checkpoint, in half the memory of
+	// f32. WebGPU computes in F32 only, so "bf16" / "f16" there mean the same
+	// (BF16 / F16 storage).
+	var store16 dtype.DType
+	w16 := false
+	if spec.GGUF == "" {
+		switch dt := strings.ToLower(spec.DType); {
+		case dt == "w16":
+			store16, w16 = dtype.BF16, true
+		case device.IsWebGPU(dev) && dt == "bf16":
+			store16, w16 = dtype.BF16, true
+		case device.IsWebGPU(dev) && dt == "f16":
+			store16, w16 = dtype.F16, true
+		case device.IsWebGPU(dev) && dt != "" && dt != "f32":
+			return nil, fmt.Errorf("engine: WebGPU loads dtype f32, bf16 / w16 or f16 (16-bit weight storage), got %q", spec.DType)
+		}
+	}
 	var tok *tokenizer.BPE
 	var ggufVocab *tokenizer.GGUFVocab
 	tokPath := spec.TokenizerPath
@@ -144,10 +163,24 @@ func Load(spec Spec) (*Model, error) {
 		lm, err = models.LoadChatModelGGUF(spec.GGUF, dev)
 	default:
 		wdt := dtype.F32
-		if strings.EqualFold(spec.DType, "bf16") {
+		if strings.EqualFold(spec.DType, "bf16") && !w16 {
 			wdt = dtype.BF16
 		}
-		lm, err = models.LoadChatModelFromHF(spec.Repo, dev, wdt)
+		if w16 {
+			// The weights are allocated at 16 bits as the loader builds the
+			// model, so no F32 copy of them exists; StoreWeights16 then
+			// narrows any a loader built another way.
+			err = nn.WithWeightStorage16(store16, func() error {
+				var err error
+				lm, err = models.LoadChatModelFromHF(spec.Repo, dev, dtype.F32)
+				return err
+			})
+			if err == nil {
+				_, err = models.StoreWeights16(lm, store16)
+			}
+		} else {
+			lm, err = models.LoadChatModelFromHF(spec.Repo, dev, wdt)
+		}
 	}
 	if err != nil {
 		return nil, err

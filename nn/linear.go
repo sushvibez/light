@@ -153,7 +153,8 @@ func newLinearImpl(inFeatures, outFeatures int, bias bool, wdt dtype.DType, dev 
 		// Allocate directly on `dev` at the target dtype. One cudaMalloc, no
 		// CPU pass, no Kaiming init — the loader is expected to fill values
 		// before any forward.
-		w, err = tensor.Zeros(wdt, []int{outFeatures, inFeatures}, dev)
+		wd, _ := weightDType16(wdt, inFeatures) // 16-bit storage loads
+		w, err = tensor.Zeros(wd, []int{outFeatures, inFeatures}, dev)
 		if err != nil {
 			return nil, err
 		}
@@ -208,7 +209,10 @@ func (l *Linear) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 			return nil, fmt.Errorf("nn.Linear: block-scaled FP8 needs F32 or BF16 activations, got F16")
 		}
 	}
-	if !quantized && !fp8 && !blockFP8 && x.DType() != w.DType() {
+	// 16-bit weight storage (WebGPU W16A32): F32 activations against a
+	// BF16 / F16 weight widened exactly inside the matmul.
+	w16 := x.DType() == dtype.F32 && (w.DType() == dtype.BF16 || w.DType() == dtype.F16)
+	if !quantized && !fp8 && !blockFP8 && !w16 && x.DType() != w.DType() {
 		return nil, fmt.Errorf("nn.Linear: x dtype %v != W dtype %v — cast at the boundary, not inside the layer", x.DType(), l.W.DType())
 	}
 
@@ -234,6 +238,12 @@ func (l *Linear) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 		// Block-scaled FP8 (inference only): fused GEMV for a few rows,
 		// dequantize + GEMM otherwise.
 		y, err = ops.MatMulF8Block(flat, l.W, l.WBlockScale, l.WBlock[0], l.WBlock[1])
+	} else if w16 {
+		flatC, err2 := flat.Contiguous()
+		if err2 != nil {
+			return nil, err2
+		}
+		y, err = ops.MatMulW16(flatC, w)
 	} else if quantized {
 		// GGUF weight: fused dequant-matmul (no autograd; inference only).
 		flatC, err2 := flat.Contiguous()

@@ -20,7 +20,6 @@ import (
 	"light/device"
 	"light/engine"
 	"light/internal/cudart"
-	"light/internal/wgpudev"
 )
 
 // The performance table: per host (CPU, RAM, OS), per model and device,
@@ -142,9 +141,7 @@ func gpuMemMB(rt *engine.Runtime, kind string) float64 {
 	case "cuda":
 		return float64(rt.Status().GPUUsed)
 	case "webgpu":
-		if d, err := wgpudev.Get(); err == nil {
-			return float64(d.AllocatedBytes()) / (1 << 20)
-		}
+		return webgpuMemMB()
 	}
 	return 0
 }
@@ -157,9 +154,7 @@ func gpuName(kind string) string {
 			return n
 		}
 	case "webgpu":
-		if d, err := wgpudev.Get(); err == nil {
-			return d.AdapterName + " (" + d.BackendName + ")"
-		}
+		return webgpuName()
 	}
 	return ""
 }
