@@ -10,7 +10,7 @@ import (
 )
 
 // Local GGUF files produced with llama.cpp from the HF checkpoints (see
-// CHECKPOINTS.md 2026-10-27). Tests skip when they are absent.
+// docs/history/checkpoints-2026.md, 2026-10-27). Tests skip when they are absent.
 func localGGUF(name string) string {
 	home, _ := os.UserHomeDir()
 	p := filepath.Join(home, ".cache/light/gguf", name)

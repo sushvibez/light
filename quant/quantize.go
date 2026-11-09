@@ -7,6 +7,7 @@ import (
 
 	"light/device"
 	"light/dtype"
+	"light/internal/parallel"
 	"light/tensor"
 )
 
@@ -46,9 +47,11 @@ func Quantize(src *tensor.Tensor, to dtype.DType) (*tensor.Tensor, error) {
 	}
 	bb := to.BlockBytes()
 	out := make([]byte, (n/QK4_0)*bb)
-	for b := range n / QK4_0 {
-		enc(out[b*bb:(b+1)*bb], x[b*QK4_0:(b+1)*QK4_0])
-	}
+	parallel.For(n/QK4_0, 1024, func(lo, hi int) {
+		for b := lo; b < hi; b++ {
+			enc(out[b*bb:(b+1)*bb], x[b*QK4_0:(b+1)*QK4_0])
+		}
+	})
 	return tensor.FromBytes(out, to, src.Shape().Dims(), device.CPU())
 }
 

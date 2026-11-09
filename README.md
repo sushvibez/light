@@ -27,9 +27,10 @@ app, Light Studio (Wails v3 + React), lives in its own repository,
 
 Documentation: [`STATUS.md`](STATUS.md) (what works: models, features, kernel
 matrix, comparison with Candle), [`ROADMAP.md`](ROADMAP.md) (open work),
-[`CHECKPOINTS.md`](CHECKPOINTS.md) (dated work log, the source of truth),
 [`docs/design/`](docs/design/) (live design notes) and
-[`docs/history/`](docs/history/) (original design, plan and GoLight porting notes).
+[`docs/history/`](docs/history/) (original design, plan, GoLight porting notes
+and the 2026-04 → 2026-11 work log). The dated record of changes and their
+evidence is the git log.
 
 ## Requirements
 

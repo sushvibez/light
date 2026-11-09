@@ -11,6 +11,7 @@ import (
 	"light/dtype"
 	"light/nn"
 	"light/ops"
+	"light/quant"
 	"light/tensor"
 )
 
@@ -45,9 +46,20 @@ func MoveToDevice16(model any, dev device.Device, dt dtype.DType) (int, error) {
 	return convert16(model, dt, dev)
 }
 
+// MoveToDeviceQ8 is MoveToDevice16 with the matmul weights quantized to
+// GGUF Q8_0 (32-weight blocks, one F16 scale each: ~8.5 bits per weight)
+// instead: about half the memory of 16-bit storage, run by the quantized
+// matmul and embedding paths (CPU AVX2 / WebGPU / CUDA). Unlike 16-bit
+// storage this is lossy (Q8_0's error, ~0.4% of a block's largest weight).
+// Weights whose rows are not a multiple of 32 keep their dtype. dev may be
+// the CPU. Returns the number of tensors quantized.
+func MoveToDeviceQ8(model any, dev device.Device) (int, error) {
+	return convert16(model, dtype.Q8_0, dev)
+}
+
 func convert16(model any, dt dtype.DType, dev device.Device) (int, error) {
-	if dt != dtype.BF16 && dt != dtype.F16 {
-		return 0, fmt.Errorf("StoreWeights16: want BF16 or F16, got %v", dt)
+	if dt != dtype.BF16 && dt != dtype.F16 && dt != dtype.Q8_0 {
+		return 0, fmt.Errorf("StoreWeights16: want BF16, F16 or Q8_0, got %v", dt)
 	}
 	c := &w16Collect{
 		seen:  map[seenKey]bool{},
@@ -78,7 +90,15 @@ func convert16(model any, dt dtype.DType, dev device.Device) (int, error) {
 		}
 		nt := t
 		narrowed := false
-		if (linear || emb) && t.DType() == dtype.F32 && t.Rank() == 2 && t.Dim(1)%2 == 0 {
+		if dt == dtype.Q8_0 {
+			if (linear || emb) && t.Rank() == 2 && t.Dim(1)%32 == 0 && t.DType().IsFloat() && !t.DType().IsQuantized() {
+				var err error
+				if nt, err = quantizeQ8(t); err != nil {
+					return n, fmt.Errorf("MoveToDeviceQ8: %w", err)
+				}
+				n++
+			}
+		} else if (linear || emb) && t.DType() == dtype.F32 && t.Rank() == 2 && t.Dim(1)%2 == 0 {
 			var err error
 			if nt, err = ops.Cast(t, dt); err != nil {
 				return n, fmt.Errorf("StoreWeights16: %w", err)
@@ -112,6 +132,24 @@ func convert16(model any, dt dtype.DType, dev device.Device) (int, error) {
 	}
 	trim16(webgpu)
 	return n, nil
+}
+
+// quantizeQ8 is t (any float dtype, any device) as a Q8_0 tensor on the
+// CPU (the encoder is CPU-only; the caller moves it).
+func quantizeQ8(t *tensor.Tensor) (*tensor.Tensor, error) {
+	c := t
+	var err error
+	if !c.Device().SameAs(device.CPU()) {
+		if c, err = c.To(device.CPU()); err != nil {
+			return nil, err
+		}
+	}
+	if c.DType() != dtype.F32 {
+		if c, err = ops.Cast(c, dtype.F32); err != nil {
+			return nil, err
+		}
+	}
+	return quant.Quantize(c, dtype.Q8_0)
 }
 
 func trim16(webgpu bool) {

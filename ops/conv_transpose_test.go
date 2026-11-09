@@ -11,7 +11,7 @@ import (
 )
 
 // Reference values from torch.nn.functional (see the python snippet in
-// CHECKPOINTS 7.17): tensors filled with sin(seed + 0.7·i)·0.5.
+// docs/history/checkpoints-2026.md, step 7.17): tensors filled with sin(seed + 0.7·i)·0.5.
 func fillT(t *testing.T, dims []int, seed float64, dev device.Device) *tensor.Tensor {
 	t.Helper()
 	n := 1
