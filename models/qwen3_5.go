@@ -304,6 +304,7 @@ func (m *Qwen35) forwardHidden(h *tensor.Tensor, B, T, prior int, dev device.Dev
 		if h, err = m.runBlock(blk, h, B, T, prior, pos, dev, cache, i); err != nil {
 			return nil, fmt.Errorf("layer %d: %w", i, err)
 		}
+		prefillGC(dev, T, i)
 	}
 	if h, err = m.FinalNorm.Forward(h); err != nil {
 		return nil, err

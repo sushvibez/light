@@ -55,7 +55,11 @@ type Model struct {
 	Diffusion bool
 	SDAR      models.SDAROpts
 
-	vision *models.Qwen35Vision // loaded on the first image
+	vision  *models.Qwen35Vision // loaded on the first image
+	pixtral *models.Pixtral
+	// w16 / store16: the LM keeps 16-bit weights; vision towers load the same way.
+	w16     bool
+	store16 dtype.DType
 }
 
 // GenOpts controls sampling. Temperature 0 is greedy.
@@ -207,7 +211,7 @@ func Load(spec Spec) (*Model, error) {
 		return nil, err
 	}
 
-	m := &Model{Spec: spec, LM: lm, Tok: tok, Dev: dev, eos: map[int64]bool{}}
+	m := &Model{Spec: spec, LM: lm, Tok: tok, Dev: dev, eos: map[int64]bool{}, w16: w16, store16: store16}
 	m.Template = TemplateFor(tok)
 	if ct := loadChatTemplate(spec, tok); ct != nil {
 		m.Template = withJinja(m.Template, ct)
@@ -405,6 +409,9 @@ func (m *Model) Generate(ctx context.Context, msgs []Message, opts GenOpts, onTo
 		return "", st, fmt.Errorf("prefill: %w", err)
 	}
 	st.PrefillMS = float64(time.Since(t0).Microseconds()) / 1000
+	if !device.IsCPU(m.Dev) {
+		runtime.GC() // the prefill's activations and full-sequence logits
+	}
 
 	var gen []int32
 	var out strings.Builder

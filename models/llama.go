@@ -625,6 +625,7 @@ func (m *Llama) ForwardEmbeds(h *tensor.Tensor, cache *KVCache) (*tensor.Tensor,
 		if err != nil {
 			return nil, err
 		}
+		prefillGC(dev, T, i)
 	}
 	if m.FinalLN != nil {
 		h, err = m.FinalLN.Forward(h)

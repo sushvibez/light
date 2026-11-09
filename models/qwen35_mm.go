@@ -144,8 +144,12 @@ func (m *Qwen35) ForwardMultimodal(tokens, image *tensor.Tensor, pos [3][]int64,
 	return m.forwardHidden(h, 1, T, prior, dev, cache)
 }
 
-// scatterImage replaces h's rows (1, T, D) at the placeholder positions with
-// image's rows, in order.
+// ScatterImage replaces h's rows (1, T, D) at the placeholder positions
+// (ids == tok) with image's rows, in order.
+func ScatterImage(h *tensor.Tensor, ids []int64, tok int64, image *tensor.Tensor) (*tensor.Tensor, error) {
+	return scatterImage(h, ids, tok, image)
+}
+
 func scatterImage(h *tensor.Tensor, ids []int64, tok int64, image *tensor.Tensor) (*tensor.Tensor, error) {
 	T, D := h.Dim(1), h.Dim(2)
 	if image.Dim(1) != D {
@@ -172,7 +176,9 @@ func scatterImage(h *tensor.Tensor, ids []int64, tok int64, image *tensor.Tensor
 				return nil, fmt.Errorf("qwen3.5: %d+ placeholder tokens, %d image tokens", next+(j-i), image.Dim(0))
 			}
 			if p, err = image.Narrow(0, next, j-i); err == nil {
-				p, err = p.Reshape(1, j-i, D)
+				if p, err = p.Contiguous(); err == nil {
+					p, err = p.Reshape(1, j-i, D)
+				}
 			}
 			next += j - i
 		} else {

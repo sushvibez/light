@@ -56,7 +56,7 @@ status are in the commits (and, up to 2026-11-09, the
 | **Llama-3 / 3.1 / 3.2** | `models/llama3_load.go` | Done — pretrained | llama3 RoPE scaling; Llama-3.2-1B top-5 = transformers; GGUF and GPTQ act-order verified |
 | **Mistral 7B** | `models/llama3_load.go` | ✅ Verified 2026-11-09 (BF16) | Mistral-7B-Instruct-v0.3 BF16: top-5 ids = transformers, 16 / 16 greedy |
 | **Granite 3.x / Granite 4.0 (attention)** | `models/granite_load.go` | ✅ Verified 2026-11-09 (granite-4.0-micro BF16) | Llama decoder + Granite multipliers; granite-4.0-micro 16 / 16 greedy. Mamba-hybrid layers not supported |
-| **Ministral 3 (text)** | `models/ministral_load.go` | ✅ Verified 2026-11-09 (3B, FP8 → BF16) | YaRN + Llama 4 query scaling, FP8 → BF16 at load; Ministral-3-3B 16 / 16 greedy |
+| **Ministral 3 (text)** | `models/ministral_load.go` | ✅ Verified 2026-11-09 (3B, FP8 → BF16) | YaRN + Llama 4 query scaling, FP8 → BF16 at load; Ministral-3-3B 16 / 16 greedy. Image input (Pixtral tower + projector): image chat = transformers, 16 / 16 greedy |
 | Mixtral | `models/llama3_load.go` | Architecture-ready (SWA done) | Sliding window verified; HF `mixtral` not routed yet (ROADMAP) |
 | **Phi-3 / Phi-3.5** | `models/llama3_load.go` (`LoadPhi3FromHF`) | Done — pretrained | Fused QKV split + LongRoPE; Phi-3.5-mini BF16 top-5 = transformers |
 | **Phi-4-mini** | `models/llama.go` (`PartialRotary`), `llama3_load.go` | ✅ Verified 2026-10-29 | Partial rotary + LongRoPE, 200k vocab; BF16 top-5 and 16-token greedy = transformers |
