@@ -1,0 +1,100 @@
+{
+ "repo": "meta-llama/Llama-3.2-1B-Instruct",
+ "revision": null,
+ "model_type": "llama",
+ "vocab_size": 128256,
+ "dtype": "bf16",
+ "prompt": "What is 2+2?",
+ "chat_template": true,
+ "ids": [
+  128000,
+  128006,
+  9125,
+  128007,
+  271,
+  38766,
+  1303,
+  33025,
+  2696,
+  25,
+  6790,
+  220,
+  2366,
+  18,
+  198,
+  15724,
+  2696,
+  25,
+  220,
+  2705,
+  4723,
+  220,
+  2366,
+  21,
+  271,
+  128009,
+  128006,
+  882,
+  128007,
+  271,
+  3923,
+  374,
+  220,
+  17,
+  10,
+  17,
+  30,
+  128009,
+  128006,
+  78191,
+  128007,
+  271
+ ],
+ "top": [
+  {
+   "id": 17,
+   "logit": 22.5,
+   "text": "2"
+  },
+  {
+   "id": 11874,
+   "logit": 17.375,
+   "text": "Two"
+  },
+  {
+   "id": 791,
+   "logit": 17.25,
+   "text": "The"
+  },
+  {
+   "id": 644,
+   "logit": 15.125,
+   "text": "In"
+  },
+  {
+   "id": 1271,
+   "logit": 14.875,
+   "text": "To"
+  }
+ ],
+ "greedy": [
+  17,
+  489,
+  220,
+  17,
+  284,
+  220,
+  19,
+  128009
+ ],
+ "greedy_text": "2 + 2 = 4<|eot_id|>",
+ "gguf": "llama-3.2-1b-instruct-q4_k_m.gguf",
+ "tolerance": 0,
+ "source": {
+  "transformers": "5.21.0",
+  "torch": "2.11.0+cu130",
+  "device": "cuda:0 NVIDIA GeForce RTX 5060 Ti",
+  "python": "3.13.12",
+  "load_s": 6.8
+ }
+}
