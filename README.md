@@ -76,7 +76,9 @@ transformers (or upstream) implementation on a ≥15-token prompt with real
 weights, greedy continuations agree, and the CPU and CUDA paths agree with
 each other. Codecs and encoders are checked on codes, embeddings and
 decoded signals; the per-model numbers and the scripts that produced them
-live next to the tests.
+live next to the tests. Checkpoints that only fit the card quantized get
+their reference from `scripts/colab/light_reference.ipynb` and are checked
+as GGUF against `models/testdata/refs/*.json`.
 
 ## License
 
