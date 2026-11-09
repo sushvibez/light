@@ -15,7 +15,7 @@ GPTQ / AWQ) is complete as of 2026-11-08 except for the items below.
 
 ## 1. Remaining inference roadmap
 
-1. **SDXL base** — same primitives as SD 1.5 (CLIP, UNet2DCondition, VAE,
+1. **SDXL base** (desktop) — same primitives as SD 1.5 (CLIP, UNet2DCondition, VAE,
    DDIM), with dual text encoders and a bigger UNet.
 2. **Flux / SD3 (MMDiT)** — structurally different from the UNet path: joint
    text/image transformer blocks, flow-matching schedulers. Unlocks the DiT
