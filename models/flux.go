@@ -154,14 +154,22 @@ func timestepEmbedding(ts []float32, dev device.Device) (*tensor.Tensor, error) 
 // rotates, concatenated over the axes. ids is (S, len(AxesDims)) row-major.
 // Returns cos, sin as (1, S, 1, HeadDim).
 func (m *FluxTransformer) fluxRoPE(ids []float32, S int, dev device.Device) (*tensor.Tensor, *tensor.Tensor, error) {
-	na, Dh := len(m.Cfg.AxesDims), m.Cfg.HeadDim
+	return fluxRoPETables(m.Cfg.AxesDims, 10000, m.Cfg.HeadDim, ids, S, dev)
+}
+
+// fluxRoPETables builds FluxPosEmbed / Flux2PosEmbed tables for S
+// positions with len(axes) coordinates each (ids row-major): per axis,
+// cos / sin of pos · θ^(−2j/d) in F64, rounded to F32, repeated for the
+// pair it rotates, concatenated over the axes; (1, S, 1, headDim).
+func fluxRoPETables(axes []int, theta float64, headDim int, ids []float32, S int, dev device.Device) (*tensor.Tensor, *tensor.Tensor, error) {
+	na, Dh := len(axes), headDim
 	cs, sn := make([]float32, S*Dh), make([]float32, S*Dh)
 	for s := range S {
 		off := 0
-		for a, d := range m.Cfg.AxesDims {
+		for a, d := range axes {
 			pos := float64(ids[s*na+a])
 			for j := range d / 2 {
-				f := 1 / math.Pow(10000, float64(2*j)/float64(d))
+				f := 1 / math.Pow(theta, float64(2*j)/float64(d))
 				ang := pos * f
 				c, si := float32(math.Cos(ang)), float32(math.Sin(ang))
 				cs[s*Dh+off+2*j], cs[s*Dh+off+2*j+1] = c, c

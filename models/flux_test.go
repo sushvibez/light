@@ -131,3 +131,54 @@ func TestVAEDecoderSD15ParamCount(t *testing.T) {
 		t.Fatalf("ParamCount %d, want %d", got, want)
 	}
 }
+
+// A seeded tiny-random Flux2Transformer2DModel (klein-style, 2 + 2 blocks,
+// 4-axis RoPE; scripts/verify/ref_flux.py --make-tiny-flux2) against
+// diffusers' forward, on the CPU and WebGPU.
+func TestFlux2TransformerTinyMatchesDiffusers(t *testing.T) {
+	raw, err := os.ReadFile("testdata/refs/flux2-tiny.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ref struct {
+		X        []float32 `json:"x"`
+		Txt      []float32 `json:"txt"`
+		ImgIDs   []float32 `json:"img_ids"`
+		TxtIDs   []float32 `json:"txt_ids"`
+		Out      []float32 `json:"out"`
+		XShape   []int     `json:"x_shape"`
+		TxtShape []int     `json:"txt_shape"`
+		Timestep []float32 `json:"timestep"`
+	}
+	if err := json.Unmarshal(raw, &ref); err != nil {
+		t.Fatal(err)
+	}
+	devs := []device.Device{device.CPU()}
+	if g, err := device.WebGPU(0); err == nil {
+		devs = append(devs, g)
+	}
+	for _, dev := range devs {
+		m, err := LoadFlux2Transformer("testdata/flux2-tiny", dev)
+		if err != nil {
+			t.Fatal(err)
+		}
+		x, _ := tensor.New(ref.X, ref.XShape, dev)
+		txt, _ := tensor.New(ref.Txt, ref.TxtShape, dev)
+		y, err := m.Forward(Flux2Inputs{Image: x, Text: txt, Timestep: ref.Timestep, ImgIDs: ref.ImgIDs, TxtIDs: ref.TxtIDs})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if y, err = y.To(device.CPU()); err != nil {
+			t.Fatal(err)
+		}
+		got := tensor.MustSlice[float32](y)
+		md := 0.0
+		for i := range got {
+			md = math.Max(md, math.Abs(float64(got[i]-ref.Out[i])))
+		}
+		t.Logf("%v: max |light - diffusers| %.3g over %d values", dev, md, len(got))
+		if len(got) != len(ref.Out) || md > 1e-4 {
+			t.Errorf("%v: output differs by %.3g", dev, md)
+		}
+	}
+}
