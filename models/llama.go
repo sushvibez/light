@@ -303,6 +303,7 @@ type Llama struct {
 	LMHead     *nn.Linear // (V, D); shares storage with TokenEmb when TieEmbed.
 
 	scale      *tensor.Tensor // (1,) F32 = 1/sqrt(HeadDim) on dev
+	scaleVal   float32        // the same value as the forward applies it (BF16-rounded with BF16 weights)
 	scaleDev   device.Device
 	maskTotal  int
 	maskPrior  int
@@ -519,9 +520,12 @@ func NewLlama(cfg LlamaConfig, dev device.Device) (*Llama, error) {
 			return nil, err
 		}
 	}
+	if cfg.WeightDType == dtype.BF16 {
+		scaleVal = bf16RoundF32(scaleVal)
+	}
 	return &Llama{
 		Cfg: cfg, TokenEmb: tokEmb, Blocks: blocks, FinalNorm: fn, FinalLN: finalLN, LMHead: head,
-		scale: scaleT, scaleDev: dev,
+		scale: scaleT, scaleVal: scaleVal, scaleDev: dev,
 	}, nil
 }
 
@@ -870,7 +874,13 @@ attend:
 	if err != nil {
 		return nil, err
 	}
-	scores, err = autograd.Mul(scores, m.scale)
+	if scores.RequiresGrad() {
+		scores, err = autograd.Mul(scores, m.scale)
+	} else {
+		// One launch with the scale as an argument: the broadcast multiply
+		// is a strided kernel plus a metadata upload per layer.
+		scores, err = ops.Affine(scores, float64(m.scaleVal), 0)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1254,4 +1264,12 @@ func (m *Llama) positionsFor(S, offset int, dev device.Device) (*tensor.Tensor, 
 	m.posOff = offset
 	m.posDev = dev
 	return pos, nil
+}
+
+// bf16RoundF32 rounds v to the nearest BF16 (ties to even) and back, the
+// value a BF16 tensor of v holds.
+func bf16RoundF32(v float32) float32 {
+	bits := math.Float32bits(v)
+	bits += 0x7FFF + (bits>>16)&1
+	return math.Float32frombits(bits &^ 0xFFFF)
 }

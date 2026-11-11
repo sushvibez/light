@@ -21,17 +21,38 @@ import (
 // DeviceCount returns the number of CUDA-capable devices visible to the
 // process.
 func DeviceCount() (int, error) {
-	var count C.int
-	if rc := C.cudaGetDeviceCount(&count); rc != C.cudaSuccess {
-		return 0, runtimeError(rc, "cudaGetDeviceCount")
-	}
-	return int(count), nil
+	deviceCountOnce.Do(func() {
+		var count C.int
+		if rc := C.cudaGetDeviceCount(&count); rc != C.cudaSuccess {
+			deviceCountErr = runtimeError(rc, "cudaGetDeviceCount")
+			return
+		}
+		deviceCount = int(count)
+	})
+	return deviceCount, deviceCountErr
 }
+
+// The device count never changes while the process runs, and every
+// allocation and launch asks for it (through SetDevice), so it is read once.
+var (
+	deviceCountOnce sync.Once
+	deviceCount     int
+	deviceCountErr  error
+)
 
 // SetDevice switches the calling thread's CUDA context to the given ordinal.
 // Every cuda-using goroutine should pin itself with runtime.LockOSThread()
 // and call SetDevice at startup; that pairing is handled at the higher layer.
+//
+// With a single GPU the call is skipped: every thread's current device is
+// already 0, and cudaSetDevice was the most expensive host call on a decode
+// step (one per allocation and per launch, ~2 µs each).
 func SetDevice(ordinal int) error {
+	if ordinal == 0 {
+		if n, err := DeviceCount(); err == nil && n == 1 {
+			return nil
+		}
+	}
 	if rc := C.cudaSetDevice(C.int(ordinal)); rc != C.cudaSuccess {
 		return runtimeError(rc, "cudaSetDevice")
 	}
@@ -78,6 +99,9 @@ func MallocHost(bytes uintptr) (uintptr, error) {
 // the source must stay untouched until the copy has run.
 func MemcpyHtoDAsync(dst, src, bytes uintptr) error {
 	tally(&counters.HtoD)
+	if tracing.Load() {
+		traceCaller("HtoD async")
+	}
 	if bytes == 0 {
 		return nil
 	}
@@ -91,6 +115,9 @@ func MemcpyHtoDAsync(dst, src, bytes uintptr) error {
 // MemcpyHtoD copies from host slice src to device pointer dst.
 func MemcpyHtoD(dst uintptr, src []byte) error {
 	tally(&counters.HtoD)
+	if tracing.Load() {
+		traceCaller("HtoD")
+	}
 	if len(src) == 0 {
 		return nil
 	}
@@ -128,6 +155,9 @@ func MemcpyDtoH(dst []byte, src uintptr) error {
 // with peer access enabled).
 func MemcpyDtoD(dst, src uintptr, bytes uintptr) error {
 	tally(&counters.DtoD)
+	if tracing.Load() {
+		traceCaller("DtoD")
+	}
 	if bytes == 0 {
 		return nil
 	}
@@ -166,6 +196,9 @@ func Memcpy2DDtoD(dst, dpitch, src, spitch, width, height uintptr) error {
 // Memset fills device memory with the given byte.
 func Memset(ptr uintptr, value byte, bytes uintptr) error {
 	tally(&counters.Memsets)
+	if tracing.Load() {
+		traceCaller("memset")
+	}
 	if bytes == 0 {
 		return nil
 	}

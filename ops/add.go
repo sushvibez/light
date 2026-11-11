@@ -11,7 +11,7 @@ func Add(a, b *tensor.Tensor) (*tensor.Tensor, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err := tensor.Zeros(a.DType(), outShape.Dims(), a.Device())
+	out, err := tensor.Empty(a.DType(), outShape.Dims(), a.Device())
 	if err != nil {
 		return nil, err
 	}

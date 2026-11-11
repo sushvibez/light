@@ -16,6 +16,116 @@ func init() {
 	registry.Register(registry.Key{Op: "gated_delta_rule", Dev: device.KindCUDA, DType: dtype.F32}, gatedDeltaLauncher)
 	registry.Register(registry.Key{Op: "causal_conv1d_depthwise", Dev: device.KindCUDA, DType: dtype.F32}, causalConv1dDepthwiseLauncher)
 	registry.Register(registry.Key{Op: "softplus", Dev: device.KindCUDA, DType: dtype.F32}, softplusLauncher)
+	registry.Register(registry.Key{Op: "gated_delta_rule_fused", Dev: device.KindCUDA, DType: dtype.F32}, gatedDeltaFusedLauncher)
+	registry.Register(registry.Key{Op: "gated_rmsnorm_silu", Dev: device.KindCUDA, DType: dtype.F32}, gatedRMSNormSiLULauncher)
+}
+
+// gatedDeltaFusedLauncher runs ops.GatedDeltaRuleFused's recurrent form on
+// CUDA: gated_delta_fused_f32 reads q / k / v in place from the mixed
+// projection and computes the gates itself.
+//
+//	Inputs: qkv (B,T,C), a, b (B,T,Hv) F32 or BF16, dtBias, negA (Hv,),
+//	        state (B,Hv,dk,dv), final (B,Hv,dk,dv) written
+//	Output: (B,T,Hv,dv)
+//	Attrs:  hk, dk, hv, dv int, tiled, l2norm bool
+func gatedDeltaFusedLauncher(ctx *registry.Context) error {
+	qkv, a, b, dtb, na, st, fin := ctx.Inputs[0], ctx.Inputs[1], ctx.Inputs[2], ctx.Inputs[3], ctx.Inputs[4], ctx.Inputs[5], ctx.Inputs[6]
+	out := ctx.Output
+	B, T, C := qkv.Dim(0), qkv.Dim(1), qkv.Dim(2)
+	Hk, dk, Hv, dv := ctx.Attrs["hk"].(int), ctx.Attrs["dk"].(int), ctx.Attrs["hv"].(int), ctx.Attrs["dv"].(int)
+	if dk > gdMaxDK {
+		return fmt.Errorf("cuda gated_delta_rule_fused: key head dim %d > %d", dk, gdMaxDK)
+	}
+	if dv > 1024 {
+		return fmt.Errorf("cuda gated_delta_rule_fused: value head dim %d > 1024", dv)
+	}
+	abBF16 := int32(0)
+	switch a.DType() {
+	case dtype.BF16:
+		abBF16 = 1
+	case dtype.F32:
+	default:
+		return fmt.Errorf("cuda gated_delta_rule_fused: gates must be F32 or BF16, got %v", a.DType())
+	}
+	if err := cudart.SetDevice(out.Device().Ordinal()); err != nil {
+		return err
+	}
+	fn, err := GetKernel("gated_delta_fused_f32")
+	if err != nil {
+		return err
+	}
+	flag := func(key string) int32 {
+		if ctx.Attrs[key].(bool) {
+			return 1
+		}
+		return 0
+	}
+	tiled, l2 := flag("tiled"), flag("l2norm")
+	qP, aP, bP := qkv.Storage().CUDAPtr(), a.Storage().CUDAPtr(), b.Storage().CUDAPtr()
+	dP, nP := dtb.Storage().CUDAPtr(), na.Storage().CUDAPtr()
+	sP, fP, oP := st.Storage().CUDAPtr(), fin.Storage().CUDAPtr(), out.Storage().CUDAPtr()
+	b32, t32, hk32, hv32, dk32, dv32, c32 := int32(B), int32(T), int32(Hk), int32(Hv), int32(dk), int32(dv), int32(C)
+	args := []unsafe.Pointer{
+		unsafe.Pointer(&qP), unsafe.Pointer(&aP), unsafe.Pointer(&bP), unsafe.Pointer(&dP), unsafe.Pointer(&nP),
+		unsafe.Pointer(&sP), unsafe.Pointer(&fP), unsafe.Pointer(&oP),
+		unsafe.Pointer(&b32), unsafe.Pointer(&t32), unsafe.Pointer(&hk32), unsafe.Pointer(&hv32),
+		unsafe.Pointer(&dk32), unsafe.Pointer(&dv32), unsafe.Pointer(&c32),
+		unsafe.Pointer(&tiled), unsafe.Pointer(&abBF16), unsafe.Pointer(&l2),
+	}
+	block := uint32(dv)
+	if block < 32 {
+		block = 32
+	}
+	return cudart.LaunchKernel(fn, uint32(B*Hv), 1, 1, block, 1, 1, uint32(2*dk*4), 0, args)
+}
+
+// gatedRMSNormSiLULauncher runs ops.GatedRMSNormSiLU: one block per row of
+// gated_rmsnorm_silu_f32.
+//
+//	Inputs: x (..., cols) F32, z (..., cols) F32 or BF16, w (cols,) F32
+//	Output: (..., cols) F32 or BF16
+//	Attrs:  eps float64
+func gatedRMSNormSiLULauncher(ctx *registry.Context) error {
+	x, z, w := ctx.Inputs[0], ctx.Inputs[1], ctx.Inputs[2]
+	out := ctx.Output
+	cols := x.Dim(-1)
+	rows := x.NumElements() / cols
+	flagOf := func(dt dtype.DType, what string) (int32, error) {
+		switch dt {
+		case dtype.BF16:
+			return 1, nil
+		case dtype.F32:
+			return 0, nil
+		}
+		return 0, fmt.Errorf("cuda gated_rmsnorm_silu: %s must be F32 or BF16, got %v", what, dt)
+	}
+	zBF16, err := flagOf(z.DType(), "z")
+	if err != nil {
+		return err
+	}
+	outBF16, err := flagOf(out.DType(), "output")
+	if err != nil {
+		return err
+	}
+	if err := cudart.SetDevice(out.Device().Ordinal()); err != nil {
+		return err
+	}
+	fn, err := GetKernel("gated_rmsnorm_silu_f32")
+	if err != nil {
+		return err
+	}
+	eps := float32(ctx.Attrs["eps"].(float64))
+	xP, zP, wP, oP := x.Storage().CUDAPtr(), z.Storage().CUDAPtr(), w.Storage().CUDAPtr(), out.Storage().CUDAPtr()
+	rows64, cols32 := int64(rows), int32(cols)
+	args := []unsafe.Pointer{
+		unsafe.Pointer(&xP), unsafe.Pointer(&zP), unsafe.Pointer(&wP), unsafe.Pointer(&oP),
+		unsafe.Pointer(&rows64), unsafe.Pointer(&cols32), unsafe.Pointer(&eps), unsafe.Pointer(&zBF16), unsafe.Pointer(&outBF16),
+	}
+	block := uint32(32)
+	for int(block) < cols && block < 1024 {
+		block *= 2
+	}
+	return cudart.LaunchKernel(fn, uint32(rows), 1, 1, block, 1, 1, block*4, 0, args)
 }
 
 // gdMaxDK is GD_MAX_DK in gated_delta.cu (per-thread state column length).

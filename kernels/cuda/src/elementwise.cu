@@ -1156,3 +1156,37 @@ BIN_STRIDED_F16(mul_strided_f16, av *bv)
 BIN_STRIDED_F16(div_strided_f16, av / bv)
 BIN_STRIDED_F16(maximum_strided_f16, fmaxf(av, bv))
 BIN_STRIDED_F16(minimum_strided_f16, fminf(av, bv))
+
+// rope_partial_f32: RoPE over the first rotDim dims of each head, the rest
+// copied (ops.RoPEPartial). Same pairing and angles as rope_f32 with rotDim
+// in place of headDim. One thread per pair: pairs below rotDim/2 rotate,
+// the others copy two of the pass-through dims.
+extern "C" __global__ void rope_partial_f32(
+    const float *x, const long long *positions, float *out,
+    unsigned long rows, unsigned long seqLen, unsigned long headDim, unsigned long rotDim, float base) {
+  unsigned long tid = (unsigned long)blockIdx.x * blockDim.x + threadIdx.x;
+  unsigned long halfDim = headDim / 2;
+  if (tid >= rows * halfDim) return;
+  unsigned long row = tid / halfDim;
+  unsigned long pair = tid % halfDim;
+  unsigned long halfRot = rotDim / 2;
+  unsigned long rowOff = row * headDim;
+  if (pair >= halfRot) {
+    unsigned long i0 = rowOff + rotDim + (pair - halfRot);
+    unsigned long i1 = i0 + (headDim - rotDim) / 2;
+    out[i0] = x[i0];
+    out[i1] = x[i1];
+    return;
+  }
+  unsigned long s = row % seqLen;
+  float pos = (float)positions[s];
+  float i = (float)(pair * 2);
+  float theta = pos * powf(base, -i / (float)rotDim);
+  float c = cosf(theta);
+  float sn = sinf(theta);
+  unsigned long base_off = rowOff + pair;
+  float x0 = (x[base_off]);
+  float x1 = (x[base_off + halfRot]);
+  out[base_off] = (x0 * c - x1 * sn);
+  out[base_off + halfRot] = (x0 * sn + x1 * c);
+}

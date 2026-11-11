@@ -41,6 +41,9 @@ func TestDecodeStepProfile(t *testing.T) {
 			return LoadLlamaGGUF(filepath.Join(ggufSearchDir(), strings.TrimPrefix(r, "gguf:")), d)
 		}},
 	} {
+		if f := os.Getenv("LIGHT_PROFILE_MODEL"); f != "" && !strings.Contains(tc.repo, f) {
+			continue
+		}
 		if strings.HasPrefix(tc.repo, "gguf:") {
 			if _, err := os.Stat(filepath.Join(ggufSearchDir(), strings.TrimPrefix(tc.repo, "gguf:"))); err != nil {
 				t.Logf("%s not on disk, skipped", tc.repo)
@@ -101,12 +104,26 @@ func TestDecodeStepProfile(t *testing.T) {
 		}
 		el := time.Since(t0)
 		c := cudart.ReadCounters().Sub(before)
+		// Attribution in a separate pass: tracing walks the stack per call.
+		cudart.StartTrace()
+		for i := 0; i < 4; i++ {
+			row = lastLogits(t, m, []int64{next}, cache, dev)
+			next = int64(argmaxRow(row))
+			runtime.GC()
+		}
+		trace := cudart.StopTrace()
+		for k, v := range trace {
+			trace[k] = v / 4
+		}
 		L := uint64(m.NumLayers())
 		ms := func(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 / steps }
 		t.Logf("%s BF16: %d layers, %.2f ms/step (%.1f tok/s): issue %.2f + GPU drain %.2f + logits read %.2f + GC %.2f ms",
 			tc.repo, L, ms(time.Duration(el)), float64(steps)/el.Seconds(), ms(issue), ms(drain), ms(read), ms(gc))
 		t.Logf("  per step: launches %d (%d/layer) gemms %d mallocs %d frees %d HtoD %d DtoH %d DtoD %d (same-dtype casts %d) memsets %d syncs %d",
 			c.Launches/steps, c.Launches/steps/L, c.Gemms/steps, c.Mallocs/steps, c.Frees/steps, c.HtoD/steps, c.DtoH/steps, c.DtoD/steps, c.CastCopies/steps, c.Memsets/steps, c.Syncs/steps)
+		if os.Getenv("LIGHT_PROFILE_TRACE") != "" {
+			t.Logf("  driver calls per step:%s", cudart.TraceTop(trace, 64))
+		}
 		cache.Reset()
 	}
 }

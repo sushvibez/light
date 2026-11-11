@@ -101,8 +101,10 @@ type Qwen35 struct {
 	LMHead    *nn.Linear
 
 	attnScale *tensor.Tensor
-	masks     map[[2]int]*tensor.Tensor
-	masksDev  device.Device
+	// attnScaleVal is attnScale as a scalar (BF16-rounded with BF16 activations).
+	attnScaleVal float64
+	masks        map[[2]int]*tensor.Tensor
+	masksDev     device.Device
 
 	// deltaMode picks the delta-rule form; the zero value (Auto) is chunked
 	// for prefill and recurrent for decode. Tests force one form to check
@@ -232,7 +234,7 @@ func NewQwen35(cfg Qwen35Config, dev device.Device) (*Qwen35, error) {
 			return nil, err
 		}
 	}
-	return &Qwen35{Cfg: cfg, TokenEmb: emb, Blocks: blocks, FinalNorm: fn, LMHead: head, attnScale: scale}, nil
+	return &Qwen35{Cfg: cfg, TokenEmb: emb, Blocks: blocks, FinalNorm: fn, LMHead: head, attnScale: scale, attnScaleVal: attnScaleFor(HD, act)}, nil
 }
 
 func (m *Qwen35) NumLayers() int     { return m.Cfg.NumLayers }
@@ -464,7 +466,7 @@ func (m *Qwen35) attention(blk *qwen35Block, h *tensor.Tensor, B, T, prior int, 
 	if scores, err = autograd.Reshape(scores, B*NH, T, totalT); err != nil {
 		return nil, err
 	}
-	if scores, err = ops.Mul(scores, m.attnScale); err != nil {
+	if scores, err = ops.Affine(scores, m.attnScaleVal, 0); err != nil {
 		return nil, err
 	}
 	if T > 1 {
@@ -517,6 +519,7 @@ func (m *Qwen35) attention(blk *qwen35Block, h *tensor.Tensor, B, T, prior int, 
 func (m *Qwen35) deltaNet(blk *qwen35Block, h *tensor.Tensor, B, T int, cache *KVCache, layer int) (*tensor.Tensor, error) {
 	cfg := m.Cfg
 	Hk, Hv, dk, dv := cfg.LinearKHeads, cfg.LinearVHeads, cfg.LinearKDim, cfg.LinearVDim
+	act := cfg.activationDType()
 	toF32 := func(x *tensor.Tensor) (*tensor.Tensor, error) {
 		if x.DType() == dtype.F32 {
 			return x, nil
@@ -530,7 +533,7 @@ func (m *Qwen35) deltaNet(blk *qwen35Block, h *tensor.Tensor, B, T int, cache *K
 	if qkv, err = toF32(qkv); err != nil {
 		return nil, err
 	}
-	// (B, T, C) → (B, C, T) for the conv, and back.
+	// (B, T, C) → (B, C, T) for the conv, and back (free views for one token).
 	if qkv, err = transposeContig(qkv, 1, 2); err != nil {
 		return nil, err
 	}
@@ -545,101 +548,51 @@ func (m *Qwen35) deltaNet(blk *qwen35Block, h *tensor.Tensor, B, T int, cache *K
 	if qkv, err = transposeContig(qkv, 1, 2); err != nil {
 		return nil, err
 	}
-	split := func(off, heads, dim int) (*tensor.Tensor, error) {
-		x, err := narrowContig(qkv, 2, off, heads*dim)
-		if err != nil {
-			return nil, err
-		}
-		return autograd.Reshape(x, B, T, heads, dim)
-	}
-	q, err := split(0, Hk, dk)
-	if err != nil {
-		return nil, err
-	}
-	k, err := split(Hk*dk, Hk, dk)
-	if err != nil {
-		return nil, err
-	}
-	v, err := split(2*Hk*dk, Hv, dv)
-	if err != nil {
-		return nil, err
-	}
-	if r := Hv / Hk; r > 1 {
-		// Value head j reads key head j / r (HF, repeat_interleave) or
-		// j mod Hk (llama.cpp's tiled order, see VHeadsTiled).
-		rep := repeatHeadsInterleave
-		if cfg.VHeadsTiled {
-			rep = repeatHeadsTiled
-		}
-		if q, err = rep(q, r); err != nil {
-			return nil, err
-		}
-		if k, err = rep(k, r); err != nil {
-			return nil, err
-		}
-	}
+	// The gates from their raw projections: beta = σ(b),
+	// g = −exp(A_log) · softplus(a + dt_bias) ≤ 0, computed inside the rule.
 	bProj, err := blk.InB.Forward(h)
 	if err != nil {
 		return nil, err
 	}
-	if bProj, err = toF32(bProj); err != nil {
-		return nil, err
-	}
-	beta, err := ops.Sigmoid(bProj)
+	aProj, err := blk.InA.Forward(h)
 	if err != nil {
 		return nil, err
 	}
-	a, err := blk.InA.Forward(h)
-	if err != nil {
-		return nil, err
+	if act != dtype.BF16 {
+		if bProj, err = toF32(bProj); err != nil {
+			return nil, err
+		}
+		if aProj, err = toF32(aProj); err != nil {
+			return nil, err
+		}
 	}
-	if a, err = toF32(a); err != nil {
-		return nil, err
-	}
-	if a, err = ops.Add(a, blk.DtBias); err != nil {
-		return nil, err
-	}
-	if a, err = ops.Softplus(a); err != nil {
-		return nil, err
-	}
-	g, err := ops.Mul(a, blk.NegA) // g = −exp(A_log) · softplus(a + dt_bias) ≤ 0
-	if err != nil {
-		return nil, err
-	}
-	out, recState, err := ops.GatedDeltaRule(q, k, v, g, beta, recState, ops.GatedDeltaOptions{Mode: m.deltaMode, QKL2Norm: true})
+	out, recState, err := ops.GatedDeltaRuleFused(qkv, aProj, bProj, blk.DtBias, blk.NegA, recState, Hk, dk, Hv, dv, cfg.VHeadsTiled,
+		ops.GatedDeltaOptions{Mode: m.deltaMode, QKL2Norm: true})
 	if err != nil {
 		return nil, err
 	}
 	if cache != nil {
 		cache.Conv[layer], cache.Rec[layer] = convState, recState
 	}
-	// Gated RMSNorm over dv per head: norm(o) · w · silu(z).
-	if out, err = blk.GNorm.Forward(out); err != nil {
-		return nil, err
-	}
+	// Gated RMSNorm over dv per head: norm(o) · w · silu(z), back at the
+	// activation dtype.
 	z, err := blk.InZ.Forward(h)
 	if err != nil {
 		return nil, err
 	}
-	if z, err = toF32(z); err != nil {
-		return nil, err
-	}
-	if z, err = ops.SiLU(z); err != nil {
-		return nil, err
+	if z.DType() != dtype.BF16 {
+		if z, err = toF32(z); err != nil {
+			return nil, err
+		}
 	}
 	if z, err = autograd.Reshape(z, B, T, Hv, dv); err != nil {
 		return nil, err
 	}
-	if out, err = ops.Mul(out, z); err != nil {
+	if out, err = ops.GatedRMSNormSiLU(out, z, blk.GNorm.Weight, blk.GNorm.Eps, act); err != nil {
 		return nil, err
 	}
 	if out, err = autograd.Reshape(out, B, T, Hv*dv); err != nil {
 		return nil, err
-	}
-	if act := cfg.activationDType(); act != dtype.F32 {
-		if out, err = ops.Cast(out, act); err != nil {
-			return nil, err
-		}
 	}
 	return blk.OutProj.Forward(out)
 }
@@ -666,21 +619,7 @@ func (m *Qwen35) rope(x, pos *tensor.Tensor) (*tensor.Tensor, error) {
 		}
 		return ops.Concat([]*tensor.Tensor{r, pass}, 3)
 	}
-	if rot >= m.Cfg.HeadDim {
-		return ops.RoPE(x, pos, m.Cfg.RopeBase)
-	}
-	r, err := narrowContig(x, 3, 0, rot)
-	if err != nil {
-		return nil, err
-	}
-	if r, err = ops.RoPE(r, pos, m.Cfg.RopeBase); err != nil {
-		return nil, err
-	}
-	pass, err := x.Narrow(3, rot, m.Cfg.HeadDim-rot)
-	if err != nil {
-		return nil, err
-	}
-	return ops.Concat([]*tensor.Tensor{r, pass}, 3)
+	return ops.RoPEPartial(x, pos, m.Cfg.RopeBase, rot)
 }
 
 // causalMask returns the cached (T, prior+T) additive causal mask.
@@ -717,35 +656,6 @@ func (m *Qwen35) causalMask(T, prior int, dt dtype.DType, dev device.Device) (*t
 	return t, nil
 }
 
-// repeatHeadsInterleave maps (B, T, H, d) to (B, T, H·r, d) with each head
-// repeated r times in place (torch repeat_interleave on dim 2).
-func repeatHeadsInterleave(x *tensor.Tensor, r int) (*tensor.Tensor, error) {
-	B, T, H, d := x.Dim(0), x.Dim(1), x.Dim(2), x.Dim(3)
-	x5, err := autograd.Reshape(x, B, T, H, 1, d)
-	if err != nil {
-		return nil, err
-	}
-	parts := make([]*tensor.Tensor, r)
-	for i := range parts {
-		parts[i] = x5
-	}
-	cat, err := ops.Concat(parts, 3)
-	if err != nil {
-		return nil, err
-	}
-	return autograd.Reshape(cat, B, T, H*r, d)
-}
-
-// repeatHeadsTiled repeats the head axis of (B, T, H, d) r times as a whole:
-// head j of the result is head j mod H.
-func repeatHeadsTiled(x *tensor.Tensor, r int) (*tensor.Tensor, error) {
-	parts := make([]*tensor.Tensor, r)
-	for i := range parts {
-		parts[i] = x
-	}
-	return ops.Concat(parts, 2)
-}
-
 func narrowContig(x *tensor.Tensor, dim, start, n int) (*tensor.Tensor, error) {
 	v, err := x.Narrow(dim, start, n)
 	if err != nil {
@@ -763,3 +673,13 @@ func transposeContig(x *tensor.Tensor, i, j int) (*tensor.Tensor, error) {
 }
 
 var _ CausalLM = (*Qwen35)(nil)
+
+// attnScaleFor is 1/√hd as the attention applies it: rounded to BF16 when
+// the scores are BF16, as the (1,) scale tensor it replaced was.
+func attnScaleFor(hd int, act dtype.DType) float64 {
+	v := float32(1 / math.Sqrt(float64(hd)))
+	if act == dtype.BF16 {
+		v = bf16RoundF32(v)
+	}
+	return float64(v)
+}

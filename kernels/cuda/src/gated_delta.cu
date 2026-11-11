@@ -7,6 +7,7 @@
 // Linux, and the PTX parameter widths must match the Go launcher on both.
 
 #include <cuda_runtime.h>
+#include <cuda_bf16.h>
 
 #define GD_MAX_DK 256
 
@@ -308,4 +309,121 @@ extern "C" __global__ void __launch_bounds__(256) gated_delta_chunked_f32(
   }
 #pragma unroll
   for (int r = 0; r < GDC_ROWS; r++) state_out[sbase + (long long)(row0 + r) * GDC_D + col] = s[r];
+}
+
+// ---------------------------------------------------------------------------
+// gated_delta_fused_f32: the token-by-token delta rule read straight from the
+// mixed projection, with the gates computed in place (ops.GatedDeltaRuleFused).
+// Saves the three head splits, the gate chain (cast, sigmoid, add, softplus,
+// mul) and their launches on every decode step.
+//
+//   qkv (B, T, C) F32 rows: q heads at [0, Hk·dk), k at [Hk·dk, 2·Hk·dk),
+//       v at [2·Hk·dk, 2·Hk·dk + Hv·dv); value head h reads key head
+//       h / (Hv / Hk) (tiled = 0, HF repeat_interleave) or h mod Hk (tiled = 1)
+//   a, b (B, T, Hv) F32 or BF16 (ab_bf16): beta = σ(b),
+//       g = neg_a[h] · softplus(a + dt_bias[h]) (softplus as softplus_f32)
+//   state_in / state_out (B, Hv, dk, dv), out (B, T, Hv, dv)
+//
+// grid = B·Hv blocks, block = dv threads (≥ 32), shared = 2·dk floats; the
+// per-token math is gated_delta_recurrent_f32's.
+extern "C" __global__ void gated_delta_fused_f32(
+    const float *qkv, const void *a, const void *b, const float *dt_bias, const float *neg_a,
+    const float *state_in, float *state_out, float *out,
+    int B, int T, int Hk, int Hv, int dk, int dv, int C, int tiled, int ab_bf16, int l2norm) {
+  extern __shared__ float sh[];
+  float *qs = sh;
+  float *ks = sh + dk;
+  const int bh = blockIdx.x;
+  const int bb = bh / Hv, h = bh % Hv;
+  const int kh = tiled ? h % Hk : h / (Hv / Hk);
+  const int j = threadIdx.x;
+  const bool active = j < dv;
+  const long long sbase = (long long)bh * dk * dv;
+
+  float s[GD_MAX_DK];
+  if (active) {
+    for (int i = 0; i < dk; i++) s[i] = state_in[sbase + (long long)i * dv + j];
+  }
+  const float inv_sqrt_dk = rsqrtf((float)dk);
+  for (int t = 0; t < T; t++) {
+    const long long tok = (long long)bb * T + t;
+    const float *row = qkv + tok * C;
+    for (int i = threadIdx.x; i < dk; i += blockDim.x) {
+      qs[i] = row[kh * dk + i];
+      ks[i] = row[Hk * dk + kh * dk + i];
+    }
+    __syncthreads();
+    if (active) {
+      float qq = 0.f, kk = 0.f;
+      for (int i = 0; i < dk; i++) {
+        qq += qs[i] * qs[i];
+        kk += ks[i] * ks[i];
+      }
+      float qscale = inv_sqrt_dk, kscale = 1.f;
+      if (l2norm) {
+        qscale *= rsqrtf(qq + 1e-6f);
+        kscale = rsqrtf(kk + 1e-6f);
+      }
+      const long long gi = tok * Hv + h;
+      float av, bv;
+      if (ab_bf16) {
+        av = __bfloat162float(((const __nv_bfloat16 *)a)[gi]);
+        bv = __bfloat162float(((const __nv_bfloat16 *)b)[gi]);
+      } else {
+        av = ((const float *)a)[gi];
+        bv = ((const float *)b)[gi];
+      }
+      const float x = av + dt_bias[h];
+      const float sp = x > 20.f ? x : log1pf(expf(x));
+      const float decay = expf(neg_a[h] * sp);
+      const float bt = 1.f / (1.f + expf(-bv));
+      float mem = 0.f;
+      for (int i = 0; i < dk; i++) {
+        s[i] *= decay;
+        mem += s[i] * ks[i];
+      }
+      const float delta = (row[2 * Hk * dk + h * dv + j] - mem * kscale) * bt;
+      float o = 0.f;
+      for (int i = 0; i < dk; i++) {
+        s[i] += ks[i] * kscale * delta;
+        o += s[i] * qs[i];
+      }
+      out[(tok * Hv + h) * dv + j] = o * qscale;
+    }
+    __syncthreads();
+  }
+  if (active) {
+    for (int i = 0; i < dk; i++) state_out[sbase + (long long)i * dv + j] = s[i];
+  }
+}
+
+// gated_rmsnorm_silu_f32: out = rmsnorm(x) · w · silu(z) per row of `cols`
+// (ops.GatedRMSNormSiLU: Gated DeltaNet's output norm). x F32; z and out
+// F32 or BF16 (z_bf16, out_bf16); rmsnorm as rmsnorm_f32 (eps inside the
+// root). One block per row.
+extern "C" __global__ void gated_rmsnorm_silu_f32(
+    const float *x, const void *z, const float *w, void *out,
+    long long rows, int cols, float eps, int z_bf16, int out_bf16) {
+  extern __shared__ float sdata[];
+  const long long row = blockIdx.x;
+  if (row >= rows) return;
+  const float *rx = x + row * cols;
+  const int tid = threadIdx.x, bs = blockDim.x;
+  float acc = 0.f;
+  for (int j = tid; j < cols; j += bs) acc += rx[j] * rx[j];
+  sdata[tid] = acc;
+  __syncthreads();
+  for (int s = bs / 2; s > 0; s >>= 1) {
+    if (tid < s) sdata[tid] += sdata[tid + s];
+    __syncthreads();
+  }
+  const float rms = rsqrtf(sdata[0] / (float)cols + eps);
+  for (int j = tid; j < cols; j += bs) {
+    const long long i = row * cols + j;
+    const float zv = z_bf16 ? __bfloat162float(((const __nv_bfloat16 *)z)[i]) : ((const float *)z)[i];
+    const float g = zv / (1.f + expf(-zv));
+    const float y = rx[j] * rms * w[j] * g;
+    if (out_bf16) ((__nv_bfloat16 *)out)[i] = __float2bfloat16(y);
+    else ((float *)out)[i] = y;
+  }
 }
