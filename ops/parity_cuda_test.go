@@ -949,3 +949,50 @@ func TestMatMulF64Parity(t *testing.T) {
 		}
 	}
 }
+
+// ops.MatMulW16 on CUDA (16-bit weight widened into a pooled F32 scratch,
+// cuBLAS SGEMM, F32 activations) against the CPU kernel, for BF16 and F16
+// weights, odd shapes and a weight that is a narrowed view.
+func TestMatMulW16CUDAParity(t *testing.T) {
+	gpu, err := device.CUDA(0)
+	if err != nil {
+		t.Skipf("no CUDA: %v", err)
+	}
+	cpu := device.CPU()
+	const M, K, N = 37, 96, 53
+	for _, wdt := range []dtype.DType{dtype.BF16, dtype.F16} {
+		x, _ := tensor.RandN(dtype.F32, []int{M, K}, cpu)
+		full, _ := tensor.RandN(dtype.F32, []int{N + 5, K}, cpu)
+		full16, err := ops.Cast(full, wdt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w, _ := full16.Narrow(0, 5, N) // offset view
+		want, err := ops.MatMulW16(x, w)
+		if err != nil {
+			t.Fatal(err)
+		}
+		xg, _ := x.To(gpu)
+		wg, _ := full16.To(gpu)
+		if wg, err = wg.Narrow(0, 5, N); err != nil {
+			t.Fatal(err)
+		}
+		got, err := ops.MatMulW16(xg, wg)
+		if err != nil {
+			t.Fatalf("%v: %v", wdt, err)
+		}
+		if got, err = got.To(cpu); err != nil {
+			t.Fatal(err)
+		}
+		g, wv := tensor.MustSlice[float32](got), tensor.MustSlice[float32](want)
+		md, ma := 0.0, 0.0
+		for i := range wv {
+			md = math.Max(md, math.Abs(float64(g[i]-wv[i])))
+			ma = math.Max(ma, math.Abs(float64(wv[i])))
+		}
+		t.Logf("%v weights: max diff %.3g (max |ref| %.3g)", wdt, md, ma)
+		if md > 1e-4*math.Max(1, ma) {
+			t.Errorf("%v: CUDA matmul_w16 differs by %.3g", wdt, md)
+		}
+	}
+}
