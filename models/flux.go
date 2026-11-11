@@ -206,6 +206,10 @@ func applyFluxRoPE(x, cos, sin *tensor.Tensor) (*tensor.Tensor, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Contiguous first: the CUDA neg kernel takes contiguous inputs only.
+	if odd, err = odd.Contiguous(); err != nil {
+		return nil, err
+	}
 	nodd, err := ops.Neg(odd)
 	if err != nil {
 		return nil, err
