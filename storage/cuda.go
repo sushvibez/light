@@ -3,7 +3,9 @@
 package storage
 
 import (
+	"runtime"
 	"sync"
+	"time"
 
 	"light/device"
 	"light/dtype"
@@ -104,8 +106,15 @@ func (p *cudaCachingPool) alloc(ord, bytes int) (uintptr, int, error) {
 	}
 	p.mu.Unlock()
 	ptr, err := cudart.Malloc(uintptr(class))
-	if err != nil {
-		// Out of memory: drop the cache and retry once.
+	// Out of memory: drop the cache and retry; then collect, since the device
+	// blocks of dead tensors are freed only by GC cleanups (which run on
+	// their own goroutine, hence the short waits) and the GC cannot see
+	// device memory pressure.
+	for attempt := 0; err != nil && attempt < 4; attempt++ {
+		if attempt > 0 {
+			runtime.GC()
+			time.Sleep(time.Duration(10<<attempt) * time.Millisecond)
+		}
 		p.Drain()
 		ptr, err = cudart.Malloc(uintptr(class))
 	}

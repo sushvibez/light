@@ -59,6 +59,13 @@ func SDPAScaled(q, k, v, addMask *tensor.Tensor, scale float64) (*tensor.Tensor,
 		}
 	}
 
+	// Unmasked F32 self-attention at the default scale on CUDA: the fused
+	// flash-attention kernel streams over the keys instead of materialising
+	// (B·NH, Sq, Sk) score / probability tensors, which at diffusion sequence
+	// lengths fill GPU memory long before the GC frees them.
+	if addMask == nil && scale == 0 && q.Device().Kind() == device.KindCUDA && q.DType() == dtype.F32 && Sq == Sk && D <= 256 {
+		return ops.FlashAttention(q, k, v, false)
+	}
 	flat := func(t *tensor.Tensor, S int) (*tensor.Tensor, error) {
 		c, err := autograd.Contiguous(t)
 		if err != nil {
