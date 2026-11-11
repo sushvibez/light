@@ -2,8 +2,10 @@ package tensor
 
 import (
 	"fmt"
+	"unsafe"
 
 	"light/device"
+	"light/internal/parallel"
 	"light/shape"
 )
 
@@ -137,31 +139,22 @@ func copyStrided(dst, src *Tensor) error {
 	srcBuf := src.storage.CPUBytes()
 	dims := src.Shape().Dims()
 	srcStrides := src.strides.Slice()
-	// Iterate all logical indices, compute source byte offset via strides.
-	idx := make([]int, len(dims))
-	dstByteOff := 0
-	for {
-		// Compute source byte offset from strides.
-		srcElemOff := src.offset
-		for a, ix := range idx {
-			srcElemOff += ix * srcStrides[a]
+	n := src.NumElements()
+	parallel.For(n, parallel.Grain, func(lo, hi int) {
+		switch elemSize {
+		case 4:
+			d := unsafe.Slice((*uint32)(unsafe.Pointer(unsafe.SliceData(dstBuf))), len(dstBuf)/4)
+			s := unsafe.Slice((*uint32)(unsafe.Pointer(unsafe.SliceData(srcBuf))), len(srcBuf)/4)
+			parallel.Strided(dims, srcStrides, nil, src.offset, 0, lo, hi, func(i, so, _ int) { d[i] = s[so] })
+		case 2:
+			d := unsafe.Slice((*uint16)(unsafe.Pointer(unsafe.SliceData(dstBuf))), len(dstBuf)/2)
+			s := unsafe.Slice((*uint16)(unsafe.Pointer(unsafe.SliceData(srcBuf))), len(srcBuf)/2)
+			parallel.Strided(dims, srcStrides, nil, src.offset, 0, lo, hi, func(i, so, _ int) { d[i] = s[so] })
+		default:
+			parallel.Strided(dims, srcStrides, nil, src.offset, 0, lo, hi, func(i, so, _ int) {
+				copy(dstBuf[i*elemSize:(i+1)*elemSize], srcBuf[so*elemSize:(so+1)*elemSize])
+			})
 		}
-		srcByteOff := srcElemOff * elemSize
-		copy(dstBuf[dstByteOff:dstByteOff+elemSize], srcBuf[srcByteOff:srcByteOff+elemSize])
-		dstByteOff += elemSize
-		// Increment multi-index.
-		a := len(dims) - 1
-		for a >= 0 {
-			idx[a]++
-			if idx[a] < dims[a] {
-				break
-			}
-			idx[a] = 0
-			a--
-		}
-		if a < 0 {
-			break
-		}
-	}
+	})
 	return nil
 }

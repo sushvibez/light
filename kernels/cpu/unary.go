@@ -5,6 +5,7 @@ import (
 
 	"light/device"
 	"light/dtype"
+	"light/internal/parallel"
 	"light/internal/registry"
 )
 
@@ -16,33 +17,20 @@ func unaryOp[T dtype.Numeric](ctx *registry.Context, fn func(a T) T) error {
 	outS := asSlice[T](out)
 
 	// Fast path: same-shape + contiguous + offset 0 for both.
+	n := out.NumElements()
 	if a.IsContiguous() && a.Offset() == 0 && a.Shape().Equal(out.Shape()) {
-		for i, v := range aS {
-			outS[i] = fn(v)
-		}
+		parallel.For(n, parallel.Grain, func(lo, hi int) {
+			for i := lo; i < hi; i++ {
+				outS[i] = fn(aS[i])
+			}
+		})
 		return nil
 	}
-
 	dims := out.Shape().Dims()
-	rank := len(dims)
-	idx := make([]int, rank)
 	aStr := a.Strides().Slice()
-	aBase := a.Offset()
-	n := out.NumElements()
-	for i := range n {
-		aOff := aBase
-		for ax := range rank {
-			aOff += idx[ax] * aStr[ax]
-		}
-		outS[i] = fn(aS[aOff])
-		for ax := rank - 1; ax >= 0; ax-- {
-			idx[ax]++
-			if idx[ax] < dims[ax] {
-				break
-			}
-			idx[ax] = 0
-		}
-	}
+	parallel.For(n, parallel.Grain, func(lo, hi int) {
+		parallel.Strided(dims, aStr, nil, a.Offset(), 0, lo, hi, func(i, ao, _ int) { outS[i] = fn(aS[ao]) })
+	})
 	return nil
 }
 

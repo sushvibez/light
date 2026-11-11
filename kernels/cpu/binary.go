@@ -4,6 +4,7 @@ import (
 	"math"
 
 	"light/dtype"
+	"light/internal/parallel"
 	"light/internal/registry"
 	"light/shape"
 )
@@ -32,34 +33,17 @@ func binaryOp[T dtype.Numeric](ctx *registry.Context, fn func(a, b T) T) error {
 	aFast := a.IsContiguous() && a.Offset() == 0 && a.Shape().Equal(out.Shape())
 	bFast := b.IsContiguous() && b.Offset() == 0 && b.Shape().Equal(out.Shape())
 	if aFast && bFast {
-		for i := range n {
-			outS[i] = fn(aS[i], bS[i])
-		}
+		parallel.For(n, parallel.Grain, func(lo, hi int) {
+			for i := lo; i < hi; i++ {
+				outS[i] = fn(aS[i], bS[i])
+			}
+		})
 		return nil
 	}
-
-	rank := len(dims)
-	idx := make([]int, rank)
-	aStride := aStridesB.Slice()
-	bStride := bStridesB.Slice()
-	aBase := a.Offset()
-	bBase := b.Offset()
-	for i := range n {
-		aOff := aBase
-		bOff := bBase
-		for ax := range rank {
-			aOff += idx[ax] * aStride[ax]
-			bOff += idx[ax] * bStride[ax]
-		}
-		outS[i] = fn(aS[aOff], bS[bOff])
-		for ax := rank - 1; ax >= 0; ax-- {
-			idx[ax]++
-			if idx[ax] < dims[ax] {
-				break
-			}
-			idx[ax] = 0
-		}
-	}
+	aStr, bStr := aStridesB.Slice(), bStridesB.Slice()
+	parallel.For(n, parallel.Grain, func(lo, hi int) {
+		parallel.Strided(dims, aStr, bStr, a.Offset(), b.Offset(), lo, hi, func(i, ao, bo int) { outS[i] = fn(aS[ao], bS[bo]) })
+	})
 	return nil
 }
 
