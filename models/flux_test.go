@@ -283,3 +283,69 @@ func TestZImageTransformerTinyMatchesDiffusers(t *testing.T) {
 		}
 	}
 }
+
+// A tiny flow-map Flux3Transformer2DModel (scripts/verify/ref_flux3.py)
+// against diffusers: text-to-image and editing (reference image tokens),
+// with a timestep and a target timestep, on the CPU and WebGPU.
+func TestFlux3TransformerTinyMatchesDiffusers(t *testing.T) {
+	raw, err := os.ReadFile("testdata/flux3-tiny/ref.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ref struct {
+		Img, Txt, Cond   []float32
+		ImgIDs           []float32 `json:"img_ids"`
+		TxtIDs           []float32 `json:"txt_ids"`
+		CondIDs          []float32 `json:"cond_ids"`
+		Timestep, Target float32
+		Si, St, Sc       int
+		T2I              []float32 `json:"t2i"`
+		Edit             []float32 `json:"edit"`
+	}
+	if err := json.Unmarshal(raw, &ref); err != nil {
+		t.Fatal(err)
+	}
+	devs := []device.Device{device.CPU()}
+	if g, err := device.WebGPU(0); err == nil {
+		devs = append(devs, g)
+	}
+	for _, dev := range devs {
+		t.Run(dev.String(), func(t *testing.T) {
+			m, err := LoadFlux3Transformer("testdata/flux3-tiny/transformer", dev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			img, _ := tensor.New(ref.Img, []int{1, ref.Si, 8}, dev)
+			txt, _ := tensor.New(ref.Txt, []int{1, ref.St, 24}, dev)
+			cond, _ := tensor.New(ref.Cond, []int{1, ref.Sc, 8}, dev)
+			in := Flux3Inputs{Image: img, Text: txt, Timestep: []float32{ref.Timestep},
+				TargetTimestep: []float32{ref.Target}, ImgIDs: ref.ImgIDs, TxtIDs: ref.TxtIDs}
+			for _, c := range []struct {
+				name string
+				cond bool
+				want []float32
+			}{{"text-to-image", false, ref.T2I}, {"edit", true, ref.Edit}} {
+				in.Cond, in.CondIDs = nil, nil
+				if c.cond {
+					in.Cond, in.CondIDs = cond, ref.CondIDs
+				}
+				out, err := m.Forward(in)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if out, err = out.To(device.CPU()); err != nil {
+					t.Fatal(err)
+				}
+				got := tensor.MustSlice[float32](out)
+				md := 0.0
+				for i := range c.want {
+					md = math.Max(md, math.Abs(float64(got[i]-c.want[i])))
+				}
+				t.Logf("%s: max diff %.3g over %d values", c.name, md, len(got))
+				if len(got) != len(c.want) || md > 1e-4 {
+					t.Errorf("%s differs by %.3g", c.name, md)
+				}
+			}
+		})
+	}
+}
