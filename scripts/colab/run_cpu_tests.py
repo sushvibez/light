@@ -3,10 +3,12 @@
 Go tests (with -heavy: LIGHT_HEAVY_TESTS=1, real checkpoints), and print everything to stdout (the VM
 and its files go away when this returns).
 
-    colab run --high-mem scripts/colab/run_cpu_tests.py [-heavy] [-run REGEX] [-timeout 90m] [pkg ...]
+    colab run --high-mem scripts/colab/run_cpu_tests.py [heavy] [run=REGEX] [timeout=90m] [pkg ...]
+
+(No leading dashes: colab run parses "-h…" as its own --help.)
 
     # real-weight checks of the newest models
-    colab run --high-mem scripts/colab/run_cpu_tests.py -heavy -run 'LFM3|Spark' ./models
+    colab run --high-mem scripts/colab/run_cpu_tests.py heavy 'run=LFM3|Spark' ./models
     # the whole models package, tiny fixtures only (too heavy for the laptop)
     colab run --high-mem scripts/colab/run_cpu_tests.py ./models
 
@@ -22,9 +24,12 @@ BRANCH = os.environ.get("BRANCH", "main")
 WORK = "/content/light"
 
 
-def sh(cmd, **kw):
+def sh(cmd):
+    # Capture and re-print: the kernel does not show a child's own stdout.
     print("$", cmd, flush=True)
-    return subprocess.run(cmd, shell=True, check=True, **kw)
+    r = subprocess.run(cmd, shell=True, capture_output=True, text=True, errors="replace")
+    print(r.stdout + r.stderr, end="", flush=True)
+    r.check_returncode()
 
 
 def stream(args, env):
@@ -40,11 +45,16 @@ args = sys.argv[1:]
 run, timeout, heavy, pkgs = "", "90m", False, []
 i = 0
 while i < len(args):
-    if args[i] == "-heavy":
+    a = args[i]
+    if a in ("heavy", "-heavy"):
         heavy, i = True, i + 1
-    elif args[i] == "-run":
+    elif a.startswith("run="):
+        run, i = a[4:], i + 1
+    elif a.startswith("timeout="):
+        timeout, i = a[8:], i + 1
+    elif a == "-run":
         run, i = args[i + 1], i + 2
-    elif args[i] == "-timeout":
+    elif a == "-timeout":
         timeout, i = args[i + 1], i + 2
     else:
         pkgs.append(args[i])
