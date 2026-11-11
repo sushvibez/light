@@ -349,3 +349,52 @@ func TestFlux3TransformerTinyMatchesDiffusers(t *testing.T) {
 		})
 	}
 }
+
+// A tiny QwenImage21Transformer2DModel (scripts/verify/ref_qwenimage21.py)
+// against diffusers: text-to-image with right-padded text (block-causal
+// mask, 3-axis RoPE with a zero-centred image grid, t = 0 text modulation),
+// on the CPU and WebGPU.
+func TestQwenImage21TransformerTinyMatchesDiffusers(t *testing.T) {
+	raw, err := os.ReadFile("testdata/qwenimage21-tiny/ref.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ref struct {
+		Txt, Img, Target []float32
+		L, Valid, H, W   int
+		Timestep         float32
+	}
+	if err := json.Unmarshal(raw, &ref); err != nil {
+		t.Fatal(err)
+	}
+	devs := []device.Device{device.CPU()}
+	if g, err := device.WebGPU(0); err == nil {
+		devs = append(devs, g)
+	}
+	for _, dev := range devs {
+		t.Run(dev.String(), func(t *testing.T) {
+			m, err := LoadQwenImage21Transformer("testdata/qwenimage21-tiny/transformer", dev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			txt, _ := tensor.New(ref.Txt, []int{1, ref.L, 24}, dev)
+			img, _ := tensor.New(ref.Img, []int{1, ref.H * ref.W, 8}, dev)
+			out, err := m.Forward(QwenImage21Inputs{Image: img, Text: txt, TextLen: ref.Valid, H: ref.H, W: ref.W, Timestep: ref.Timestep})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out, err = out.To(device.CPU()); err != nil {
+				t.Fatal(err)
+			}
+			got := tensor.MustSlice[float32](out)
+			md := 0.0
+			for i := range ref.Target {
+				md = math.Max(md, math.Abs(float64(got[i]-ref.Target[i])))
+			}
+			t.Logf("target: max diff %.3g over %d values", md, len(got))
+			if len(got) != len(ref.Target) || md > 1e-4 {
+				t.Errorf("target differs by %.3g", md)
+			}
+		})
+	}
+}
