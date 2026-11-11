@@ -11,6 +11,7 @@ import (
 	"runtime/pprof"
 	"time"
 
+	"light/device"
 	"light/diffusion"
 	"light/engine"
 	"light/hub"
@@ -30,6 +31,7 @@ func cmdImage(args []string) error {
 	guidance := fs.Float64("guidance", 0, "classifier-free / distilled guidance (default: the pipeline's)")
 	seed := fs.Uint64("seed", 0, "noise seed")
 	f32 := fs.Bool("f32", false, "keep F32 weights (default: 16-bit weight storage, F32 compute)")
+	encDev := fs.String("encoder-device", "", "text encoder device for FLUX.2 klein / Z-Image (default: cpu with webgpu, which shares system memory; else -device)")
 	cpuprof := fs.String("cpuprofile", "", "write a CPU profile (pprof) of the run to this file")
 	strength := fs.Float64("strength", 0.6, "image-to-image: the fraction of the schedule that runs (1 = ignore the image)")
 	var refs stringList
@@ -86,11 +88,20 @@ func cmdImage(args []string) error {
 		}
 		defer pprof.StopCPUProfile()
 	}
+	ed := d
+	switch {
+	case *encDev != "":
+		if ed, err = engine.PickDevice(*encDev); err != nil {
+			return err
+		}
+	case d.Kind() == device.KindWebGPU:
+		ed = device.CPU()
+	}
 	t0 := time.Now()
 	var img diffusion.Image
 	switch mi.Class {
 	case "Flux2KleinPipeline":
-		p, err := diffusion.LoadFlux2(repo, d, diffusion.Flux2LoadOptions{Storage16: !*f32})
+		p, err := diffusion.LoadFlux2(repo, d, diffusion.Flux2LoadOptions{Storage16: !*f32, EncoderDevice: ed})
 		if err != nil {
 			return err
 		}
@@ -116,7 +127,7 @@ func cmdImage(args []string) error {
 		if err != nil {
 			return err
 		}
-		p, err := diffusion.LoadZImage(repo, d, diffusion.ZImageLoadOptions{Storage16: !*f32})
+		p, err := diffusion.LoadZImage(repo, d, diffusion.ZImageLoadOptions{Storage16: !*f32, EncoderDevice: ed})
 		if err != nil {
 			return err
 		}

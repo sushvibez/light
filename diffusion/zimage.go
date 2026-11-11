@@ -30,12 +30,16 @@ type ZImage struct {
 	Dev         device.Device
 
 	vaeScale int
+	encDev   device.Device // the text encoder's device
 }
 
 // ZImageLoadOptions adjust LoadZImage.
 type ZImageLoadOptions struct {
 	TokenizerJSON string // overrides <repo>/tokenizer/tokenizer.json
 	Storage16     bool   // BF16 weight storage for the text encoder and transformer
+	// EncoderDevice runs the text encoder elsewhere (nil: dev). It runs
+	// once per image, so the CPU frees the GPU for the transformer.
+	EncoderDevice device.Device
 }
 
 // LoadZImage loads a ZImagePipeline folder (or Hub repo) onto dev at F32.
@@ -58,7 +62,10 @@ func LoadZImage(repo string, dev device.Device, o ZImageLoadOptions) (*ZImage, e
 	if idx.Class != "ZImagePipeline" {
 		return nil, fmt.Errorf("z-image: %s is a %s, not a ZImagePipeline", repo, idx.Class)
 	}
-	p := &ZImage{Dev: dev}
+	p := &ZImage{Dev: dev, encDev: dev}
+	if o.EncoderDevice != nil {
+		p.encDev = o.EncoderDevice
+	}
 	load16 := func(f func() error) error {
 		if o.Storage16 {
 			return nn.WithWeightStorage16(dtype.BF16, f)
@@ -66,7 +73,7 @@ func LoadZImage(repo string, dev device.Device, o ZImageLoadOptions) (*ZImage, e
 		return f()
 	}
 	if err = load16(func() (err error) {
-		p.TextEncoder, err = models.LoadCausalLMFromHF(sub("text_encoder"), dev, dtype.F32)
+		p.TextEncoder, err = models.LoadCausalLMFromHF(sub("text_encoder"), p.encDev, dtype.F32)
 		return
 	}); err != nil {
 		return nil, fmt.Errorf("z-image text_encoder: %w", err)
@@ -147,7 +154,7 @@ func (p *ZImage) encode(prompt string, maxLen int) (*tensor.Tensor, []int64, err
 	for i, v := range raw {
 		ids[i] = int64(v)
 	}
-	x, err := tensor.New(ids, []int{1, len(ids)}, p.Dev)
+	x, err := tensor.New(ids, []int{1, len(ids)}, p.encDev)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -156,6 +163,10 @@ func (p *ZImage) encode(prompt string, maxLen int) (*tensor.Tensor, []int64, err
 		return nil, nil, err
 	}
 	c, err := hs[0].Reshape(len(ids), hs[0].Dim(2))
+	if err != nil {
+		return nil, nil, err
+	}
+	c, err = c.To(p.Dev)
 	return c, ids, err
 }
 

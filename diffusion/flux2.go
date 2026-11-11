@@ -33,6 +33,7 @@ type Flux2 struct {
 	Dev         device.Device
 
 	vaeScale int
+	encDev   device.Device // the text encoder's device
 }
 
 // Flux2LoadOptions adjust LoadFlux2.
@@ -43,6 +44,9 @@ type Flux2LoadOptions struct {
 	// BF16 (F32 compute; exact for BF16 checkpoints): klein-4B then needs
 	// ~16 GB instead of ~32.
 	Storage16 bool
+	// EncoderDevice runs the text encoder elsewhere (nil: dev). It runs
+	// once per image, so the CPU frees the GPU for the transformer.
+	EncoderDevice device.Device
 }
 
 // LoadFlux2 loads a Flux2KleinPipeline folder (or Hub repo) onto dev at F32.
@@ -66,7 +70,10 @@ func LoadFlux2(repo string, dev device.Device, o Flux2LoadOptions) (*Flux2, erro
 	if idx.Class != "Flux2KleinPipeline" {
 		return nil, fmt.Errorf("flux2: %s is a %s, not a Flux2KleinPipeline", repo, idx.Class)
 	}
-	p := &Flux2{Distilled: idx.Distilled, Dev: dev}
+	p := &Flux2{Distilled: idx.Distilled, Dev: dev, encDev: dev}
+	if o.EncoderDevice != nil {
+		p.encDev = o.EncoderDevice
+	}
 	load16 := func(f func() error) error {
 		if o.Storage16 {
 			return nn.WithWeightStorage16(dtype.BF16, f)
@@ -74,7 +81,7 @@ func LoadFlux2(repo string, dev device.Device, o Flux2LoadOptions) (*Flux2, erro
 		return f()
 	}
 	if err = load16(func() (err error) {
-		p.TextEncoder, err = models.LoadCausalLMFromHF(sub("text_encoder"), dev, dtype.F32)
+		p.TextEncoder, err = models.LoadCausalLMFromHF(sub("text_encoder"), p.encDev, dtype.F32)
 		return
 	}); err != nil {
 		return nil, fmt.Errorf("flux2 text_encoder: %w", err)
@@ -164,7 +171,7 @@ func (p *Flux2) encode(prompt string, L int, layers []int) (*tensor.Tensor, []in
 			ids[i] = int64(raw[i])
 		}
 	}
-	x, err := tensor.New(ids, []int{1, L}, p.Dev)
+	x, err := tensor.New(ids, []int{1, L}, p.encDev)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -173,6 +180,10 @@ func (p *Flux2) encode(prompt string, L int, layers []int) (*tensor.Tensor, []in
 		return nil, nil, err
 	}
 	e, err := ops.Concat(hs, 2)
+	if err != nil {
+		return nil, nil, err
+	}
+	e, err = e.To(p.Dev)
 	return e, ids, err
 }
 

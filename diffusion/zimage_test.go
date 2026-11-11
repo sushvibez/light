@@ -73,9 +73,18 @@ func TestZImagePipelineTinyMatchesDiffusers(t *testing.T) {
 			t.Errorf("%s differs by %.3g", name, md)
 		}
 	}
-	for _, dev := range devs {
-		t.Run(dev.String(), func(t *testing.T) {
-			p, err := LoadZImage("testdata/zimage-tiny-pipe", dev, ZImageLoadOptions{TokenizerJSON: tj})
+	type run struct{ dev, enc device.Device }
+	var runs []run
+	for _, d := range devs {
+		runs = append(runs, run{d, d})
+	}
+	if len(devs) > 1 {
+		runs = append(runs, run{devs[1], device.CPU()}) // GPU transformer, CPU text encoder
+	}
+	for _, r := range runs {
+		dev := r.dev
+		t.Run(dev.String()+"/encoder-"+r.enc.String(), func(t *testing.T) {
+			p, err := LoadZImage("testdata/zimage-tiny-pipe", dev, ZImageLoadOptions{TokenizerJSON: tj, EncoderDevice: r.enc})
 			if err != nil {
 				t.Fatal(err)
 			}
