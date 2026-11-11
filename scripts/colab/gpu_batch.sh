@@ -169,6 +169,35 @@ for g in "${SEL[@]}"; do
 		run speech ./engine 'TestOpenAISpeechToSpeech'
 		drop kyutai/moshiko-candle-q8 kyutai/mimi
 		;;
+	imgbench)
+		# Cost per image: build the CLI with CUDA and time real generations
+		# (each twice: the first load is cold). Seconds × the runtime's
+		# compute units per hour gives units per image.
+		say "build light"
+		go build -o "$WORK/light-bin" ./cmd/light || { SUMMARY+=("imgbench FAIL build"); continue; }
+		bench() {
+			local name=$1
+			shift
+			local log="$LOGS/$STAMP-$name.log" t0=$SECONDS
+			say "$name"
+			"$WORK/light-bin" image -device gpu "$@" -o "$LOGS/$name.png" 2>&1 | tee "$log" | tail -4
+			local st=${PIPESTATUS[0]}
+			local times
+			times=$(grep -oE '(loaded [^ ]+|generated) in [0-9.]+ s' "$log" | paste -sd ' ')
+			SUMMARY+=("$(printf '%-16s %s  %s  wall %ds' "$name" "$([ "$st" = 0 ] && echo OK || echo FAIL)" "$times" $((SECONDS - t0)))")
+		}
+		SD=stable-diffusion-v1-5/stable-diffusion-v1-5
+		fetch $SD model_index.json 'scheduler/*' 'tokenizer/*' text_encoder/config.json text_encoder/model.safetensors \
+			unet/config.json unet/diffusion_pytorch_model.safetensors vae/config.json vae/diffusion_pytorch_model.safetensors
+		for i in 1 2; do bench "sd15-512-30s-$i" -steps 30 -seed $i $SD "a lighthouse on a rocky cliff at sunset, oil painting"; done
+		drop $SD
+		KL=black-forest-labs/FLUX.2-klein-4B
+		fetch $KL
+		for i in 1 2; do bench "klein-512-$i" -width 512 -height 512 -seed $i $KL "a red fox sitting in a snowy forest at sunrise, photograph"; done
+		for i in 1 2; do bench "klein-1024-$i" -width 1024 -height 1024 -seed $i $KL "a red fox sitting in a snowy forest at sunrise, photograph"; done
+		drop $KL
+		nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader
+		;;
 	*) echo "unknown group $g" ;;
 	esac
 done
