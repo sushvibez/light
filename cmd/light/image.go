@@ -38,7 +38,7 @@ func cmdImage(args []string) error {
 	var refs stringList
 	fs.Var(&refs, "image", "FLUX.2 klein / FLUX 3: reference image for editing (repeatable); Z-Image / FLUX.1 / SD 1.5: init image for image-to-image. The output size defaults to the (first) image's")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: light image [flags] <org/repo> <prompt>\n\nPipelines: Flux2KleinPipeline (FLUX.2 klein, text-to-image and editing), ZImagePipeline (Z-Image / Turbo), FluxPipeline (FLUX.1), StableDiffusionPipeline (SD 1.5, DDIM), FLUX 3 Image Klein (modular; give a full scene caption).\n\nflags:")
+		fmt.Fprintln(os.Stderr, "usage: light image [flags] <org/repo> <prompt>\n\nPipelines: Flux2KleinPipeline (FLUX.2 klein) and Flux2Pipeline (FLUX.2 [dev]), text-to-image and editing; ZImagePipeline (Z-Image / Turbo), FluxPipeline (FLUX.1), StableDiffusionPipeline (SD 1.5, DDIM), FLUX 3 Image Klein (modular; give a full scene caption).\n\nflags:")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -106,7 +106,7 @@ func cmdImage(args []string) error {
 	t0 := time.Now()
 	var img diffusion.Image
 	switch mi.Class {
-	case "Flux2KleinPipeline":
+	case "Flux2KleinPipeline", "Flux2Pipeline":
 		p, err := diffusion.LoadFlux2(repo, d, diffusion.Flux2LoadOptions{Storage16: !*f32, EncoderDevice: ed, Sequential: !*keep})
 		if err != nil {
 			return err
