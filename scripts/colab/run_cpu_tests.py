@@ -6,6 +6,9 @@ and its files go away when this returns).
     colab run --high-mem scripts/colab/run_cpu_tests.py [heavy] [run=REGEX] [timeout=90m] [pkg ...]
 
 (No leading dashes: colab run parses "-h…" as its own --help.)
+On Windows, run colab with PYTHONUTF8=1 when redirecting its output to a
+file: the CLI otherwise writes cp1252 and dies on the first non-Latin-1
+character a test prints.
 
     # real-weight checks of the newest models
     colab run --high-mem scripts/colab/run_cpu_tests.py heavy 'run=LFM3|Spark' ./models
