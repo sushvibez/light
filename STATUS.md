@@ -71,6 +71,7 @@ status are in the commits (and, up to 2026-11-09, the
 | **Nemotron** | `models/nemotron_load.go` | ✅ Verified 2026-11-08 (Nemotron-4-Mini 4B, A100) | LayerNorm1P + ReLU² MLP; Nemotron-4-Mini 4B top-5 ids = transformers, 16 / 16 greedy |
 | **MiMo (Xiaomi MiMo-7B)** | `models/llama3_load.go` (`mimo` → Qwen2 loader), `models/mimo_mtp.go`, `models/spec_decode.go` | ✅ Verified 2026-11-08 (MiMo-7B-RL, A100) | Qwen2 + MTP head; MiMo-7B-RL matches transformers; MTP speculative decoding |
 | **MiniMax-Text-01** | `models/minimax.go`, `minimax_load.go` | ✅ Tiny-verified 2026-11-08 | Lightning attention + MoE; tiny-random matches transformers |
+| **LFM3** | `models/lfm3.go`, `lfm3_load.go` | ✅ Verified 2026-11-11 (1.7B BF16) | Short-conv + full / sliding attention hybrid. No library implements it yet: checked against an F64 PyTorch port of the model code (tiny 1.7e-5; 1.7B top-5 logits 1e-4, 8 / 8 greedy); CPU = WebGPU |
 | **Falcon** | `models/falcon.go`, `falcon_load.go` | ✅ Verified 2026-10-29 | Every decoder variant (ALiBi, MQA, new arch); falcon-rw-1b / 7b match transformers |
 | **SDAR-1.7B-Chat (block-diffusion LM)** | `models/sdar.go` (`Llama.ForwardDiffusion`, `GenerateDiffusion`, `SDAROpts`), `models/llama.go` (block-bidirectional mask, no-store KV pass), `engine/engine.go` (diffusion branch) | ✅ Verified 2026-10-28 | Block-diffusion decoding on a Qwen3 body; first pass = transformers on CUDA BF16 |
 | **MercyLM** | `models/mercy.go` | Done — pretrained | 15.4M GPT-style LM; `examples/38_mercy_chat` |
@@ -516,7 +517,7 @@ Candle's `candle-transformers/src/models` (Oct 2026) by group; details per model
 | Diffusion | flux | stable_diffusion (1.5 only) | SD 2.1 / XL, mmdit (SD3), wuerstchen, z_image |
 | Audio | whisper, mimi, moshi (+ qwen3_asr) | — | encodec, dac, snac, metavoice, parler_tts, csm |
 
-Light-only: Qwen3.5, Muse Glimmer, Mellum, Nemotron, MiMo (+ MTP), MiniMax-Text-01, SDAR, Qwen3-ASR, EmbeddingGemma 2, Ministral 3.
+Light-only: Qwen3.5, LFM3, Muse Glimmer, Mellum, Nemotron, MiMo (+ MTP), MiniMax-Text-01, SDAR, Qwen3-ASR, EmbeddingGemma 2, Ministral 3.
 
 ### 4.5 Quantization and precision
 

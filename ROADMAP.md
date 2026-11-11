@@ -113,18 +113,16 @@ From Hugging Face downloads / trending per category, weighed by what fits
 the laptop (31 GB RAM, Intel iGPU) and the desktop (16 GB GPU) and by what
 Light already has. Sizes are BF16 safetensors.
 
-1. **FLUX.2-klein-4B** (text-to-image and multi-reference editing in one
-   model; Apache-2.0; 7.8 GB DiT + Qwen3-4B text encoder 8 GB). Builds on
-   the Flux pipeline and the Qwen3 decoder.
-2. **flux-3-image-klein** (queued; gated; 11 GB DiT + 8.9 GB encoder):
-   right after FLUX.2-klein, once its architecture is confirmed.
+1. **FLUX.2-klein-4B**: done (real weights on CPU, 512² in 383 s; WebGPU
+   blocked by iGPU memory, §4).
+2. **flux-3-image-klein** (gated: needs an HF login with the license
+   accepted; 11 GB DiT + 8.9 GB VL text encoder, modular pipeline).
 3. **Image-to-image for every pipeline**: VAE encoder + strength (SDEdit).
    Done for FLUX.1, Z-Image and SD 1.5 (`light image -image -strength`);
    FLUX.2 klein edits via reference images instead. SDXL left.
 4. **Z-Image-Turbo** (most-liked text-to-image; Apache-2.0; 6B single-stream
    DiT, same Qwen3-4B encoder, 8 steps).
-5. **LFM3-1.7B** (queued; short-conv + full / sliding attention hybrid,
-   sandwich norms), then LFM3-VL-2B.
+5. **LFM3-1.7B**: done 2026-11-11 (CPU, WebGPU). Next: LFM3-VL-2B.
 6. **Spark-X2.6-4B** (queued; custom code: gated attention output, head
    dim 256).
 7. **Wan2.1-T2V-1.3B**, then **Wan2.2-TI2V-5B** (text / image to video;
@@ -147,8 +145,12 @@ Light already has. Sizes are BF16 safetensors.
   still do not fit shared memory.
 - BF16 / F16 arithmetic (16-bit weights are stored and widened inside the
   matmul since 2026-11-09; activations are F32; no F64 either).
-- Load-time memory: the CPU loads the checkpoint's 16-bit weights directly,
-  but Gemma-4-E2B still peaks at ~16 GB working set on the iGPU.
+- Memory on the Intel iGPU (open, 2026-11-11): uploads hold ~3 GB of wgpu
+  staging per 4 GB written, and FLUX.2-klein's first transformer block adds
+  ~8 GB of process commit outside Light's buffer pool (D3D12 and Vulkan
+  alike), so klein-4B (7.7 GB on the GPU) runs out of memory; it runs on the
+  CPU. Likely also behind Gemma-4-E2B's ~16 GB peak. Next: a per-dispatch
+  commit trace to name the op.
 - MoE kernels (`moe_gemm`, routing).
 - Missing kernels: `conv1d`, `gather`, `cumsum`, compare ops, `clamp`,
   `where`, `flash_attention`.
