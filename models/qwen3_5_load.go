@@ -43,8 +43,11 @@ type qwen35HFConfig struct {
 		RopeTheta           float64 `json:"rope_theta"`
 		PartialRotaryFactor float64 `json:"partial_rotary_factor"`
 		RopeType            string  `json:"rope_type"`
+		MRoPESection        []int   `json:"mrope_section"`
+		MRoPEInterleaved    bool    `json:"mrope_interleaved"`
 	} `json:"rope_parameters"`
-	TextConfig json.RawMessage `json:"text_config"`
+	ImageTokenID int64           `json:"image_token_id"`
+	TextConfig   json.RawMessage `json:"text_config"`
 	// Fine-grained FP8 checkpoints (Qwen/Qwen3.5-27B-FP8): F8E4M3 weights
 	// with a per-block `weight_scale_inv`. Top level, not in text_config.
 	QuantizationConfig *struct {
@@ -83,7 +86,12 @@ func fetchQwen35Config(repo string) (Qwen35Config, error) {
 		tie = *top.TieWordEmbeddings
 	}
 	theta, partial := hf.RopeTheta, hf.PartialRotaryFactor
+	var mropeSection []int
 	if rp := hf.RopeParameters; rp != nil {
+		if len(rp.MRoPESection) > 0 && !rp.MRoPEInterleaved {
+			return Qwen35Config{}, fmt.Errorf("qwen3.5: chunked (non-interleaved) MRoPE not supported")
+		}
+		mropeSection = rp.MRoPESection
 		if rp.RopeType != "" && rp.RopeType != "default" {
 			return Qwen35Config{}, fmt.Errorf("qwen3.5: rope_type %q not supported", rp.RopeType)
 		}
@@ -141,7 +149,7 @@ func fetchQwen35Config(repo string) (Qwen35Config, error) {
 		LinearKHeads: hf.LinearNumKeyHeads, LinearVHeads: hf.LinearNumValueHeads,
 		LinearKDim: hf.LinearKeyHeadDim, LinearVDim: hf.LinearValueHeadDim, ConvKernel: conv,
 		RmsEps: eps, MaxPosition: hf.MaxPositionEmbedding, TieEmbed: tie,
-		fp8Block: fp8Block,
+		fp8Block: fp8Block, MRoPESection: mropeSection, ImageTokenID: top.ImageTokenID,
 	}, nil
 }
 

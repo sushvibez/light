@@ -12,12 +12,11 @@ import (
 // of shape (..., 2*C), it splits the last axis into a `hidden` half and a
 // `gate` half and returns:
 //
-//	out[..., i] = hidden[..., i] * GELU_tanh(gate[..., i])
+//	out[..., i] = hidden[..., i] * GELU(gate[..., i])
 //
-// Output shape: (..., C). One CUDA kernel for the whole activation —
-// replaces the Narrow + Contiguous + composed-GELU + Mul chain that
-// would otherwise launch 10+ kernels per call. Internal compute is F32
-// for stability; output dtype matches input dtype.
+// Output shape: (..., C). diffusers' GEGLU uses the exact (erf) GELU; the
+// fused CUDA kernel uses the tanh approximation (within ~1e-3). Devices
+// without a fused kernel compose Narrow + GeluErf + Mul.
 func GeGLU(x *tensor.Tensor) (*tensor.Tensor, error) {
 	if x.Rank() < 2 {
 		return nil, fmt.Errorf("GeGLU: input rank must be ≥ 2, got %d", x.Rank())
@@ -32,11 +31,22 @@ func GeGLU(x *tensor.Tensor) (*tensor.Tensor, error) {
 	}
 	dims := append([]int(nil), x.Shape().Dims()...)
 	dims[len(dims)-1] = twoC / 2
-	out, err := tensor.Zeros(x.DType(), dims, x.Device())
-	if err != nil {
-		return nil, err
-	}
 	k, err := registry.Lookup(registry.Key{Op: "geglu", Dev: x.Device().Kind(), DType: x.DType()})
+	if err != nil {
+		h, err := x.Narrow(-1, 0, twoC/2)
+		if err != nil {
+			return nil, err
+		}
+		g, err := x.Narrow(-1, twoC/2, twoC/2)
+		if err != nil {
+			return nil, err
+		}
+		if g, err = GeluErf(g); err != nil {
+			return nil, err
+		}
+		return Mul(h, g)
+	}
+	out, err := tensor.Zeros(x.DType(), dims, x.Device())
 	if err != nil {
 		return nil, err
 	}

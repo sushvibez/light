@@ -132,7 +132,7 @@ func withJinja(fam Template, ct *chattemplate.Template) Template {
 	t.Render = func(msgs []Message) string {
 		cm := make([]chattemplate.Message, len(msgs))
 		for i, m := range msgs {
-			cm[i] = chattemplate.Message{Role: m.Role, Content: m.Content}
+			cm[i] = chattemplate.Message{Role: m.Role, Content: m.Content, Images: len(m.Images)}
 		}
 		out, err := ct.Render(cm, chattemplate.Options{AddGenerationPrompt: true})
 		if err != nil {

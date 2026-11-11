@@ -202,7 +202,7 @@ func TestUnaryParity(t *testing.T) {
 	ap := mustNew(t, pos, []int{7, 111}, cpu)
 	for name, fn := range map[string]func(*tensor.Tensor) (*tensor.Tensor, error){
 		"neg": ops.Neg, "exp": ops.Exp, "relu": ops.Relu, "sigmoid": ops.Sigmoid,
-		"tanh": ops.Tanh, "silu": ops.SiLU, "gelu": ops.Gelu, "abs": ops.Abs,
+		"tanh": ops.Tanh, "silu": ops.SiLU, "gelu": ops.Gelu, "gelu_erf": ops.GeluErf, "abs": ops.Abs,
 		"sin": ops.Sin, "cos": ops.Cos, "floor": ops.Floor, "ceil": ops.Ceil, "round": ops.Round,
 	} {
 		t.Run(name, func(t *testing.T) { parity1(t, name, a, fn, 1e-4) })
@@ -267,6 +267,33 @@ func TestSoftmaxParity(t *testing.T) {
 	})
 }
 
+// ops.Pad along each axis.
+func TestPadParity(t *testing.T) {
+	cpu := device.CPU()
+	x := mustNew(t, randF32(2*3*5*7, 82), []int{2, 3, 5, 7}, cpu)
+	for _, c := range [][3]int{{3, 0, 1}, {2, 0, 1}, {1, 2, 3}, {0, 1, 0}} {
+		parity1(t, "pad", x, func(a *tensor.Tensor) (*tensor.Tensor, error) { return ops.Pad(a, c[0], c[1], c[2]) }, 0)
+	}
+}
+
+// ops.UpsampleNearest by 2 x 2 and 3 x 1.
+func TestUpsampleNearestParity(t *testing.T) {
+	cpu := device.CPU()
+	x := mustNew(t, randF32(2*3*5*7, 81), []int{2, 3, 5, 7}, cpu)
+	for _, s := range [][2]int{{2, 2}, {3, 1}} {
+		parity1(t, "upsample_nearest", x, func(a *tensor.Tensor) (*tensor.Tensor, error) { return ops.UpsampleNearest(a, s) }, 0)
+	}
+}
+
+// ops.Clamp with finite and infinite bounds.
+func TestClampParity(t *testing.T) {
+	cpu := device.CPU()
+	x := mustNew(t, randF32(1000, 80), []int{1000}, cpu)
+	for _, b := range [][2]float64{{-0.3, 0.4}, {math.Inf(-1), 0.1}, {-0.2, math.Inf(1)}} {
+		parity1(t, "clamp", x, func(a *tensor.Tensor) (*tensor.Tensor, error) { return ops.Clamp(a, b[0], b[1]) }, 0)
+	}
+}
+
 func TestNormParity(t *testing.T) {
 	cpu := device.CPU()
 	rows, cols := 37, 768
@@ -290,6 +317,26 @@ func TestNormParity(t *testing.T) {
 	})
 	t.Run("rmsnorm", func(t *testing.T) {
 		parity2(t, "rmsnorm", x, g, func(a, w *tensor.Tensor) (*tensor.Tensor, error) { return ops.RMSNorm(a, w, 1e-6) }, 1e-4)
+	})
+	t.Run("groupnorm", func(t *testing.T) {
+		gpu := gpuOrSkip(t)
+		for _, c := range []struct{ N, C, H, W, G int }{{2, 64, 5, 7, 32}, {1, 32, 33, 31, 1}, {1, 128, 3, 3, 32}} {
+			xs := mustNew(t, randF32(c.N*c.C*c.H*c.W, 63), []int{c.N, c.C, c.H, c.W}, cpu)
+			gs := mustNew(t, randF32(c.C, 64), []int{c.C}, cpu)
+			bs := mustNew(t, randF32(c.C, 65), []int{c.C}, cpu)
+			cpuOut, err := ops.GroupNorm(xs, gs, bs, c.G, 1e-6)
+			if err != nil {
+				t.Fatal(err)
+			}
+			xG, _ := xs.To(gpu)
+			gG, _ := gs.To(gpu)
+			bG, _ := bs.To(gpu)
+			gpuOut, err := ops.GroupNorm(xG, gG, bG, c.G, 1e-6)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertClose(t, "groupnorm", toCPUF32(t, cpuOut), toCPUF32(t, gpuOut), 1e-4)
+		}
 	})
 }
 

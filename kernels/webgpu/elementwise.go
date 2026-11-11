@@ -17,7 +17,7 @@ var binaryOp = map[string]uint32{"add": 0, "sub": 1, "mul": 2, "div": 3, "pow": 
 var unaryOp = map[string]uint32{
 	"relu": 0, "sigmoid": 1, "tanh": 2, "neg": 3, "exp": 4, "log": 5, "sqrt": 6,
 	"gelu": 7, "silu": 8, "abs": 9, "sin": 10, "cos": 11, "tan": 12,
-	"floor": 13, "ceil": 14, "round": 15, "softplus": 16,
+	"floor": 13, "ceil": 14, "round": 15, "softplus": 16, "gelu_erf": 17,
 }
 
 func init() {
@@ -27,6 +27,33 @@ func init() {
 	for op, code := range unaryOp {
 		registry.Register(registry.Key{Op: op, Dev: device.KindWebGPU, DType: dtype.F32}, makeUnary(op, code))
 	}
+	registry.Register(registry.Key{Op: "clamp", Dev: device.KindWebGPU, DType: dtype.F32}, clampF32)
+}
+
+// clampF32: ops.Clamp (unary op 18 with the bounds in the params' last two
+// slots; ±Inf bounds pass through).
+func clampF32(ctx *registry.Context) error {
+	a, out := ctx.Inputs[0], ctx.Output
+	lo, _ := ctx.Attrs["p0"].(float64)
+	hi, _ := ctx.Attrs["p1"].(float64)
+	a, err := contig(a)
+	if err != nil {
+		return err
+	}
+	d, err := dev()
+	if err != nil {
+		return err
+	}
+	n := out.NumElements()
+	if n == 0 {
+		return nil
+	}
+	params, err := d.Uniform(18, uint32(n), f32bits(float32(lo)), f32bits(float32(hi)))
+	if err != nil {
+		return err
+	}
+	defer params.Release()
+	return run1D(d, "unary", []wgpudev.Binding{rd(raw(a)), rw(raw(out)), uni(params)}, n)
 }
 
 // makeBinary mirrors the CUDA launcher: a same-shape contiguous fast path,

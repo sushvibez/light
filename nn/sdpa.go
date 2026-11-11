@@ -26,6 +26,13 @@ import (
 // through autograd Reshape/Transpose/MatMul/Mul/Add/Softmax, so it runs on
 // CPU and CUDA and participates in backward.
 func SDPA(q, k, v, addMask *tensor.Tensor) (*tensor.Tensor, error) {
+	return SDPAScaled(q, k, v, addMask, 0)
+}
+
+// SDPAScaled is SDPA with an explicit score scale: softmax(scale·q·kᵀ +
+// mask)·v. scale 0 means 1/√D; scale 1 skips the multiply (T5 does not
+// scale its scores).
+func SDPAScaled(q, k, v, addMask *tensor.Tensor, scale float64) (*tensor.Tensor, error) {
 	if q.Rank() != 4 || k.Rank() != 4 || v.Rank() != 4 {
 		return nil, fmt.Errorf("nn.SDPA: q/k/v must be (B, NH, S, D); got %v, %v, %v", q.Shape(), k.Shape(), v.Shape())
 	}
@@ -83,13 +90,20 @@ func SDPA(q, k, v, addMask *tensor.Tensor) (*tensor.Tensor, error) {
 	if err != nil {
 		return nil, err
 	}
-	scale, err := attentionScale(D, q.DType(), q.Device())
-	if err != nil {
-		return nil, err
-	}
-	scaled, err := autograd.Mul(scores, scale)
-	if err != nil {
-		return nil, err
+	scaled := scores
+	if scale != 1 {
+		var sc *tensor.Tensor
+		if scale == 0 {
+			sc, err = attentionScale(D, q.DType(), q.Device())
+		} else {
+			sc, err = scalarLike(scale, q.DType(), q.Device())
+		}
+		if err != nil {
+			return nil, err
+		}
+		if scaled, err = autograd.Mul(scores, sc); err != nil {
+			return nil, err
+		}
 	}
 	// Un-collapse to (B, NH, Sq, Sk) so masks can broadcast per batch/head.
 	scaled4, err := autograd.Reshape(scaled, B, NH, Sq, Sk)
@@ -231,4 +245,16 @@ func ALiBiBias(numHeads, qLen, kLen int, dev device.Device) (*tensor.Tensor, err
 		}
 	}
 	return tensor.New(data, []int{numHeads, qLen, kLen}, dev)
+}
+
+// scalarLike returns a (1,) tensor holding v in the given dtype.
+func scalarLike(v float64, dt dtype.DType, dev device.Device) (*tensor.Tensor, error) {
+	s, err := tensor.New([]float32{float32(v)}, []int{1}, dev)
+	if err != nil {
+		return nil, err
+	}
+	if dt == dtype.F32 {
+		return s, nil
+	}
+	return ops.Cast(s, dt)
 }

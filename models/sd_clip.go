@@ -16,15 +16,16 @@ import (
 //
 //	VocabSize=49408, MaxPosition=77, Hidden=768, Layers=12, Heads=12.
 type CLIPTextConfig struct {
-	VocabSize     int
-	MaxPosition   int
-	HiddenSize    int
-	NumLayers     int
-	NumHeads      int
-	ProjectionDim int         // unused by SD's CLIPTextModel — kept for parity
-	LayerNormEps  float64     // 1e-5
-	UseQuickGELU  bool        // true for OpenAI/SD CLIP; false → exact (erf) GELU, HF "gelu"
-	WeightDType   dtype.DType // BF16 for half-memory inference; defaults to F32
+	VocabSize        int
+	MaxPosition      int
+	HiddenSize       int
+	NumLayers        int
+	NumHeads         int
+	ProjectionDim    int         // unused by SD's CLIPTextModel — kept for parity
+	IntermediateSize int         // MLP width; 0 means 4·HiddenSize
+	LayerNormEps     float64     // 1e-5
+	UseQuickGELU     bool        // true for OpenAI/SD CLIP; false → exact (erf) GELU, HF "gelu"
+	WeightDType      dtype.DType // BF16 for half-memory inference; defaults to F32
 	// WithProjection adds CLIPTextModelWithProjection's text_projection
 	// (HiddenSize → ProjectionDim, no bias) for the pooled output (SDXL's
 	// second encoder, OpenCLIP bigG).
@@ -75,11 +76,15 @@ func newCLIPBlock(cfg CLIPTextConfig, dev device.Device) (*clipBlock, error) {
 	if err != nil {
 		return nil, err
 	}
-	fc1, err := nn.NewLinear(cfg.HiddenSize, 4*cfg.HiddenSize, true, dev)
+	inter := cfg.IntermediateSize
+	if inter == 0 {
+		inter = 4 * cfg.HiddenSize
+	}
+	fc1, err := nn.NewLinear(cfg.HiddenSize, inter, true, dev)
 	if err != nil {
 		return nil, err
 	}
-	fc2, err := nn.NewLinear(4*cfg.HiddenSize, cfg.HiddenSize, true, dev)
+	fc2, err := nn.NewLinear(inter, cfg.HiddenSize, true, dev)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +115,7 @@ func (b *clipBlock) forward(x *tensor.Tensor, useQuickGELU bool) (*tensor.Tensor
 	if useQuickGELU {
 		h, err = quickGELU(h)
 	} else {
-		h, err = ops.GeluErf(h) // HF "gelu": the exact erf form
+		h, err = ops.GeluErf(h) // HF "gelu" is the exact erf form (CLIP-G, the HF CLIP ports)
 	}
 	if err != nil {
 		return nil, err

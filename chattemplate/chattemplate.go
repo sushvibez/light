@@ -27,6 +27,10 @@ import (
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+	// Images, when > 0, renders content as a list: that many
+	// {"type": "image"} parts, then {"type": "text", "text": Content}
+	// (the form multimodal templates read).
+	Images int `json:"-"`
 }
 
 // RaiseError is returned when the template calls raise_exception(msg)
@@ -244,7 +248,21 @@ func (t *Template) Render(msgs []Message, opt Options) (string, error) {
 	for _, m := range msgs {
 		d := jinja.NewDict()
 		d.Set("role", m.Role)
-		d.Set("content", m.Content)
+		if m.Images > 0 {
+			parts := jinja.NewList()
+			for range m.Images {
+				p := jinja.NewDict()
+				p.Set("type", "image")
+				parts.Items = append(parts.Items, p)
+			}
+			p := jinja.NewDict()
+			p.Set("type", "text")
+			p.Set("text", m.Content)
+			parts.Items = append(parts.Items, p)
+			d.Set("content", parts)
+		} else {
+			d.Set("content", m.Content)
+		}
 		l.Items = append(l.Items, d)
 	}
 	return t.render(l, opt)

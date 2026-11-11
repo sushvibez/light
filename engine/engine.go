@@ -54,6 +54,13 @@ type Model struct {
 	// autoregressive loop. SDAR holds its decoding settings.
 	Diffusion bool
 	SDAR      models.SDAROpts
+
+	vision       *models.Qwen35Vision // loaded on the first image
+	pixtral      *models.Pixtral
+	gemma4Vision *models.Gemma4Vision
+	// w16 / store16: the LM keeps 16-bit weights; vision towers load the same way.
+	w16     bool
+	store16 dtype.DType
 }
 
 // GenOpts controls sampling. Temperature 0 is greedy.
@@ -205,7 +212,7 @@ func Load(spec Spec) (*Model, error) {
 		return nil, err
 	}
 
-	m := &Model{Spec: spec, LM: lm, Tok: tok, Dev: dev, eos: map[int64]bool{}}
+	m := &Model{Spec: spec, LM: lm, Tok: tok, Dev: dev, eos: map[int64]bool{}, w16: w16, store16: store16}
 	m.Template = TemplateFor(tok)
 	if ct := loadChatTemplate(spec, tok); ct != nil {
 		m.Template = withJinja(m.Template, ct)
@@ -366,27 +373,49 @@ func (m *Model) Generate(ctx context.Context, msgs []Message, opts GenOpts, onTo
 	if len(ids) == 0 {
 		return "", Stats{}, errors.New("engine: empty prompt")
 	}
-	maxPos := m.LM.MaxContext()
-	if len(ids)+opts.MaxTokens > maxPos {
-		if len(ids) >= maxPos {
-			return "", Stats{}, fmt.Errorf("engine: prompt has %d tokens, model max is %d", len(ids), maxPos)
+	cache := models.NewKVCache(m.LM.NumLayers())
+	defer cache.Reset()
+	// forward returns the last position's logits as a (1, V) tensor, on the
+	// device for the text path so sampling can stay there (sampleDevice).
+	forward := func(tokens []int64) (*tensor.Tensor, error) { return m.stepLast(tokens, cache) }
+	prompt := toI64(ids)
+	images := hasImages(msgs)
+	if images {
+		if m.Diffusion {
+			return "", Stats{}, errors.New("engine: diffusion LMs do not take images")
 		}
-		opts.MaxTokens = maxPos - len(ids)
+		mm, p, err := m.multimodal(msgs, ids, cache)
+		if err != nil {
+			return "", Stats{}, err
+		}
+		prompt = p
+		forward = func(tokens []int64) (*tensor.Tensor, error) {
+			row, err := mm(tokens)
+			if err != nil {
+				return nil, err
+			}
+			return tensor.New(row, []int{1, len(row)}, device.CPU())
+		}
+	}
+	maxPos := m.LM.MaxContext()
+	if len(prompt)+opts.MaxTokens > maxPos {
+		if len(prompt) >= maxPos {
+			return "", Stats{}, fmt.Errorf("engine: prompt has %d tokens, model max is %d", len(prompt), maxPos)
+		}
+		opts.MaxTokens = maxPos - len(prompt)
 	}
 
 	var st Stats
-	st.PromptTokens = len(ids)
+	st.PromptTokens = len(prompt)
 	if m.Diffusion {
 		return m.generateDiffusion(ctx, ids, opts, onToken, st)
 	}
-	if l, ok := m.LM.(*models.Llama); ok && l.MTP != nil && opts.Temperature == 0 {
+	if l, ok := m.LM.(*models.Llama); ok && l.MTP != nil && opts.Temperature == 0 && !images {
 		return m.generateSpec(ctx, l, ids, opts, onToken, st)
 	}
-	cache := models.NewKVCache(m.LM.NumLayers())
-	defer cache.Reset()
 
 	t0 := time.Now()
-	row, err := m.stepLast(toI64(ids), cache)
+	row, err := forward(prompt)
 	if err != nil {
 		return "", st, fmt.Errorf("prefill: %w", err)
 	}
@@ -397,6 +426,9 @@ func (m *Model) Generate(ctx context.Context, msgs []Message, opts GenOpts, onTo
 		return "", st, fmt.Errorf("prefill: %w", err)
 	}
 	st.PrefillMS = float64(time.Since(t0).Microseconds()) / 1000
+	if !device.IsCPU(m.Dev) {
+		runtime.GC() // the prefill's activations and full-sequence logits
+	}
 
 	var gen []int32
 	var out strings.Builder
@@ -423,7 +455,7 @@ func (m *Model) Generate(ctx context.Context, msgs []Message, opts GenOpts, onTo
 		if step+1 == opts.MaxTokens {
 			break
 		}
-		row, err = m.stepLast([]int64{int64(next)}, cache)
+		row, err = forward([]int64{int64(next)})
 		if err != nil {
 			return out.String(), st, fmt.Errorf("decode step %d: %w", step, err)
 		}
@@ -517,13 +549,18 @@ func (m *Model) step(tokens []int64, cache *models.KVCache) ([]float32, error) {
 	if err != nil {
 		return nil, err
 	}
+	return m.lastLogits(logits, len(tokens))
+}
+
+// lastLogits returns the last position's row of (1, T, V) logits.
+func (m *Model) lastLogits(logits *tensor.Tensor, T int) ([]float32, error) {
 	cpu, err := logits.To(device.CPU())
 	if err != nil {
 		return nil, err
 	}
 	flat := tensor.MustSlice[float32](cpu)
 	V := m.LM.VocabSize()
-	off := (len(tokens) - 1) * V
+	off := (T - 1) * V
 	return flat[off : off+V], nil
 }
 
@@ -547,3 +584,7 @@ func ggufDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".cache", "light", "gguf")
 }
+
+// PickDevice resolves a device name ("gpu", "webgpu", "cpu" or "" for
+// CUDA when present, else the CPU) as Load does.
+func PickDevice(name string) (device.Device, error) { return pickDevice(name) }

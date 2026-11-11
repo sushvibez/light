@@ -52,18 +52,18 @@ status are in the commits (and, up to 2026-11-09, the
 | **Qwen2 / Qwen2.5** | `models/llama.go` | Done — pretrained | Generic Llama-arch decoder. F32 top-5 = transformers; GGUF, GPTQ and AWQ verified; CPU, CUDA and WebGPU agree |
 | **Qwen3 (dense)** | `models/llama.go` (`QKNorm`) | Done as a decoder body | Verified inside Qwen3-ASR and SDAR; standalone logits not yet checked |
 | **Qwen3-MoE** | `models/llama.go` (`LlamaConfig.NumExperts…`, `llamaBlock.MoE`), `qwen_load.go` (`mapHFMoE`), `nn/moe.go` | ✅ Verified 2026-10-28 (architecture) | Routed FFN, both HF expert layouts, GGUF and 4-bit experts; tiny-random matches transformers on CPU and CUDA |
-| **Qwen3.5 / 3.6 / 3.8 text (Gated DeltaNet hybrid)** | `models/qwen3_5.go`, `qwen3_5_load.go`, `qwen3_5_gguf.go`; `ops.GatedDeltaRule`, `kernels/cuda/src/gated_delta.cu` | ✅ Verified 2026-11-08 (0.8B, 9B, 27B BF16 / FP8 / GGUF) | Gated DeltaNet + gated attention. 0.8B / 9B / 27B (BF16, FP8, GGUF) match transformers; runs on CPU, CUDA and WebGPU |
+| **Qwen3.5 / 3.6 / 3.8 text (Gated DeltaNet hybrid)** | `models/qwen3_5.go`, `qwen3_5_load.go`, `qwen3_5_gguf.go`; `ops.GatedDeltaRule`, `kernels/cuda/src/gated_delta.cu` | ✅ Verified 2026-11-08 (0.8B, 9B, 27B BF16 / FP8 / GGUF) | Gated DeltaNet + gated attention. 0.8B / 9B / 27B (BF16, FP8, GGUF) match transformers; runs on CPU, CUDA and WebGPU. Image input (vision tower, MRoPE, Go preprocessing): 0.8B image chat = transformers, 16 / 16 greedy |
 | **Llama-3 / 3.1 / 3.2** | `models/llama3_load.go` | Done — pretrained | llama3 RoPE scaling; Llama-3.2-1B top-5 = transformers; GGUF and GPTQ act-order verified |
 | **Mistral 7B** | `models/llama3_load.go` | ✅ Verified 2026-11-09 (BF16) | Mistral-7B-Instruct-v0.3 BF16: top-5 ids = transformers, 16 / 16 greedy |
 | **Granite 3.x / Granite 4.0 (attention)** | `models/granite_load.go` | ✅ Verified 2026-11-09 (granite-4.0-micro BF16) | Llama decoder + Granite multipliers; granite-4.0-micro 16 / 16 greedy. Mamba-hybrid layers not supported |
-| **Ministral 3 (text)** | `models/ministral_load.go` | ✅ Verified 2026-11-09 (3B, FP8 → BF16) | YaRN + Llama 4 query scaling, FP8 → BF16 at load; Ministral-3-3B 16 / 16 greedy |
+| **Ministral 3 (text)** | `models/ministral_load.go` | ✅ Verified 2026-11-09 (3B, FP8 → BF16) | YaRN + Llama 4 query scaling, FP8 → BF16 at load; Ministral-3-3B 16 / 16 greedy. Image input (Pixtral tower + projector): image chat = transformers, 16 / 16 greedy |
 | Mixtral | `models/llama3_load.go` | Architecture-ready (SWA done) | Sliding window verified; HF `mixtral` not routed yet (ROADMAP) |
 | **Phi-3 / Phi-3.5** | `models/llama3_load.go` (`LoadPhi3FromHF`) | Done — pretrained | Fused QKV split + LongRoPE; Phi-3.5-mini BF16 top-5 = transformers |
 | **Phi-4-mini** | `models/llama.go` (`PartialRotary`), `llama3_load.go` | ✅ Verified 2026-10-29 | Partial rotary + LongRoPE, 200k vocab; BF16 top-5 and 16-token greedy = transformers |
 | Phi-4 (14B) | — | Architecture-ready | Same template; needs 4-bit to fit 16 GB |
 | **Gemma 3 (text)** | `models/gemma.go`, `gemma_load.go` | ✅ Verified 2026-10-28 | 1B F32 top-5 = transformers to 4 dp; 4B multimodal checkpoint loads text-only |
 | **Gemma 2** | `models/gemma.go`, `gemma_load.go` | ✅ Verified 2026-10-29 | Softcaps + alternating local / global; 2B matches transformers to 4 dp |
-| **Gemma 4 (text)** | `models/gemma4.go`, `gemma4_load.go` | ✅ Verified 2026-10-29 | Per-layer embeddings, KV sharing, proportional RoPE; E2B matches transformers; runs on CPU, CUDA and WebGPU |
+| **Gemma 4 (text)** | `models/gemma4.go`, `gemma4_load.go` | ✅ Verified 2026-10-29 | Per-layer embeddings, KV sharing, proportional RoPE; E2B matches transformers; runs on CPU, CUDA and WebGPU. Image input: E2B image chat = transformers, 16 / 16 greedy |
 | **Muse Glimmer 30B (text)** | `models/muse_glimmer_load.go`, `muse_glimmer_gguf.go` (on the `Gemma3` skeleton) | ✅ Verified 2026-11-08 (30B GGUF Q4) | Gemma 3 skeleton + Muse switches (NoPE globals, output gate, q scale); 30B GGUF Q4 top-5 = reference |
 | **Mellum 2.1 12B-A2.5B** | `models/llama3_load.go` (`model_type` `mellum`, Qwen3-MoE path) | ✅ Verified 2026-11-07 (12B BF16, A100) | Qwen3-MoE + YaRN + per-layer-type RoPE; 12B BF16 matches transformers (A100) |
 | **DeepSeek-V2 / V3** | `models/deepseek_v2.go`, `deepseek_v2_load.go`, `deepseek_route.go` | ✅ Verified 2026-11-08 (V2-Lite-Chat, A100); V3 routing tiny-verified | MLA (latent KV cache) + DeepSeekMoE; V2-Lite-Chat matches transformers (A100); V3 routing tiny-verified |
@@ -71,9 +71,11 @@ status are in the commits (and, up to 2026-11-09, the
 | **Nemotron** | `models/nemotron_load.go` | ✅ Verified 2026-11-08 (Nemotron-4-Mini 4B, A100) | LayerNorm1P + ReLU² MLP; Nemotron-4-Mini 4B top-5 ids = transformers, 16 / 16 greedy |
 | **MiMo (Xiaomi MiMo-7B)** | `models/llama3_load.go` (`mimo` → Qwen2 loader), `models/mimo_mtp.go`, `models/spec_decode.go` | ✅ Verified 2026-11-08 (MiMo-7B-RL, A100) | Qwen2 + MTP head; MiMo-7B-RL matches transformers; MTP speculative decoding |
 | **MiniMax-Text-01** | `models/minimax.go`, `minimax_load.go` | ✅ Tiny-verified 2026-11-08 | Lightning attention + MoE; tiny-random matches transformers |
+| **LFM3** | `models/lfm3.go`, `lfm3_load.go` | ✅ Verified 2026-11-11 (1.7B BF16) | Short-conv + full / sliding attention hybrid. No library implements it yet: checked against an F64 PyTorch port of the model code (tiny 1.7e-5; 1.7B top-5 logits 1e-4, 8 / 8 greedy); CPU = WebGPU |
 | **Falcon** | `models/falcon.go`, `falcon_load.go` | ✅ Verified 2026-10-29 | Every decoder variant (ALiBi, MQA, new arch); falcon-rw-1b / 7b match transformers |
 | **SDAR-1.7B-Chat (block-diffusion LM)** | `models/sdar.go` (`Llama.ForwardDiffusion`, `GenerateDiffusion`, `SDAROpts`), `models/llama.go` (block-bidirectional mask, no-store KV pass), `engine/engine.go` (diffusion branch) | ✅ Verified 2026-10-28 | Block-diffusion decoding on a Qwen3 body; first pass = transformers on CUDA BF16 |
 | **MercyLM** | `models/mercy.go` | Done — pretrained | 15.4M GPT-style LM; `examples/38_mercy_chat` |
+| **T5 encoder (T5 / v1.1 / Flan)** | `models/t5.go` | ✅ Verified 2026-11-09 (t5-v1_1-small) | Hidden states within 5.3e-6 of transformers on CPU and WebGPU; Flux / SD3 text encoder |
 | **BERT** | `models/bert.go`, `models/bert_load.go` | Done — pretrained | bge-small-en-v1.5 embeddings match PyTorch to 7.8e-7 |
 | **EmbeddingGemma 2** | `models/embeddinggemma2.go`, `embeddinggemma2_load.go` | ✅ Verified 2026-10-29 | Bidirectional Gemma 4 blocks; embeddings match transformers |
 
@@ -90,8 +92,11 @@ status are in the commits (and, up to 2026-11-09, the
 
 | Model | File | Status | Notes |
 |-------|------|--------|-------|
-| **Stable Diffusion 1.5** | `models/sd*.go` | Done — pretrained | CLIP text encoder + UNet2DCondition + VAE decoder + DDIM; BF16 on RTX 5060 Ti. `LoadSD15FromHF`; `examples/37_sd15_txt2img` |
+| **Stable Diffusion 1.5** | `models/sd*.go` | Done — pretrained | CLIP + UNet + VAE + DDIM; text-to-image and img2img match diffusers within 2e-4 (CPU, LIGHT_HEAVY_TESTS). `light image`; BF16 on RTX 5060 Ti |
 | **SDXL base** | `models/sdxl.go`, `sdxl_load.go` (UNet / CLIP generalised in `sd_unet.go`, `sd_clip.go`) | ✅ Verified 2026-11-09 | CLIP-L + OpenCLIP bigG (penultimate states, projected pooled), 3-level UNet with 1/2/10 transformer depth, text-time add-embedding, SDXL VAE; both encoders match diffusers to 1e-4, UNet step within 1.1 % (BF16 vs fp16); 1024² in 34 s / 30 DDIM steps on the RTX 5060 Ti (10.3 GB). `LoadSDXLFromHF`; `examples/43_sdxl_txt2img`; `scripts/verify/ref_sdxl.py` |
+| **Flux (FLUX.1 schnell / dev)** | `models/flux.go`, `diffusion/flux.go` | ✅ Tiny-verified 2026-11-09 | MMDiT + T5 + CLIP pooled + flow-match Euler + 16-ch VAE; diffusers' FluxPipeline within 3.3e-6, FluxImg2ImgPipeline within 6.4e-6 (CPU, WebGPU). Real 12B weights not run yet |
+| **FLUX.2 klein** | `models/flux2.go`, `diffusion/flux2.go` | ✅ Tiny-verified 2026-11-09 | Qwen3 encoder + FLUX.2 DiT; text-to-image within 7.4e-6, multi-reference editing within 8.9e-6 (CPU, WebGPU) |
+| **Z-Image (Turbo)** | `models/zimage.go`, `diffusion/zimage.go` | ✅ Tiny-verified 2026-11-09 | Qwen3 encoder + S3-DiT; ZImagePipeline within 4.6e-5, img2img within 6.9e-5 (CPU, WebGPU) |
 
 ### 1.4 Vision (classification and detection)
 
@@ -508,13 +513,13 @@ Candle's `candle-transformers/src/models` (Oct 2026) by group; details per model
 | LLMs (dense) | llama, mistral, phi3 (+ Phi-4-mini), gemma / 2 / 3 / 4, qwen2, qwen3, deepseek2, falcon, glm4, granite | — | phi-1/2 (mixformer), gemma v1, chatglm, codegeex4, starcoder2, mpt, persimmon, stable_lm, olmo, helium, lfm2, smol, llama2_c |
 | LLMs (MoE / recurrent) | qwen3_moe | mixtral, qwen2_moe (loaders not wired), granitemoehybrid (no Mamba layers) | mamba / mamba2, rwkv v5–v7, based, recurrent_gemma |
 | GGUF | llama / qwen2 / qwen3 / mistral / qwen3moe, qwen35, muse-glimmer, moshi | — | the other Candle quantized modules |
-| Encoders | bert, embedding_gemma2 | — | distilbert, jina / nomic / modern bert, deberta, xlm-roberta, stella, nvembed, colpali, t5, marian |
+| Encoders | bert, embedding_gemma2, t5 (encoder) | — | distilbert, jina / nomic / modern bert, deberta, xlm-roberta, stella, nvembed, colpali, marian |
 | Vision | resnet, vgg, vit (+ mobilenetv2, yolov5) | — | dinov2, beit, eva2, convnext, efficientnet, mobileone, fastvit, hiera, repvgg, segformer, SAM, depth-anything, trocr |
 | Multimodal | — | clip (SD text tower) | siglip, blip, llava, moondream, paligemma, pixtral, qwen3_vl, paddleocr_vl, voxtral |
-| Diffusion | — | stable_diffusion (1.5 only) | SD 2.1 / XL, mmdit (SD3), flux, wuerstchen, z_image |
+| Diffusion | flux | stable_diffusion (1.5 only) | SD 2.1 / XL, mmdit (SD3), wuerstchen, z_image |
 | Audio | whisper, mimi, moshi (+ qwen3_asr) | — | encodec, dac, snac, metavoice, parler_tts, csm |
 
-Light-only: Qwen3.5, Muse Glimmer, Mellum, Nemotron, MiMo (+ MTP), MiniMax-Text-01, SDAR, Qwen3-ASR, EmbeddingGemma 2, Ministral 3.
+Light-only: Qwen3.5, LFM3, Muse Glimmer, Mellum, Nemotron, MiMo (+ MTP), MiniMax-Text-01, SDAR, Qwen3-ASR, EmbeddingGemma 2, Ministral 3.
 
 ### 4.5 Quantization and precision
 

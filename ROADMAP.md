@@ -17,9 +17,10 @@ GPTQ / AWQ) is complete as of 2026-11-08 except for the items below.
 
 1. **SDXL base** (desktop) — same primitives as SD 1.5 (CLIP, UNet2DCondition, VAE,
    DDIM), with dual text encoders and a bigger UNet.
-2. **Flux / SD3 (MMDiT)** — structurally different from the UNet path: joint
-   text/image transformer blocks, flow-matching schedulers. Unlocks the DiT
-   family (Qwen-Image, Z-Image, Krea, the user-queued FLUX checkpoint).
+2. **Flux on real weights / SD3** — the Flux pipeline (`diffusion.LoadFlux`) is
+   verified end to end on a tiny checkpoint; FLUX.1-schnell (12B) still needs
+   a real run (Colab, or w16 on a 32 GB host) and a CLI entry point. SD3
+   (MMDiT with CLIP-L + CLIP-G + T5) reuses most of it.
 3. **INT8 W8A8 GEMM** (desktop) — `cublasGemmEx(CUBLAS_COMPUTE_32I)` for
    SmoothQuant-style int8 weights × int8 activations; today int8 is
    per-column weights × F32 activations only (`ops.MatMulInt8`).
@@ -30,8 +31,12 @@ GPTQ / AWQ) is complete as of 2026-11-08 except for the items below.
 
 - **Gemma 3 SigLIP** tower (image input for gemma-3-4b and up; the text path
   skips it today).
-- **Qwen3-VL** vision tower (+ MRoPE): prerequisite for Qwen3.5 / 3.6 / 3.8
-  image input, WeVisOne-VL and the Qwen-Image text encoder.
+- Qwen3.5, Ministral 3 and Gemma 4 images work end to end (2026-11-09);
+  next: images in the interactive shell, video frames, Qwen3-VL deepstack
+  (Qwen3-VL proper, WeVisOne-VL, the Qwen-Image text encoder). On the
+  16 GB-shared Intel iGPU, Ministral 3 and Gemma-4-E2B with an image run
+  out of memory (Gemma 4's tower attends over 2520 patches): Q8_0 weights,
+  fewer soft tokens or a smaller prompt there.
 - Gemma 4 vision / audio towers; Muse Glimmer's 1.8B ViT; EmbeddingGemma 2
   vision / audio towers (text encoders only today).
 - CLIP vision tower (SD only has the text tower), SigLIP, DINOv2, Segment
@@ -76,7 +81,7 @@ GPTQ / AWQ) is complete as of 2026-11-08 except for the items below.
   with byte-level BPE + position offset), T5 / Flan-T5 (relative position
   bias), Nemotron-3.5-Embed-1B (after a Ministral-3 backbone).
 - Other Candle modules not ported: phi (1 / 1.5 / 2), gemma v1, starcoder2,
-  mpt, olmo / olmo2, granite, stable_lm, lfm2, SmolLM3, chatglm / codegeex4,
+  mpt, olmo / olmo2, stable_lm, lfm2, SmolLM3, chatglm / codegeex4,
   mamba / mamba2 / rwkv / recurrent_gemma (SSM scans), distilbert, jina_bert,
   xlm_roberta, marian, blip / llava / moondream / paligemma / pixtral,
   wuerstchen.
@@ -102,17 +107,35 @@ GPTQ / AWQ) is complete as of 2026-11-08 except for the items below.
     RoI Align / RoI Pool.
   - Llama-2 7B (same loader as Llama-3; needs the checkpoint).
 
-## 3. User-queued targets (2026-10-28, in the order given)
+## 3. Next models (2026-11-09, in order)
 
-Each starts with a config / architecture inspection, then the usual
-validation bar.
+From Hugging Face downloads / trending per category, weighed by what fits
+the laptop (31 GB RAM, Intel iGPU) and the desktop (16 GB GPU) and by what
+Light already has. Sizes are BF16 safetensors.
 
-1. **LTX-2.5** — video DiT + video VAE.
-2. **`black-forest-labs/flux-3-image-klein-comfy`** — FLUX image model,
-   ComfyUI checkpoint layout (after §1.2).
-3. **`XHToken/Spark-X2.6-4B`**
-4. **LFM3** (Liquid AI)
-5. **`HelpingAI/PixelGen`**
+1. **FLUX.2-klein-4B**: done (real weights on CPU, 512² in 383 s; WebGPU
+   blocked by iGPU memory, §4).
+2. **flux-3-image-klein** (gated: needs an HF login with the license
+   accepted; 11 GB DiT + 8.9 GB VL text encoder, modular pipeline).
+3. **Image-to-image for every pipeline**: VAE encoder + strength (SDEdit).
+   Done for FLUX.1, Z-Image and SD 1.5 (`light image -image -strength`);
+   FLUX.2 klein edits via reference images instead. SDXL left.
+4. **Z-Image-Turbo** (most-liked text-to-image; Apache-2.0; 6B single-stream
+   DiT, same Qwen3-4B encoder, 8 steps).
+5. **LFM3-1.7B**: done 2026-11-11 (CPU, WebGPU). Next: LFM3-VL-2B.
+6. **Spark-X2.6-4B** (queued; custom code: gated attention output, head
+   dim 256).
+7. **Wan2.1-T2V-1.3B**, then **Wan2.2-TI2V-5B** (text / image to video;
+   Apache-2.0; UMT5 encoder): the video DiT + 3D VAE path.
+8. **Qwen-Image-2.1 / Turbo** (most-downloaded text-to-image; 7B DiT +
+   Qwen3-VL-8B encoder, ~32 GB: Q8_0 / desktop / Colab; needs Qwen3-VL
+   deepstack).
+9. Quick non-image wins: Kokoro-82M (TTS), Qwen3-Embedding-0.6B,
+   Depth-Anything-V2, BiRefNet / RMBG-2.0 (background removal), Florence-2.
+10. **LTX-2.5** (queued): 76 GB DiT + 24 GB encoder; Colab only, after Wan
+    proves the video path.
+11. **PixelGen** (queued): an SDXL fine-tune; works once SDXL lands
+    (desktop).
 
 ## 4. Backends
 
@@ -122,12 +145,19 @@ validation bar.
   still do not fit shared memory.
 - BF16 / F16 arithmetic (16-bit weights are stored and widened inside the
   matmul since 2026-11-09; activations are F32; no F64 either).
-- Load-time memory: the CPU loads the checkpoint's 16-bit weights directly,
-  but Gemma-4-E2B still peaks at ~16 GB working set on the iGPU.
+- Memory on the Intel iGPU (open, 2026-11-11): uploads hold ~3 GB of wgpu
+  staging per 4 GB written, and FLUX.2-klein's first transformer block adds
+  ~8 GB of process commit outside Light's buffer pool (D3D12 and Vulkan
+  alike), so klein-4B (7.7 GB on the GPU) runs out of memory; it runs on the
+  CPU. Likely also behind Gemma-4-E2B's ~16 GB peak. Next: a per-dispatch
+  commit trace to name the op.
 - MoE kernels (`moe_gemm`, routing).
-- Missing kernels: `conv1d`, `gather`, `cumsum`, compare ops, `groupnorm`,
+- Missing kernels: `conv1d`, `gather`, `cumsum`, compare ops, `clamp`,
   `where`, `flash_attention`.
 - Remaining per-token cost after dispatch batching.
+- **Perf pass:** the Q8_0 GEMV decodes 35% slower than the 16-bit one on the
+  Intel iGPU (granite 2.9 vs 4.4 tok/s) although it reads about half the
+  bytes; `q8_0` should beat `w16` once it is vectorised.
 
 ### CUDA
 

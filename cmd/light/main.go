@@ -39,6 +39,7 @@ func init() {
 		{"serve", "[-model <model>]", "serve models through an OpenAI-compatible HTTP API", cmdServe},
 		{"bench", "<model>", "measure load / RAM / GPU memory / prefill / decode on each device", cmdBench},
 		{"perf", "[model]", "this host's measured performance table", cmdPerf},
+		{"image", "<org/repo> <prompt>", "generate or edit an image (FLUX.2 klein, Z-Image, FLUX.1) into a PNG", cmdImage},
 	}
 }
 

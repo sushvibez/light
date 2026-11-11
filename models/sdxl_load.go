@@ -44,7 +44,7 @@ func LoadSDXLFromHF(repo string, wdt dtype.DType, dev device.Device) (*StableDif
 		return nil, fmt.Errorf("unet: %w", err)
 	}
 	weights = nil
-	vae, err := loadSDVAEVariant(repo, "fp16", dtype.F32, dev)
+	vae, _, err := loadSDVAEVariant(repo, "fp16", dtype.F32, dev)
 	if err != nil {
 		return nil, fmt.Errorf("vae: %w", err)
 	}

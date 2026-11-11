@@ -49,6 +49,9 @@ type DDIMScheduler struct {
 	BetaEnd           float64   // 0.012
 	AlphasCumprod     []float64 // length NumTrainTimesteps
 	Timesteps         []int     // descending list of `NumInferenceSteps` integers in [0, NumTrainTimesteps)
+	// FinalAlphaCumprod is ᾱ after the last step: SD 1.5's
+	// set_alpha_to_one = false makes it ᾱ_0, not 1.
+	FinalAlphaCumprod float64
 }
 
 // NewDDIMScheduler builds a scheduler with the SD 1.5 default schedule
@@ -81,10 +84,14 @@ func NewDDIMScheduler(numInference int) *DDIMScheduler {
 	// An off-by-`step-1` here means we sample at slightly noisier timesteps
 	// than the model expected, which compounds across the loop and shows
 	// up as visibly degraded image quality.
+	//
+	// SD 1.5's scheduler config adds steps_offset = 1: N = 4 runs
+	// [751, 501, 251, 1].
+	const stepsOffset = 1
 	step := train / numInference
 	timesteps := make([]int, numInference)
 	for i := 0; i < numInference; i++ {
-		timesteps[i] = (numInference - 1 - i) * step
+		timesteps[i] = (numInference-1-i)*step + stepsOffset
 	}
 	return &DDIMScheduler{
 		NumTrainTimesteps: train,
@@ -92,6 +99,7 @@ func NewDDIMScheduler(numInference int) *DDIMScheduler {
 		BetaEnd:           betaEnd,
 		AlphasCumprod:     alphasCumprod,
 		Timesteps:         timesteps,
+		FinalAlphaCumprod: alphasCumprod[0],
 	}
 }
 
@@ -109,7 +117,7 @@ func (s *DDIMScheduler) Step(step int, xt, eps *tensor.Tensor) (*tensor.Tensor, 
 	}
 	t := s.Timesteps[step]
 	alphaT := s.AlphasCumprod[t]
-	var alphaPrev float64 = 1
+	alphaPrev := s.FinalAlphaCumprod
 	if step+1 < len(s.Timesteps) {
 		alphaPrev = s.AlphasCumprod[s.Timesteps[step+1]]
 	}

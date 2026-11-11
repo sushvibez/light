@@ -4,6 +4,7 @@ import (
 	"math"
 
 	"light/dtype"
+	"light/internal/parallel"
 	"light/internal/registry"
 )
 
@@ -65,47 +66,33 @@ func softmaxKernel[T numericFloat](ctx *registry.Context) error {
 		}
 	}
 
-	for r := range rowCount {
-		// Compute base offsets for this row: axis index is 0.
-		aRowOff := aBase
-		outRowOff := 0
-		for ax := range rank {
-			if ax == axis {
-				continue
-			}
-			aRowOff += idx[ax] * aStr[ax]
-			outRowOff += idx[ax] * outDStr[ax]
-		}
-
-		// Stable softmax: subtract max.
-		maxVal := aS[aRowOff]
-		for k := 1; k < axLen; k++ {
-			v := aS[aRowOff+k*axStride]
-			if v > maxVal {
-				maxVal = v
-			}
-		}
-		var sum T
-		for k := range axLen {
-			e := T(math.Exp(float64(aS[aRowOff+k*axStride] - maxVal)))
-			outS[outRowOff+k*outDStr[axis]] = e
-			sum += e
-		}
-		for k := range axLen {
-			outS[outRowOff+k*outDStr[axis]] /= sum
-		}
-
-		// Advance multi-index over non-axis dims.
-		for i := len(otherAxes) - 1; i >= 0; i-- {
-			ax := otherAxes[i]
-			idx[ax]++
-			if idx[ax] < dims[ax] {
-				break
-			}
-			idx[ax] = 0
-		}
-		_ = r
+	oa := make([]int, len(otherAxes))
+	oo := make([]int, len(otherAxes))
+	for k, ax := range otherAxes {
+		oa[k], oo[k] = aStr[ax], outDStr[ax]
 	}
+	_ = idx
+	oStep := outDStr[axis]
+	parallel.For(rowCount, max(1, parallel.Grain/max(axLen, 1)), func(lo, hi int) {
+		parallel.Strided(otherDims, oa, oo, aBase, 0, lo, hi, func(_, aRowOff, outRowOff int) {
+			// Stable softmax: subtract max.
+			maxVal := aS[aRowOff]
+			for k := 1; k < axLen; k++ {
+				if v := aS[aRowOff+k*axStride]; v > maxVal {
+					maxVal = v
+				}
+			}
+			var sum T
+			for k := range axLen {
+				e := T(math.Exp(float64(aS[aRowOff+k*axStride] - maxVal)))
+				outS[outRowOff+k*oStep] = e
+				sum += e
+			}
+			for k := range axLen {
+				outS[outRowOff+k*oStep] /= sum
+			}
+		})
+	})
 	return nil
 }
 
