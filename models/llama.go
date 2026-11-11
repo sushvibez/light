@@ -328,7 +328,12 @@ type Llama struct {
 	maskValid  int
 	// keyValid > 0 masks keys at positions >= keyValid for every query
 	// (HiddenStates' right padding, as an HF attention_mask does).
-	keyValid  int
+	keyValid int
+	// padPos >= 0 (with keyValid) gives the padding tokens that fixed RoPE
+	// position instead of their index (FLUX 3's Qwen3-VL text encoder).
+	padPos    int64
+	posValid  int
+	posPad    int64
 	maskDev   device.Device
 	maskCache *tensor.Tensor
 
@@ -621,6 +626,13 @@ func (m *Llama) ForwardWithCache(tokens *tensor.Tensor, cache *KVCache) (*tensor
 // means no padding. Used by diffusion pipelines that condition on an LM's
 // intermediate layers (FLUX.2 klein: Qwen3 layers 9, 18, 27).
 func (m *Llama) HiddenStates(tokens *tensor.Tensor, layers []int, valid int) ([]*tensor.Tensor, error) {
+	return m.HiddenStatesPadPos(tokens, layers, valid, -1)
+}
+
+// HiddenStatesPadPos is HiddenStates with the padding tokens (positions >=
+// valid) all at RoPE position padPos when padPos >= 0, as an HF forward
+// with explicit position_ids that masks_fill the padding does.
+func (m *Llama) HiddenStatesPadPos(tokens *tensor.Tensor, layers []int, valid int, padPos int64) ([]*tensor.Tensor, error) {
 	if tokens.Rank() != 2 || tokens.DType() != dtype.I64 {
 		return nil, fmt.Errorf("Llama.HiddenStates: tokens must be (B, T) I64, got %v %v", tokens.Shape(), tokens.DType())
 	}
@@ -628,7 +640,8 @@ func (m *Llama) HiddenStates(tokens *tensor.Tensor, layers []int, valid int) ([]
 	dev := tokens.Device()
 	if valid > 0 && valid < T {
 		m.keyValid = valid
-		defer func() { m.keyValid = 0 }()
+		m.padPos = padPos
+		defer func() { m.keyValid, m.padPos = 0, 0 }()
 	}
 	h, err := m.TokenEmb.Forward(tokens)
 	if err != nil {
@@ -1268,13 +1281,21 @@ func (m *Llama) queryKeyMask(T, prior, window int, dev device.Device) (*tensor.T
 // positionsFor returns (and caches) [offset..offset+S-1] as an (S,) I64
 // tensor on dev. The cache hits whenever the same (S, offset, dev) repeats.
 func (m *Llama) positionsFor(S, offset int, dev device.Device) (*tensor.Tensor, error) {
-	if m.posCache != nil && m.posS == S && m.posOff == offset && m.posDev != nil && m.posDev.SameAs(dev) {
+	valid, pad := 0, int64(-1)
+	if m.keyValid > 0 && m.padPos >= 0 {
+		valid, pad = m.keyValid, m.padPos
+	}
+	if m.posCache != nil && m.posS == S && m.posOff == offset && m.posValid == valid && m.posPad == pad && m.posDev != nil && m.posDev.SameAs(dev) {
 		return m.posCache, nil
 	}
 	data := make([]int64, S)
 	for i := range S {
 		data[i] = int64(offset + i)
+		if valid > 0 && offset+i >= valid {
+			data[i] = pad
+		}
 	}
+	m.posValid, m.posPad = valid, pad
 	pos, err := tensor.New(data, []int{S}, dev)
 	if err != nil {
 		return nil, err

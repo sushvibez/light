@@ -384,7 +384,7 @@ func LoadCausalLMFromHF(repo string, dev device.Device, weightDT dtype.DType) (*
 	switch hf.ModelType {
 	case "llama", "mistral":
 		return loadLlama3(repo, dev, weightDT)
-	case "qwen2", "qwen2_5", "qwen3", "qwen3_moe", "mellum", "sdar", "mimo":
+	case "qwen2", "qwen2_5", "qwen3", "qwen3_moe", "mellum", "sdar", "mimo", "qwen3_vl":
 		return loadQwen2(repo, dev, weightDT)
 	case "phi3":
 		return LoadPhi3FromHF(repo, dev, weightDT)

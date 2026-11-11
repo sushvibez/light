@@ -115,8 +115,10 @@ Light already has. Sizes are BF16 safetensors.
 
 1. **FLUX.2-klein-4B**: done (real weights on CPU, 512² in 383 s; WebGPU
    blocked by iGPU memory, §4).
-2. **flux-3-image-klein** (gated: needs an HF login with the license
-   accepted; 11 GB DiT + 8.9 GB VL text encoder, modular pipeline).
+2. **flux-3-image-klein**: transformer + text-to-image pipeline done
+   (tiny-verified). Next: reference-image editing (Flux3ImageProcessor
+   sizing), a real-weights run (accept the license on the repo page; 11 GB
+   DiT + 8.9 GB Qwen3-VL-4B), the prompt upsampler (9B, optional).
 3. **Image-to-image for every pipeline**: VAE encoder + strength (SDEdit).
    Done for FLUX.1, Z-Image and SD 1.5 (`light image -image -strength`);
    FLUX.2 klein edits via reference images instead. SDXL left.
