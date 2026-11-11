@@ -45,6 +45,13 @@ type LlamaConfig struct {
 	SlidingLayers      []bool  // optional per-layer switch (len NumLayers); nil = every layer uses SlidingWindow. Gemma alternates local/global layers.
 	QKNorm             bool    // Qwen3: RMSNorm over the head dim of Q and K (per layer weights) before RoPE
 	PostNorms          bool    // GLM-4-0414: RMSNorm on the attention and MLP outputs before each residual add
+	// Spark-X (spark2_5): PartialRotary applies to full-attention layers
+	// only (sliding layers rotate the whole head); a per-head sigmoid gate
+	// (g_proj, D → NumHeads) scales each head's attention output before
+	// o_proj; the gated MLP uses exact (erf) GELU instead of SiLU.
+	SlidingFullRotary bool
+	HeadwiseGate      bool
+	GELUMLP           bool
 	// Granite scaling (0 = off): token embeddings × EmbedMultiplier, the
 	// attention softmax scale AttnScale instead of 1/√HeadDim, residual
 	// branches × ResidualMultiplier before each add, logits ÷ LogitsScaling.
@@ -143,6 +150,7 @@ type llamaBlock struct {
 	N2                         *nn.RMSNorm
 	GateProj, UpProj, DownProj *nn.Linear    // dense SwiGLU MLP; nil on MoE layers
 	MoE                        *nn.SparseMoE // routed-expert FFN; nil on dense layers
+	HeadGate                   *nn.Linear    // Spark-X g_proj (Cfg.HeadwiseGate); nil otherwise
 }
 
 func newLlamaBlock(cfg LlamaConfig, layer int, dev device.Device) (*llamaBlock, error) {
@@ -219,6 +227,11 @@ func newLlamaBlock(cfg LlamaConfig, layer int, dev device.Device) (*llamaBlock, 
 			return nil, err
 		}
 	}
+	if cfg.HeadwiseGate {
+		if blk.HeadGate, err = mkLinear(D, NH, false, wdt, dev); err != nil {
+			return nil, err
+		}
+	}
 	if cfg.QKNorm {
 		if blk.QNorm, err = nn.NewRMSNormWithDType(HD, cfg.RmsEps, wdt, dev); err != nil {
 			return nil, err
@@ -253,6 +266,9 @@ func (b *llamaBlock) parameters() []*tensor.Tensor {
 	ps = append(ps, b.KProj.Parameters()...)
 	ps = append(ps, b.VProj.Parameters()...)
 	ps = append(ps, b.OProj.Parameters()...)
+	if b.HeadGate != nil {
+		ps = append(ps, b.HeadGate.Parameters()...)
+	}
 	if b.QNorm != nil {
 		ps = append(ps, b.QNorm.Parameters()...)
 		ps = append(ps, b.KNorm.Parameters()...)
@@ -904,6 +920,21 @@ attend:
 	if err != nil {
 		return nil, err
 	}
+	if blk.HeadGate != nil { // (B, T, NH, HD) × sigmoid(g_proj(h)) per head
+		gs, err := blk.HeadGate.Forward(h)
+		if err != nil {
+			return nil, err
+		}
+		if gs, err = ops.Sigmoid(gs); err != nil {
+			return nil, err
+		}
+		if gs, err = autograd.Reshape(gs, B, T, NH, 1); err != nil {
+			return nil, err
+		}
+		if ctx, err = ops.Mul(ctx, gs); err != nil {
+			return nil, err
+		}
+	}
 	// NumHeads·HeadDim need not equal HiddenSize (Qwen3, Mellum 2.1:
 	// 32 × 128 heads on a 2304-wide model); OProj maps back to HiddenSize.
 	ctx, err = autograd.Reshape(ctx, B, T, NH*HD)
@@ -966,7 +997,11 @@ attend:
 	if err != nil {
 		return nil, err
 	}
-	gate, err = autograd.SiLU(gate)
+	if m.Cfg.GELUMLP {
+		gate, err = ops.GeluErf(gate)
+	} else {
+		gate, err = autograd.SiLU(gate)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1040,6 +1075,9 @@ func (m *Llama) residual(x, branch *tensor.Tensor) (*tensor.Tensor, error) {
 func (m *Llama) applyRoPE(x, pos *tensor.Tensor, seqLen, layer int, dev device.Device) (*tensor.Tensor, error) {
 	base, rs, slot := m.Cfg.ropeFor(layer)
 	rotDim := m.rotaryDim()
+	if m.Cfg.SlidingFullRotary && m.Cfg.slidingWindowFor(layer) > 0 {
+		rotDim = m.Cfg.HeadDim
+	}
 	if rotDim < m.Cfg.HeadDim {
 		// Partial rotary (Phi-4-mini): rotate_half runs over the first rotDim
 		// dims only; the rest pass through untouched.

@@ -123,8 +123,7 @@ Light already has. Sizes are BF16 safetensors.
 4. **Z-Image-Turbo** (most-liked text-to-image; Apache-2.0; 6B single-stream
    DiT, same Qwen3-4B encoder, 8 steps).
 5. **LFM3-1.7B**: done 2026-11-11 (CPU, WebGPU). Next: LFM3-VL-2B.
-6. **Spark-X2.6-4B** (queued; custom code: gated attention output, head
-   dim 256).
+6. **Spark-X2.6-4B**: done 2026-11-11 (CPU; tiny on WebGPU).
 7. **Wan2.1-T2V-1.3B**, then **Wan2.2-TI2V-5B** (text / image to video;
    Apache-2.0; UMT5 encoder): the video DiT + 3D VAE path.
 8. **Qwen-Image-2.1 / Turbo** (most-downloaded text-to-image; 7B DiT +

@@ -1,0 +1,42 @@
+{
+ "architectures": [
+  "Spark2_5ForCausalLM"
+ ],
+ "model_type": "spark2_5",
+ "vocab_size": 96,
+ "hidden_size": 32,
+ "intermediate_size": 64,
+ "num_hidden_layers": 4,
+ "num_attention_heads": 4,
+ "num_key_value_heads": 2,
+ "head_dim": 16,
+ "rms_norm_eps": 1e-06,
+ "max_position_embeddings": 4096,
+ "tie_word_embeddings": true,
+ "sliding_window": 4,
+ "hidden_act": "gelu",
+ "attention_bias": false,
+ "mlp_bias": false,
+ "headwise_attn_output_gate": true,
+ "gate_attn_act_mode": "sigmoid",
+ "layer_types": [
+  "sliding_attention",
+  "sliding_attention",
+  "full_attention",
+  "sliding_attention"
+ ],
+ "rope_parameters": {
+  "full_attention": {
+   "partial_rotary_factor": 0.25,
+   "rope_theta": 5000000
+  },
+  "sliding_attention": {
+   "partial_rotary_factor": 1.0,
+   "rope_theta": 10000
+  }
+ },
+ "bos_token_id": 0,
+ "eos_token_id": 1,
+ "pad_token_id": 2,
+ "dtype": "float32"
+}
