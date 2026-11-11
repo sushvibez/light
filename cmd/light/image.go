@@ -53,14 +53,7 @@ func cmdImage(args []string) error {
 	if err != nil {
 		return err
 	}
-	// 16-bit weight storage widens inside a matmul_w16 kernel; CUDA has none
-	// yet, and its fallback casts every weight to an F32 copy per call, which
-	// fills GPU memory long before the GC frees them. Keep F32 weights there.
-	s16 := !*f32
-	if s16 && d.Kind() == device.KindCUDA {
-		s16 = false
-		fmt.Fprintln(os.Stderr, "note: F32 weights on CUDA (no 16-bit-weight matmul kernel yet)")
-	}
+	s16 := !*f32 // 16-bit weight storage, widened inside matmul_w16 (CPU, WebGPU, CUDA)
 	var mi struct {
 		Class string `json:"_class_name"`
 	}

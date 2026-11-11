@@ -142,11 +142,10 @@ Light already has. Sizes are BF16 safetensors.
 
 ### CUDA (desktop session)
 
-- `matmul_w16` kernel (16-bit weights, F32 compute): without it the diffusion
-  pipelines run F32 weights on CUDA (`light image` switches), so FLUX.1-dev /
-  FLUX 3 / FLUX.2 [dev] do not fit a 24 GB GPU. Strided inputs for unary ops
+- `matmul_w16` widens through a pooled F32 scratch + SGEMM (2026-11-11); a
+  fused 16-bit GEMM would save the widening pass. Strided inputs for unary ops
   (`neg_f32` refused a narrowed view; Light makes FLUX's halves contiguous).
-  Seen on the Colab L4, 2026-11-11.
+  PTX targets compute 8.0+: Colab's T4 (7.5) cannot run it, L4 / A100 / H100 can.
 
 ### WebGPU
 

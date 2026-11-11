@@ -204,6 +204,45 @@ for g in "${SEL[@]}"; do
 		fi
 		nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader
 		;;
+	examples)
+		# Example images for scratch/examples: 1024^2 generations kept in
+		# $LOGS/examples/<model>/ (run with colab run --keep, then colab download).
+		# FLUX 3 Image Klein is gated: it runs only when HF_TOKEN is set.
+		if [ ! -x "$WORK/light-bin" ]; then
+			say "build light"
+			go build -o "$WORK/light-bin" ./cmd/light || { SUMMARY+=("$g FAIL build"); continue; }
+		fi
+		gen() {
+			local model=$1 name=$2
+			shift 2
+			mkdir -p "$LOGS/examples/$model"
+			local log="$LOGS/$STAMP-$model-$name.log" t0=$SECONDS
+			say "$model/$name"
+			"$WORK/light-bin" image -device gpu "$@" -o "$LOGS/examples/$model/$name.png" 2>&1 | tee "$log" | tail -4
+			local st=${PIPESTATUS[0]}
+			local times
+			times=$(grep -oE '(loaded [^ ]+|generated) in [0-9.]+ s' "$log" | paste -sd ' ')
+			SUMMARY+=("$(printf '%-28s %s  %s  wall %ds' "$model/$name" "$([ "$st" = 0 ] && echo OK || echo FAIL)" "$times" $((SECONDS - t0)))")
+		}
+		ZI=Tongyi-MAI/Z-Image-Turbo
+		fetch $ZI
+		gen z-image-turbo reading-nook -width 1024 -height 1024 -seed 11 $ZI \
+			"A cozy reading nook by a large window on a rainy evening, warm lamp light, a ginger cat curled on a knitted blanket, shelves of old books, photorealistic"
+		gen z-image-turbo ramen-stall -width 1024 -height 1024 -seed 12 $ZI \
+			"A ramen stall in a Tokyo alley at night, steam rising from bowls, glowing paper lanterns and neon signs reflected on wet cobblestones, cinematic photograph"
+		drop $ZI
+		if [ -n "${HF_TOKEN:-}" ]; then
+			F3=black-forest-labs/flux-3-image-klein
+			fetch $F3 model_index.json modular_model_index.json 'transformer/*' 'vae/*' 'text_encoder/*'
+			gen flux-3-image-klein knitted-iceberg -width 1024 -height 1024 -seed 21 $F3 \
+				'A chunky knitted diorama: three white cable-knit icebergs with tiny pale blue houses, a cream banner embroidered "KNITTED ICEBERG VILLAGE", a giant magenta knitted whale tail bursting from a yarn sea'
+			gen flux-3-image-klein lighthouse-keeper -width 1024 -height 1024 -seed 22 $F3 \
+				"An elderly lighthouse keeper in a yellow raincoat stands on wet rocks at dusk, holding a brass lantern; behind him a white lighthouse beam cuts through sea spray, and storm clouds glow orange near the horizon. Photographic, 35mm, shallow depth of field."
+			drop $F3
+		else
+			SUMMARY+=("flux-3-image-klein          SKIP  (no HF_TOKEN for the gated repo)")
+		fi
+		;;
 	*) echo "unknown group $g" ;;
 	esac
 done
