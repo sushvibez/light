@@ -31,6 +31,9 @@ type ZImage struct {
 
 	vaeScale int
 	encDev   device.Device // the text encoder's device
+	inC      int           // the transformer's in_channels
+	dir      string
+	opts     ZImageLoadOptions
 }
 
 // ZImageLoadOptions adjust LoadZImage.
@@ -40,6 +43,11 @@ type ZImageLoadOptions struct {
 	// EncoderDevice runs the text encoder elsewhere (nil: dev). It runs
 	// once per image, so the CPU frees the GPU for the transformer.
 	EncoderDevice device.Device
+	// Sequential keeps only the tokenizer, VAE and scheduler resident:
+	// Generate loads the text encoder, encodes, frees it, then loads the
+	// transformer, denoises and frees it before decoding. Peak memory is the
+	// larger model instead of both, at the cost of loading per image.
+	Sequential bool
 }
 
 // LoadZImage loads a ZImagePipeline folder (or Hub repo) onto dev at F32.
@@ -62,21 +70,17 @@ func LoadZImage(repo string, dev device.Device, o ZImageLoadOptions) (*ZImage, e
 	if idx.Class != "ZImagePipeline" {
 		return nil, fmt.Errorf("z-image: %s is a %s, not a ZImagePipeline", repo, idx.Class)
 	}
-	p := &ZImage{Dev: dev, encDev: dev}
+	p := &ZImage{Dev: dev, encDev: dev, dir: dir, opts: o}
 	if o.EncoderDevice != nil {
 		p.encDev = o.EncoderDevice
 	}
-	load16 := func(f func() error) error {
-		if o.Storage16 {
-			return nn.WithWeightStorage16(dtype.BF16, f)
-		}
-		return f()
+	if p.inC, err = transformerInChannels(sub("transformer")); err != nil {
+		return nil, fmt.Errorf("z-image transformer: %w", err)
 	}
-	if err = load16(func() (err error) {
-		p.TextEncoder, err = models.LoadCausalLMFromHF(sub("text_encoder"), p.encDev, dtype.F32)
-		return
-	}); err != nil {
-		return nil, fmt.Errorf("z-image text_encoder: %w", err)
+	if !o.Sequential {
+		if err = p.loadEncoder(); err != nil {
+			return nil, err
+		}
 	}
 	tj := o.TokenizerJSON
 	if tj == "" {
@@ -85,11 +89,10 @@ func LoadZImage(repo string, dev device.Device, o ZImageLoadOptions) (*ZImage, e
 	if p.Tok, err = tokenizer.Load(tj); err != nil {
 		return nil, fmt.Errorf("z-image tokenizer: %w", err)
 	}
-	if err = load16(func() (err error) {
-		p.Transformer, err = models.LoadZImageTransformer(sub("transformer"), dev)
-		return
-	}); err != nil {
-		return nil, fmt.Errorf("z-image transformer: %w", err)
+	if !o.Sequential {
+		if err = p.loadTransformer(); err != nil {
+			return nil, err
+		}
 	}
 	if p.VAE, err = models.LoadFluxVAE(sub("vae"), dev); err != nil {
 		return nil, fmt.Errorf("z-image vae: %w", err)
@@ -109,6 +112,33 @@ func LoadZImage(repo string, dev device.Device, o ZImageLoadOptions) (*ZImage, e
 	}
 	p.vaeScale = 1 << (len(vc.BlockOut) - 1)
 	return p, nil
+}
+
+func (p *ZImage) load16(f func() error) error {
+	if p.opts.Storage16 {
+		return nn.WithWeightStorage16(dtype.BF16, f)
+	}
+	return f()
+}
+
+func (p *ZImage) loadEncoder() (err error) {
+	if err = p.load16(func() (err error) {
+		p.TextEncoder, err = models.LoadCausalLMFromHF(filepath.Join(p.dir, "text_encoder"), p.encDev, dtype.F32)
+		return
+	}); err != nil {
+		return fmt.Errorf("z-image text_encoder: %w", err)
+	}
+	return nil
+}
+
+func (p *ZImage) loadTransformer() (err error) {
+	if err = p.load16(func() (err error) {
+		p.Transformer, err = models.LoadZImageTransformer(filepath.Join(p.dir, "transformer"), p.Dev)
+		return
+	}); err != nil {
+		return fmt.Errorf("z-image transformer: %w", err)
+	}
+	return nil
 }
 
 // ZImageOptions control one generation.
@@ -187,6 +217,11 @@ func (p *ZImage) Generate(o ZImageOptions) (*ZImageResult, error) {
 	if o.Height == 0 {
 		o.Height = 1024
 	}
+	if p.TextEncoder == nil {
+		if err := p.loadEncoder(); err != nil {
+			return nil, err
+		}
+	}
 	cap, ids, err := p.encode(o.Prompt, o.MaxSeqLen)
 	if err != nil {
 		return nil, err
@@ -197,7 +232,16 @@ func (p *ZImage) Generate(o ZImageOptions) (*ZImageResult, error) {
 			return nil, err
 		}
 	}
-	C := p.Transformer.Cfg.InChannels
+	if p.opts.Sequential {
+		p.TextEncoder = nil
+		releaseMemory()
+	}
+	if p.Transformer == nil {
+		if err := p.loadTransformer(); err != nil {
+			return nil, err
+		}
+	}
+	C := p.inC
 	h := 2 * (o.Height / (p.vaeScale * 2))
 	w := 2 * (o.Width / (p.vaeScale * 2))
 	sigmas := p.Scheduler.Sigmas(o.Steps, (h/2)*(w/2))
@@ -267,6 +311,10 @@ func (p *ZImage) Generate(o ZImageOptions) (*ZImageResult, error) {
 		if x, err = ops.Add(x, v); err != nil {
 			return nil, err
 		}
+	}
+	if p.opts.Sequential {
+		p.Transformer = nil
+		releaseMemory()
 	}
 	z, err := x.Reshape(1, C, h, w)
 	if err != nil {

@@ -34,6 +34,9 @@ type Flux2 struct {
 
 	vaeScale int
 	encDev   device.Device // the text encoder's device
+	inC      int           // the transformer's in_channels
+	dir      string
+	opts     Flux2LoadOptions
 }
 
 // Flux2LoadOptions adjust LoadFlux2.
@@ -47,6 +50,11 @@ type Flux2LoadOptions struct {
 	// EncoderDevice runs the text encoder elsewhere (nil: dev). It runs
 	// once per image, so the CPU frees the GPU for the transformer.
 	EncoderDevice device.Device
+	// Sequential keeps only the tokenizer, VAE and scheduler resident:
+	// Generate loads the text encoder, encodes, frees it, then loads the
+	// transformer, denoises and frees it before decoding. Peak memory is the
+	// larger model instead of both, at the cost of loading per image.
+	Sequential bool
 }
 
 // LoadFlux2 loads a Flux2KleinPipeline folder (or Hub repo) onto dev at F32.
@@ -70,21 +78,17 @@ func LoadFlux2(repo string, dev device.Device, o Flux2LoadOptions) (*Flux2, erro
 	if idx.Class != "Flux2KleinPipeline" {
 		return nil, fmt.Errorf("flux2: %s is a %s, not a Flux2KleinPipeline", repo, idx.Class)
 	}
-	p := &Flux2{Distilled: idx.Distilled, Dev: dev, encDev: dev}
+	p := &Flux2{Distilled: idx.Distilled, Dev: dev, encDev: dev, dir: dir, opts: o}
 	if o.EncoderDevice != nil {
 		p.encDev = o.EncoderDevice
 	}
-	load16 := func(f func() error) error {
-		if o.Storage16 {
-			return nn.WithWeightStorage16(dtype.BF16, f)
-		}
-		return f()
+	if p.inC, err = transformerInChannels(sub("transformer")); err != nil {
+		return nil, fmt.Errorf("flux2 transformer: %w", err)
 	}
-	if err = load16(func() (err error) {
-		p.TextEncoder, err = models.LoadCausalLMFromHF(sub("text_encoder"), p.encDev, dtype.F32)
-		return
-	}); err != nil {
-		return nil, fmt.Errorf("flux2 text_encoder: %w", err)
+	if !o.Sequential {
+		if err = p.loadEncoder(); err != nil {
+			return nil, err
+		}
 	}
 	tj := o.TokenizerJSON
 	if tj == "" {
@@ -93,11 +97,10 @@ func LoadFlux2(repo string, dev device.Device, o Flux2LoadOptions) (*Flux2, erro
 	if p.Tok, err = tokenizer.Load(tj); err != nil {
 		return nil, fmt.Errorf("flux2 tokenizer: %w", err)
 	}
-	if err = load16(func() (err error) {
-		p.Transformer, err = models.LoadFlux2Transformer(sub("transformer"), dev)
-		return
-	}); err != nil {
-		return nil, fmt.Errorf("flux2 transformer: %w", err)
+	if !o.Sequential {
+		if err = p.loadTransformer(); err != nil {
+			return nil, err
+		}
 	}
 	if p.VAE, err = models.LoadFluxVAE(sub("vae"), dev); err != nil {
 		return nil, fmt.Errorf("flux2 vae: %w", err)
@@ -120,6 +123,33 @@ func LoadFlux2(repo string, dev device.Device, o Flux2LoadOptions) (*Flux2, erro
 	}
 	p.vaeScale = 1 << (len(vc.BlockOut) - 1)
 	return p, nil
+}
+
+func (p *Flux2) load16(f func() error) error {
+	if p.opts.Storage16 {
+		return nn.WithWeightStorage16(dtype.BF16, f)
+	}
+	return f()
+}
+
+func (p *Flux2) loadEncoder() (err error) {
+	if err = p.load16(func() (err error) {
+		p.TextEncoder, err = models.LoadCausalLMFromHF(filepath.Join(p.dir, "text_encoder"), p.encDev, dtype.F32)
+		return
+	}); err != nil {
+		return fmt.Errorf("flux2 text_encoder: %w", err)
+	}
+	return nil
+}
+
+func (p *Flux2) loadTransformer() (err error) {
+	if err = p.load16(func() (err error) {
+		p.Transformer, err = models.LoadFlux2Transformer(filepath.Join(p.dir, "transformer"), p.Dev)
+		return
+	}); err != nil {
+		return fmt.Errorf("flux2 transformer: %w", err)
+	}
+	return nil
 }
 
 // Flux2Options control one generation.
@@ -221,6 +251,11 @@ func (p *Flux2) Generate(o Flux2Options) (*Flux2Result, error) {
 		}
 	}
 	cfg := !p.Distilled && o.Guidance > 1
+	if p.TextEncoder == nil {
+		if err := p.loadEncoder(); err != nil {
+			return nil, err
+		}
+	}
 	embeds, ids, err := p.encode(o.Prompt, o.MaxSeqLen, o.Layers)
 	if err != nil {
 		return nil, err
@@ -231,13 +266,22 @@ func (p *Flux2) Generate(o Flux2Options) (*Flux2Result, error) {
 			return nil, err
 		}
 	}
+	if p.opts.Sequential {
+		p.TextEncoder = nil
+		releaseMemory()
+	}
+	if p.Transformer == nil {
+		if err := p.loadTransformer(); err != nil {
+			return nil, err
+		}
+	}
 	txtIDs := make([]float32, o.MaxSeqLen*4)
 	for l := range o.MaxSeqLen {
 		txtIDs[l*4+3] = float32(l)
 	}
 
 	// Latents: (1, 4C, h, w) packed to (1, h·w, 4C) row-major.
-	C4 := p.Transformer.Cfg.InChannels
+	C4 := p.inC
 	h := 2 * (o.Height / (p.vaeScale * 2)) / 2
 	w := 2 * (o.Width / (p.vaeScale * 2)) / 2
 	lat := o.Latents
@@ -321,6 +365,11 @@ func (p *Flux2) Generate(o Flux2Options) (*Flux2Result, error) {
 		}
 	}
 
+	if p.opts.Sequential {
+		p.Transformer = nil
+		releaseMemory()
+	}
+
 	// Unpack, undo the batch norm, unpatchify 2 x 2, decode.
 	u, err := x.Permute(0, 2, 1)
 	if err != nil {
@@ -380,7 +429,7 @@ func (p *Flux2) encodeReferences(imgs []image.Image) (*tensor.Tensor, []float32,
 	if p.VAE.Encoder == nil {
 		return nil, nil, 0, 0, fmt.Errorf("flux2: the VAE has no encoder weights; editing needs them")
 	}
-	C4 := p.Transformer.Cfg.InChannels
+	C4 := p.inC
 	unit := p.vaeScale * 2
 	var toks []*tensor.Tensor
 	var ids []float32

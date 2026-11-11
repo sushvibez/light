@@ -2,6 +2,7 @@ package diffusion
 
 import (
 	"encoding/json"
+	"fmt"
 	"image"
 	"image/png"
 	"math"
@@ -75,18 +76,22 @@ func TestFlux2PipelineTinyMatchesDiffusers(t *testing.T) {
 			t.Errorf("%s differs by %.3g", name, md)
 		}
 	}
-	type run struct{ dev, enc device.Device }
+	type run struct {
+		dev, enc device.Device
+		seq      bool
+	}
 	var runs []run
 	for _, d := range devs {
-		runs = append(runs, run{d, d})
+		runs = append(runs, run{d, d, false})
 	}
+	runs = append(runs, run{devs[0], devs[0], true})
 	if len(devs) > 1 {
-		runs = append(runs, run{devs[1], device.CPU()}) // GPU transformer, CPU text encoder
+		runs = append(runs, run{devs[1], device.CPU(), true}) // GPU transformer, CPU text encoder, loaded in turn
 	}
 	for _, r := range runs {
 		dev := r.dev
-		t.Run(dev.String()+"/encoder-"+r.enc.String(), func(t *testing.T) {
-			p, err := LoadFlux2("testdata/flux2-tiny-pipe", dev, Flux2LoadOptions{TokenizerJSON: tj, EncoderDevice: r.enc})
+		t.Run(fmt.Sprintf("%v/encoder-%v/seq=%v", dev, r.enc, r.seq), func(t *testing.T) {
+			p, err := LoadFlux2("testdata/flux2-tiny-pipe", dev, Flux2LoadOptions{TokenizerJSON: tj, EncoderDevice: r.enc, Sequential: r.seq})
 			if err != nil {
 				t.Fatal(err)
 			}

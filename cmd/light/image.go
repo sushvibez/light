@@ -32,6 +32,7 @@ func cmdImage(args []string) error {
 	seed := fs.Uint64("seed", 0, "noise seed")
 	f32 := fs.Bool("f32", false, "keep F32 weights (default: 16-bit weight storage, F32 compute)")
 	encDev := fs.String("encoder-device", "", "text encoder device for FLUX.2 klein / Z-Image (default: cpu with webgpu, which shares system memory; else -device)")
+	keep := fs.Bool("keep-loaded", false, "FLUX.2 klein / Z-Image: hold the text encoder and transformer together (default: load them in turn, halving peak memory)")
 	cpuprof := fs.String("cpuprofile", "", "write a CPU profile (pprof) of the run to this file")
 	strength := fs.Float64("strength", 0.6, "image-to-image: the fraction of the schedule that runs (1 = ignore the image)")
 	var refs stringList
@@ -101,7 +102,7 @@ func cmdImage(args []string) error {
 	var img diffusion.Image
 	switch mi.Class {
 	case "Flux2KleinPipeline":
-		p, err := diffusion.LoadFlux2(repo, d, diffusion.Flux2LoadOptions{Storage16: !*f32, EncoderDevice: ed})
+		p, err := diffusion.LoadFlux2(repo, d, diffusion.Flux2LoadOptions{Storage16: !*f32, EncoderDevice: ed, Sequential: !*keep})
 		if err != nil {
 			return err
 		}
@@ -127,7 +128,7 @@ func cmdImage(args []string) error {
 		if err != nil {
 			return err
 		}
-		p, err := diffusion.LoadZImage(repo, d, diffusion.ZImageLoadOptions{Storage16: !*f32, EncoderDevice: ed})
+		p, err := diffusion.LoadZImage(repo, d, diffusion.ZImageLoadOptions{Storage16: !*f32, EncoderDevice: ed, Sequential: !*keep})
 		if err != nil {
 			return err
 		}
