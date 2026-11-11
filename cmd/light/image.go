@@ -53,6 +53,14 @@ func cmdImage(args []string) error {
 	if err != nil {
 		return err
 	}
+	// 16-bit weight storage widens inside a matmul_w16 kernel; CUDA has none
+	// yet, and its fallback casts every weight to an F32 copy per call, which
+	// fills GPU memory long before the GC frees them. Keep F32 weights there.
+	s16 := !*f32
+	if s16 && d.Kind() == device.KindCUDA {
+		s16 = false
+		fmt.Fprintln(os.Stderr, "note: F32 weights on CUDA (no 16-bit-weight matmul kernel yet)")
+	}
 	var mi struct {
 		Class string `json:"_class_name"`
 	}
@@ -107,7 +115,7 @@ func cmdImage(args []string) error {
 	var img diffusion.Image
 	switch mi.Class {
 	case "Flux2KleinPipeline", "Flux2Pipeline":
-		p, err := diffusion.LoadFlux2(repo, d, diffusion.Flux2LoadOptions{Storage16: !*f32, EncoderDevice: ed, Sequential: !*keep})
+		p, err := diffusion.LoadFlux2(repo, d, diffusion.Flux2LoadOptions{Storage16: s16, EncoderDevice: ed, Sequential: !*keep})
 		if err != nil {
 			return err
 		}
@@ -133,7 +141,7 @@ func cmdImage(args []string) error {
 		if err != nil {
 			return err
 		}
-		p, err := diffusion.LoadZImage(repo, d, diffusion.ZImageLoadOptions{Storage16: !*f32, EncoderDevice: ed, Sequential: !*keep})
+		p, err := diffusion.LoadZImage(repo, d, diffusion.ZImageLoadOptions{Storage16: s16, EncoderDevice: ed, Sequential: !*keep})
 		if err != nil {
 			return err
 		}
@@ -175,7 +183,7 @@ func cmdImage(args []string) error {
 			}
 			imgs = append(imgs, im)
 		}
-		p, err := diffusion.LoadFlux3(repo, d, diffusion.Flux3LoadOptions{Storage16: !*f32, EncoderDevice: ed, Sequential: !*keep})
+		p, err := diffusion.LoadFlux3(repo, d, diffusion.Flux3LoadOptions{Storage16: s16, EncoderDevice: ed, Sequential: !*keep})
 		if err != nil {
 			return err
 		}

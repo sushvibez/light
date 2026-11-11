@@ -140,6 +140,14 @@ Light already has. Sizes are BF16 safetensors.
 
 ## 4. Backends
 
+### CUDA (desktop session)
+
+- `matmul_w16` kernel (16-bit weights, F32 compute): without it the diffusion
+  pipelines run F32 weights on CUDA (`light image` switches), so FLUX.1-dev /
+  FLUX 3 / FLUX.2 [dev] do not fit a 24 GB GPU. Strided inputs for unary ops
+  (`neg_f32` refused a narrowed view; Light makes FLUX's halves contiguous).
+  Seen on the Colab L4, 2026-11-11.
+
 ### WebGPU
 
 - Opt-in load-time Q8_0 (`-dtype q8_0`) for models whose 16-bit weights
