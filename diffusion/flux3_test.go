@@ -3,6 +3,8 @@ package diffusion
 import (
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/png"
 	"math"
 	"os"
 	"slices"
@@ -36,6 +38,14 @@ func TestFlux3PipelineTinyMatchesDiffusers(t *testing.T) {
 		Latents      []float32 `json:"latents"`
 		LatentsShape []int     `json:"latents_shape"`
 		Image        []float32 `json:"image"`
+		Edit1Lat     []float32 `json:"edit1_latents"`
+		Edit1LatSh   []int     `json:"edit1_latents_shape"`
+		Edit1        []float32 `json:"edit1"`
+		Edit1Sh      []int     `json:"edit1_shape"`
+		Edit2Lat     []float32 `json:"edit2_latents"`
+		Edit2LatSh   []int     `json:"edit2_latents_shape"`
+		Edit2        []float32 `json:"edit2"`
+		Edit2Sh      []int     `json:"edit2_shape"`
 	}
 	if err := json.Unmarshal(raw, &ref); err != nil {
 		t.Fatal(err)
@@ -108,6 +118,39 @@ func TestFlux3PipelineTinyMatchesDiffusers(t *testing.T) {
 			}
 			cmp(t, "prompt embeds", res.PromptEmbeds, ref.Embeds, 1e-5)
 			cmp(t, "image", res.Image, ref.Image, 1e-4)
+
+			refs := make([]image.Image, 3)
+			for i := range refs {
+				f, err := os.Open(fmt.Sprintf("testdata/flux3-tiny-pipe/ref%d.png", i))
+				if err != nil {
+					t.Fatal(err)
+				}
+				refs[i], err = png.Decode(f)
+				f.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, c := range []struct {
+				name        string
+				imgs        []image.Image
+				lat, want   []float32
+				latSh, shap []int
+			}{{"edit, one reference (fill)", refs[:1], ref.Edit1Lat, ref.Edit1, ref.Edit1LatSh, ref.Edit1Sh},
+				{"edit, two references (crop)", refs[1:], ref.Edit2Lat, ref.Edit2, ref.Edit2LatSh, ref.Edit2Sh}} {
+				lat, err := tensor.New(c.lat, c.latSh, dev)
+				if err != nil {
+					t.Fatal(err)
+				}
+				res, err := p.Generate(Flux3Options{Prompt: ref.Prompt, Steps: ref.Steps, Layers: ref.Layers, Latents: lat, Images: c.imgs})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !slices.Equal(res.Image.Shape().Dims(), c.shap) {
+					t.Fatalf("%s: image %v, want %v", c.name, res.Image.Shape(), c.shap)
+				}
+				cmp(t, c.name, res.Image, c.want, 1e-4)
+			}
 		})
 	}
 }

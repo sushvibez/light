@@ -36,7 +36,7 @@ func cmdImage(args []string) error {
 	cpuprof := fs.String("cpuprofile", "", "write a CPU profile (pprof) of the run to this file")
 	strength := fs.Float64("strength", 0.6, "image-to-image: the fraction of the schedule that runs (1 = ignore the image)")
 	var refs stringList
-	fs.Var(&refs, "image", "FLUX.2 klein: reference image for editing (repeatable); Z-Image / FLUX.1: init image for image-to-image. The output size defaults to the (first) image's")
+	fs.Var(&refs, "image", "FLUX.2 klein / FLUX 3: reference image for editing (repeatable); Z-Image / FLUX.1 / SD 1.5: init image for image-to-image. The output size defaults to the (first) image's")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: light image [flags] <org/repo> <prompt>\n\nPipelines: Flux2KleinPipeline (FLUX.2 klein, text-to-image and editing), ZImagePipeline (Z-Image / Turbo), FluxPipeline (FLUX.1), StableDiffusionPipeline (SD 1.5, DDIM), FLUX 3 Image Klein (modular; give a full scene caption).\n\nflags:")
 		fs.PrintDefaults()
@@ -167,8 +167,13 @@ func cmdImage(args []string) error {
 		}
 		img = diffusion.Image{Pixels: res.Image}
 	case "Flux3ModularPipeline":
-		if len(refs) > 0 {
-			return fmt.Errorf("%s: reference images are not supported for FLUX 3 yet", repo)
+		var imgs []image.Image
+		for _, r := range refs {
+			im, err := engine.LoadImage(r)
+			if err != nil {
+				return err
+			}
+			imgs = append(imgs, im)
 		}
 		p, err := diffusion.LoadFlux3(repo, d, diffusion.Flux3LoadOptions{Storage16: !*f32, EncoderDevice: ed, Sequential: !*keep})
 		if err != nil {
@@ -176,7 +181,7 @@ func cmdImage(args []string) error {
 		}
 		fmt.Fprintf(os.Stderr, "loaded %s in %.1f s\n", repo, time.Since(t0).Seconds())
 		t1 := time.Now()
-		res, err := p.Generate(diffusion.Flux3Options{Prompt: prompt, Width: *width, Height: *height, Steps: *steps, Seed: *seed})
+		res, err := p.Generate(diffusion.Flux3Options{Prompt: prompt, Width: *width, Height: *height, Steps: *steps, Seed: *seed, Images: imgs})
 		if err != nil {
 			return err
 		}

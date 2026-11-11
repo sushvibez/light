@@ -96,7 +96,7 @@ status are in the commits (and, up to 2026-11-09, the
 | **Stable Diffusion 1.5** | `models/sd*.go` | Done — pretrained | CLIP + UNet + VAE + DDIM; text-to-image and img2img match diffusers within 2e-4 (CPU, LIGHT_HEAVY_TESTS). `light image`; BF16 on RTX 5060 Ti |
 | **Flux (FLUX.1 schnell / dev)** | `models/flux.go`, `diffusion/flux.go` | ✅ Tiny-verified 2026-11-09 | MMDiT + T5 + CLIP pooled + flow-match Euler + 16-ch VAE; diffusers' FluxPipeline within 3.3e-6, FluxImg2ImgPipeline within 6.4e-6 (CPU, WebGPU). Real 12B weights not run yet |
 | **FLUX.2 klein** | `models/flux2.go`, `diffusion/flux2.go` | ✅ Tiny-verified 2026-11-09 | Qwen3 encoder + FLUX.2 DiT; text-to-image within 7.4e-6, multi-reference editing within 8.9e-6 (CPU, WebGPU) |
-| **FLUX 3 Image Klein** | `models/flux3.go`, `diffusion/flux3.go` | ✅ Tiny-verified 2026-11-11 | Per-mode + joint DiT, flow-map sampler, Qwen3-VL text (stacked layers, padded window), FLUX.2 VAE; transformer within 2.8e-6 (incl. references), text-to-image pipeline within 2.6e-6 (CPU, WebGPU). Real weights gated (license); editing not wired |
+| **FLUX 3 Image Klein** | `models/flux3.go`, `diffusion/flux3.go` | ✅ Tiny-verified 2026-11-11 | Per-mode + joint DiT, flow-map sampler, Qwen3-VL text (stacked layers, padded window), FLUX.2 VAE; transformer within 2.8e-6 (incl. references), text-to-image within 2.6e-6, editing (1 reference padded, several cropped) within 3e-6 (CPU, WebGPU). Real weights not run yet |
 | **Z-Image (Turbo)** | `models/zimage.go`, `diffusion/zimage.go` | ✅ Tiny-verified 2026-11-09 | Qwen3 encoder + S3-DiT; ZImagePipeline within 4.6e-5, img2img within 6.9e-5 (CPU, WebGPU) |
 
 ### 1.4 Vision (classification and detection)

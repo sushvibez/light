@@ -3,6 +3,7 @@ package diffusion
 import (
 	"encoding/json"
 	"fmt"
+	"image"
 	"math"
 	"math/rand/v2"
 	"os"
@@ -144,6 +145,9 @@ type Flux3Options struct {
 	Layers        []int // Qwen3-VL hidden states, default 4, 8, …, 32
 	Seed          uint64
 	Latents       *tensor.Tensor // (1, in_channels, H/16, W/16) initial noise, to match a reference run
+	// Images are reference images for editing (up to 10). One is kept whole:
+	// the output defaults to its padded canvas and is cropped back to it.
+	Images []image.Image
 }
 
 // Flux3Result is a generated image and what produced it.
@@ -231,11 +235,24 @@ func (p *Flux3) Generate(o Flux3Options) (*Flux3Result, error) {
 	if o.Layers == nil {
 		o.Layers = []int{4, 8, 12, 16, 20, 24, 28, 32}
 	}
+	refs, refIDs, rw, rh, box, err := p.encodeReferences(o.Images)
+	if err != nil {
+		return nil, err
+	}
+	if o.Width != 0 || o.Height != 0 {
+		box = nil // an explicit size is not cropped back
+	}
 	if o.Width == 0 {
 		o.Width = 1024
+		if rw > 0 {
+			o.Width = rw
+		}
 	}
 	if o.Height == 0 {
 		o.Height = 1024
+		if rh > 0 {
+			o.Height = rh
+		}
 	}
 	unit := p.vaeScale * 2
 	if o.Width%unit != 0 || o.Height%unit != 0 {
@@ -301,7 +318,7 @@ func (p *Flux3) Generate(o Flux3Options) (*Flux3Result, error) {
 	for i := range o.Steps {
 		v, err := p.Transformer.Forward(models.Flux3Inputs{Image: x, Text: embeds,
 			Timestep: []float32{tm(sigmas[i])}, TargetTimestep: []float32{tm(sigmas[i+1])},
-			ImgIDs: imgIDs, TxtIDs: txtIDs})
+			ImgIDs: imgIDs, TxtIDs: txtIDs, Cond: refs, CondIDs: refIDs})
 		if err != nil {
 			return nil, fmt.Errorf("flux3 step %d: %w", i, err)
 		}
@@ -320,6 +337,17 @@ func (p *Flux3) Generate(o Flux3Options) (*Flux3Result, error) {
 	img, err := p.decode(x, C4, h, w)
 	if err != nil {
 		return nil, err
+	}
+	if box != nil { // crop back to the single reference's own box
+		if img, err = img.Narrow(2, box[1], box[3]-box[1]); err != nil {
+			return nil, err
+		}
+		if img, err = img.Narrow(3, box[0], box[2]-box[0]); err != nil {
+			return nil, err
+		}
+		if img, err = img.Contiguous(); err != nil {
+			return nil, err
+		}
 	}
 	return &Flux3Result{Image: img, PromptEmbeds: embeds, IDs: ids, Sigmas: sigmas}, nil
 }
@@ -375,4 +403,165 @@ func (p *Flux3) decode(x *tensor.Tensor, C4, h, w int) (*tensor.Tensor, error) {
 		return nil, err
 	}
 	return toUnitRange(img)
+}
+
+// flux3Grid is the reference image grid (Flux3ImageProcessor's
+// vae_scale_factor: the pipeline builds it from its default config).
+const flux3Grid = 16
+
+// flux3Ref is one preprocessed reference: CHW pixels in [-1, 1].
+type flux3Ref struct {
+	px   []float32
+	w, h int
+}
+
+// flux3PrepareRefs is Flux3ImageProcessor.preprocess: one reference is
+// kept whole ("fill": downscaled only if its 16-grid canvas exceeds 4 MP,
+// then reflect-padded to the canvas, with the box it occupies returned);
+// several are each downscaled to at most 1 MP and center-cropped to the
+// grid ("crop"). The downscales are Lanczos in diffusers and bicubic here,
+// so a reference over those caps is not bit-exact.
+func flux3PrepareRefs(imgs []image.Image) ([]flux3Ref, *[4]int) {
+	toPx := func(rgb []uint8, w, h int) []float32 {
+		px := make([]float32, 3*h*w)
+		for c := range 3 {
+			for i := range h * w {
+				px[c*h*w+i] = float32(rgb[i*3+c])/255*2 - 1
+			}
+		}
+		return px
+	}
+	canvas := func(side int) int { return min(4096, max(64, (side+flux3Grid-1)/flux3Grid*flux3Grid)) }
+	var out []flux3Ref
+	if len(imgs) == 1 {
+		rgb, w, h := models.ImageRGB(imgs[0])
+		scale := math.Min(1, math.Min(math.Sqrt(4*1024*1024/float64(w*h)), 4096/float64(max(w, h))))
+		nw, nh := w, h
+		for {
+			nh, nw = max(1, int(math.Round(float64(h)*scale))), max(1, int(math.Round(float64(w)*scale)))
+			if canvas(nh)*canvas(nw) <= 4*1024*1024 {
+				break
+			}
+			scale *= 0.995
+		}
+		if nw != w || nh != h {
+			rgb, w, h = models.ResizeRGB(rgb, w, h, nw, nh), nw, nh
+		}
+		cw, ch := canvas(w), canvas(h)
+		left, top := (cw-w)/2, (ch-h)/2
+		// numpy.pad: "reflect" excludes the edge pixel; "symmetric" (images
+		// smaller than one grid cell) repeats it.
+		symmetric := min(w, h) <= flux3Grid
+		fold := func(i, n int) int {
+			if n == 1 {
+				return 0
+			}
+			for i < 0 || i >= n {
+				if symmetric {
+					if i < 0 {
+						i = -i - 1
+					} else {
+						i = 2*n - 1 - i
+					}
+				} else if i < 0 {
+					i = -i
+				} else {
+					i = 2*(n-1) - i
+				}
+			}
+			return i
+		}
+		pad := make([]uint8, cw*ch*3)
+		for y := range ch {
+			sy := fold(y-top, h)
+			for x := range cw {
+				sx := fold(x-left, w)
+				copy(pad[(y*cw+x)*3:(y*cw+x)*3+3], rgb[(sy*w+sx)*3:(sy*w+sx)*3+3])
+			}
+		}
+		box := [4]int{left, top, left + w, top + h}
+		return []flux3Ref{{toPx(pad, cw, ch), cw, ch}}, &box
+	}
+	for _, img := range imgs {
+		rgb, w, h := models.ImageRGB(img)
+		if w*h > 1024*1024 {
+			s := math.Sqrt(1024 * 1024 / float64(w*h))
+			nw, nh := int(float64(w)*s), int(float64(h)*s)
+			rgb, w, h = models.ResizeRGB(rgb, w, h, nw, nh), nw, nh
+		}
+		cw, ch := w-w%flux3Grid, h-h%flux3Grid
+		left, top := (w-cw)/2, (h-ch)/2
+		crop := make([]uint8, cw*ch*3)
+		for y := range ch {
+			copy(crop[y*cw*3:(y+1)*cw*3], rgb[((y+top)*w+left)*3:((y+top)*w+left+cw)*3])
+		}
+		out = append(out, flux3Ref{toPx(crop, cw, ch), cw, ch})
+	}
+	return out, nil
+}
+
+// encodeReferences VAE-encodes the references to batch-normalised packed
+// tokens (1, Σ tokens, C4) with ids (0, row·0.5, col·0.5, −(1+i)); it also
+// returns the first reference's canvas size and, for one reference, the
+// box of the image inside it.
+func (p *Flux3) encodeReferences(imgs []image.Image) (*tensor.Tensor, []float32, int, int, *[4]int, error) {
+	if len(imgs) == 0 {
+		return nil, nil, 0, 0, nil, nil
+	}
+	if p.VAE.Encoder == nil {
+		return nil, nil, 0, 0, nil, fmt.Errorf("flux3: the VAE has no encoder weights; editing needs them")
+	}
+	refs, box := flux3PrepareRefs(imgs)
+	C4 := p.inC
+	var toks []*tensor.Tensor
+	var ids []float32
+	for i, r := range refs {
+		x, err := tensor.New(r.px, []int{1, 3, r.h, r.w}, p.Dev)
+		if err != nil {
+			return nil, nil, 0, 0, nil, err
+		}
+		z, err := p.VAE.Encoder.Mode(x)
+		if err != nil {
+			return nil, nil, 0, 0, nil, err
+		}
+		C, zh, zw := z.Dim(1), z.Dim(2), z.Dim(3)
+		if z, err = z.Reshape(1, C, zh/2, 2, zw/2, 2); err != nil {
+			return nil, nil, 0, 0, nil, err
+		}
+		if z, err = z.Permute(0, 1, 3, 5, 2, 4); err != nil {
+			return nil, nil, 0, 0, nil, err
+		}
+		if z, err = z.Contiguous(); err != nil {
+			return nil, nil, 0, 0, nil, err
+		}
+		ph, pw := zh/2, zw/2
+		if z, err = z.Reshape(1, C4, ph, pw); err != nil {
+			return nil, nil, 0, 0, nil, err
+		}
+		mean, _ := tensor.New(p.VAE.BNMean, []int{1, C4, 1, 1}, p.Dev)
+		std, _ := tensor.New(p.VAE.BNStd, []int{1, C4, 1, 1}, p.Dev)
+		if z, err = ops.Sub(z, mean); err != nil {
+			return nil, nil, 0, 0, nil, err
+		}
+		if z, err = ops.Div(z, std); err != nil {
+			return nil, nil, 0, 0, nil, err
+		}
+		if z, err = z.Reshape(1, C4, ph*pw); err != nil {
+			return nil, nil, 0, 0, nil, err
+		}
+		if z, err = transposeTokens(z); err != nil {
+			return nil, nil, 0, 0, nil, err
+		}
+		toks = append(toks, z)
+		for r := range ph {
+			for c := range pw {
+				ids = append(ids, 0, float32(r)*0.5, float32(c)*0.5, float32(-(1 + i)))
+			}
+		}
+	}
+	all, err := ops.Concat(toks, 1)
+	if err != nil {
+		return nil, nil, 0, 0, nil, err
+	}
+	return all, ids, refs[0].w, refs[0].h, box, nil
 }
