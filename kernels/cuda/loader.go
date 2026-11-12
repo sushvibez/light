@@ -74,6 +74,9 @@ var int4PTX []byte
 //go:embed ptx/kv_ring.ptx
 var kvRingPTX []byte
 
+//go:embed ptx/decode_attn.ptx
+var decodeAttnPTX []byte
+
 type lazyModule struct {
 	name string
 	data []byte
@@ -127,6 +130,7 @@ var modules = []*lazyModule{
 	{name: "fp8_block", data: fp8BlockPTX},
 	{name: "int4", data: int4PTX},
 	{name: "kv_ring", data: kvRingPTX},
+	{name: "decode_attn", data: decodeAttnPTX},
 }
 
 var (

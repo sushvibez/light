@@ -294,11 +294,16 @@ func (m *Qwen35) ForwardWithCache(tokens *tensor.Tensor, cache *KVCache) (*tenso
 // forwardHidden runs the decoder on input embeddings h (B, T, D).
 func (m *Qwen35) forwardHidden(h *tensor.Tensor, B, T, prior int, dev device.Device, cache *KVCache) (*tensor.Tensor, error) {
 	var err error
-	posData := make([]int64, T)
-	for i := range posData {
-		posData[i] = int64(prior + i)
+	var pos *tensor.Tensor
+	if cache != nil && T == 1 {
+		pos, err = cache.position(dev) // the device-side position, kept in step with Len
+	} else {
+		posData := make([]int64, T)
+		for i := range posData {
+			posData[i] = int64(prior + i)
+		}
+		pos, err = tensor.New(posData, []int{T}, dev)
 	}
-	pos, err := tensor.New(posData, []int{T}, dev)
 	if err != nil {
 		return nil, err
 	}
@@ -312,7 +317,9 @@ func (m *Qwen35) forwardHidden(h *tensor.Tensor, B, T, prior int, dev device.Dev
 		return nil, err
 	}
 	if cache != nil {
-		cache.Len = prior + T
+		if err := cache.advance(T); err != nil {
+			return nil, err
+		}
 	}
 	logits, err := m.LMHead.Forward(h)
 	if err != nil {
@@ -425,67 +432,76 @@ func (m *Qwen35) attention(blk *qwen35Block, h *tensor.Tensor, B, T, prior int, 
 		return nil, err
 	}
 	kvPrior, totalT := 0, T
-	if cache != nil {
-		// Fixed-capacity cache: in-place append, strided views (see
-		// KVCache.appendKV).
-		if cache.K[layer] != nil {
-			kvPrior = cache.K[layer].Dim(2)
-		}
-		if k, v, err = cache.appendKV(layer, k, v); err != nil {
+	var ctx *tensor.Tensor // (B, NH, T, HD)
+	if cache != nil && T == 1 {
+		// Decode step: append and attend with the position read on the
+		// device, the same launches at every position.
+		if ctx, err = cache.decodeAttend(layer, q, k, v, pos, m.attnScaleVal); err != nil {
 			return nil, err
 		}
-		totalT = kvPrior + T
-	}
-	// GQA folded into the row axis (see Llama's attention): one batched
-	// matmul per KV head serves its g query heads, no repeated K / V.
-	g := NH / KH
-	if q, err = autograd.Reshape(q, B*KH, g*T, HD); err != nil {
-		return nil, err
-	}
-	if k, err = foldBatchHeads(k); err != nil {
-		return nil, err
-	}
-	if v, err = foldBatchHeads(v); err != nil {
-		return nil, err
-	}
-	kT, err := autograd.Transpose(k, 1, 2)
-	if err != nil {
-		return nil, err
-	}
-	if dev.Kind() != device.KindCUDA { // CUDA's batched GEMM reads the view in place
-		if kT, err = autograd.Contiguous(kT); err != nil {
+	} else {
+		if cache != nil {
+			// Fixed-capacity cache: in-place append, strided views (see
+			// KVCache.appendKV).
+			if cache.K[layer] != nil {
+				kvPrior = cache.K[layer].Dim(2)
+			}
+			if k, v, err = cache.appendKV(layer, k, v); err != nil {
+				return nil, err
+			}
+			totalT = kvPrior + T
+		}
+		// GQA folded into the row axis (see Llama's attention): one batched
+		// matmul per KV head serves its g query heads, no repeated K / V.
+		g := NH / KH
+		if q, err = autograd.Reshape(q, B*KH, g*T, HD); err != nil {
 			return nil, err
 		}
-	}
-	scores, err := autograd.MatMul(q, kT) // (B*KH, g*T, totalT) == (B*NH, T, totalT)
-	if err != nil {
-		return nil, err
-	}
-	if scores, err = autograd.Reshape(scores, B*NH, T, totalT); err != nil {
-		return nil, err
-	}
-	if scores, err = ops.Affine(scores, m.attnScaleVal, 0); err != nil {
-		return nil, err
-	}
-	if T > 1 {
-		mask, err := m.causalMask(T, kvPrior, scores.DType(), dev)
+		if k, err = foldBatchHeads(k); err != nil {
+			return nil, err
+		}
+		if v, err = foldBatchHeads(v); err != nil {
+			return nil, err
+		}
+		kT, err := autograd.Transpose(k, 1, 2)
 		if err != nil {
 			return nil, err
 		}
-		if scores, err = ops.Add(scores, mask); err != nil {
+		if dev.Kind() != device.KindCUDA { // CUDA's batched GEMM reads the view in place
+			if kT, err = autograd.Contiguous(kT); err != nil {
+				return nil, err
+			}
+		}
+		scores, err := autograd.MatMul(q, kT) // (B*KH, g*T, totalT) == (B*NH, T, totalT)
+		if err != nil {
 			return nil, err
 		}
-	}
-	attn, err := ops.Softmax(scores, -1)
-	if err != nil {
-		return nil, err
-	}
-	if attn, err = autograd.Reshape(attn, B*KH, g*T, totalT); err != nil {
-		return nil, err
-	}
-	ctx, err := autograd.MatMul(attn, v) // (B*KH, g*T, HD) == (B*NH, T, HD)
-	if err != nil {
-		return nil, err
+		if scores, err = autograd.Reshape(scores, B*NH, T, totalT); err != nil {
+			return nil, err
+		}
+		if scores, err = ops.Affine(scores, m.attnScaleVal, 0); err != nil {
+			return nil, err
+		}
+		if T > 1 {
+			mask, err := m.causalMask(T, kvPrior, scores.DType(), dev)
+			if err != nil {
+				return nil, err
+			}
+			if scores, err = ops.Add(scores, mask); err != nil {
+				return nil, err
+			}
+		}
+		attn, err := ops.Softmax(scores, -1)
+		if err != nil {
+			return nil, err
+		}
+		if attn, err = autograd.Reshape(attn, B*KH, g*T, totalT); err != nil {
+			return nil, err
+		}
+		ctx, err = autograd.MatMul(attn, v) // (B*KH, g*T, HD) == (B*NH, T, HD)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if ctx, err = autograd.Reshape(ctx, B, NH, T, HD); err != nil {
 		return nil, err
@@ -570,7 +586,11 @@ func (m *Qwen35) deltaNet(blk *qwen35Block, h *tensor.Tensor, B, T int, cache *K
 		return nil, err
 	}
 	if cache != nil {
-		cache.Conv[layer], cache.Rec[layer] = convState, recState
+		// One token: the new state is copied into the buffer held, so its
+		// address is stable across decode steps.
+		if err := cache.keepState(layer, convState, recState, T == 1); err != nil {
+			return nil, err
+		}
 	}
 	// Gated RMSNorm over dv per head: norm(o) · w · silu(z), back at the
 	// activation dtype.
@@ -671,6 +691,16 @@ func transposeContig(x *tensor.Tensor, i, j int) (*tensor.Tensor, error) {
 }
 
 var _ CausalLM = (*Qwen35)(nil)
+
+// DecodeGraphOK: the text decode step reads its position on the device
+// at every layer (full attention and DeltaNet alike); only the
+// multimodal forward, with its per-token mRoPE tables, does not.
+func (m *Qwen35) DecodeGraphOK() error {
+	if m.mrope != nil {
+		return fmt.Errorf("multimodal rope tables in use")
+	}
+	return nil
+}
 
 // attnScaleFor is 1/√hd as the attention applies it: rounded to BF16 when
 // the scores are BF16, as the (1,) scale tensor it replaced was.

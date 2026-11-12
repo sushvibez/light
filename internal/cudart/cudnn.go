@@ -22,6 +22,7 @@ import (
 // first kernel call), so creating one per launch would dominate runtime.
 type DnnHandle struct {
 	handle C.cudnnHandle_t
+	stream uintptr
 }
 
 var dnnHandleMu sync.Mutex
@@ -33,7 +34,7 @@ func GetDnnHandle(ordinal int) (*DnnHandle, error) {
 	dnnHandleMu.Lock()
 	defer dnnHandleMu.Unlock()
 	if dh, ok := dnnHandleByOrd[ordinal]; ok {
-		return dh, nil
+		return dh, dh.useStream(current.Load())
 	}
 	if err := SetDevice(ordinal); err != nil {
 		return nil, err
@@ -44,7 +45,20 @@ func GetDnnHandle(ordinal int) (*DnnHandle, error) {
 	}
 	dh := &DnnHandle{handle: h}
 	dnnHandleByOrd[ordinal] = dh
-	return dh, nil
+	return dh, dh.useStream(current.Load())
+}
+
+// useStream points the handle at s (the package's current stream) when
+// that changed since the last call, so convolutions order with the rest.
+func (dh *DnnHandle) useStream(s uintptr) error {
+	if dh.stream == s {
+		return nil
+	}
+	if rc := C.cudnnSetStream(dh.handle, C.cudaStream_t(unsafe.Pointer(s))); rc != C.CUDNN_STATUS_SUCCESS {
+		return fmt.Errorf("cudnnSetStream: status %d (%s)", int(rc), C.GoString(C.cudnnGetErrorString(rc)))
+	}
+	dh.stream = s
+	return nil
 }
 
 // DnnDType is the subset of cudnnDataType_t we need.

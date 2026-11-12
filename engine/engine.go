@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -88,6 +89,8 @@ type Stats struct {
 }
 
 // ErrBusy is returned when a generation is already running on the model.
+var graphFallbackOnce sync.Once
+
 var ErrBusy = errors.New("engine: model is busy")
 
 func pickDevice(name string) (device.Device, error) {
@@ -429,6 +432,27 @@ func (m *Model) Generate(ctx context.Context, msgs []Message, opts GenOpts, onTo
 	if !device.IsCPU(m.Dev) {
 		runtime.GC() // the prefill's activations and full-sequence logits
 	}
+	// Decode as a CUDA graph when the model's single-token step captures:
+	// one upload and one launch per token. Anything that does not capture
+	// (a per-token host round trip, a model without the device-side
+	// position path) decodes eagerly, logged once.
+	var graph *models.DecodeGraph
+	if !images && device.IsCUDA(m.Dev) && os.Getenv("LIGHT_CUDA_GRAPHS") != "0" {
+		g, err := models.NewDecodeGraph(m.LM, cache, m.Dev, len(prompt)+opts.MaxTokens)
+		if err != nil {
+			graphFallbackOnce.Do(func() { log.Printf("engine: decoding eagerly: %v", err) })
+		} else {
+			graph = g
+			defer graph.Close()
+			eager := forward
+			forward = func(tokens []int64) (*tensor.Tensor, error) {
+				if len(tokens) != 1 {
+					return eager(tokens)
+				}
+				return graph.Step(tokens[0])
+			}
+		}
+	}
 
 	var gen []int32
 	var out strings.Builder
@@ -459,11 +483,16 @@ func (m *Model) Generate(ctx context.Context, msgs []Message, opts GenOpts, onTo
 		if err != nil {
 			return out.String(), st, fmt.Errorf("decode step %d: %w", step, err)
 		}
-		if step%8 == 7 {
-			runtime.GC() // release device buffers of finished steps
+		if gcEvery := 8; step%gcEvery == gcEvery-1 && graph == nil || graph != nil && step%64 == 63 {
+			runtime.GC() // release device buffers of finished steps (a graph step allocates only the sampler's output)
 		}
 	}
 	flush(true)
+	if graph != nil {
+		if err := m.sync(); err != nil { // the last step's work, before Close releases its buffers
+			return out.String(), st, err
+		}
+	}
 	st.DecodeMS = float64(time.Since(t1).Microseconds()) / 1000
 	if st.DecodeMS > 0 {
 		st.TokPerSec = float64(st.Tokens) / (st.DecodeMS / 1000)

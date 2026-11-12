@@ -1,6 +1,7 @@
 package models
 
 import (
+	"errors"
 	"fmt"
 	"math"
 
@@ -373,6 +374,19 @@ type KVCache struct {
 	// kBuf / vBuf back K / V with spare capacity along the sequence axis
 	// (see appendKV). Reset keeps them so the next prompt reuses the memory.
 	kBuf, vBuf []*tensor.Tensor
+	// pos mirrors Len on the device as an I64 (1,) tensor for the decode
+	// step (position for RoPE, the KV append slot and the attention length
+	// all read it there), so a step issues the same launches at every
+	// position and can be captured into a CUDA graph. posSynced says the
+	// device value equals Len; prefill, Truncate and Reset clear it and
+	// position() re-uploads on demand.
+	pos       *tensor.Tensor
+	posSynced bool
+	// capturing is set while a DecodeGraph records the step: paths that
+	// bake host-side sizes into their launches (concat growth, trims,
+	// masks built on the host) must refuse rather than record something
+	// that replays wrong.
+	capturing bool
 	// ring marks K / V as fixed-size ring buffers (Moshi's one-frame decode
 	// path) rather than position-ordered concatenations.
 	ring bool
@@ -401,41 +415,10 @@ const kvCapacityStep = 256
 // tensor into the capacity buffer; the views keep the buffer's strides, so
 // attention folds them with foldBatchHeads and reads them in place.
 func (c *KVCache) appendKV(layer int, k, v *tensor.Tensor) (*tensor.Tensor, *tensor.Tensor, error) {
-	if len(c.kBuf) != len(c.K) { // cache built by hand, not NewKVCache
-		c.kBuf = make([]*tensor.Tensor, len(c.K))
-		c.vBuf = make([]*tensor.Tensor, len(c.K))
-	}
-	B, KH, T, HD := k.Dim(0), k.Dim(1), k.Dim(2), k.Dim(3)
-	prior := 0
-	if c.K[layer] != nil {
-		prior = c.K[layer].Dim(2)
-	}
-	need := prior + T
-	buf, vbuf := c.kBuf[layer], c.vBuf[layer]
-	fits := buf != nil && buf.Dim(0) == B && buf.Dim(1) == KH && buf.Dim(3) == HD && buf.Dim(2) >= need &&
-		buf.DType() == k.DType() && buf.Device().SameAs(k.Device()) &&
-		(c.K[layer] == nil || c.K[layer].Storage() == buf.Storage())
-	if !fits {
-		capacity := (need/kvCapacityStep + 1) * kvCapacityStep
-		if buf != nil && buf.Dim(2)*2 > capacity {
-			capacity = buf.Dim(2) * 2
-		}
-		var err error
-		if buf, err = tensor.Empty(k.DType(), []int{B, KH, capacity, HD}, k.Device()); err != nil {
-			return nil, nil, err
-		}
-		if vbuf, err = tensor.Empty(v.DType(), []int{B, KH, capacity, HD}, v.Device()); err != nil {
-			return nil, nil, err
-		}
-		if prior > 0 { // carry the positions already cached (rare: growth)
-			if err := assignNarrow(buf, 0, prior, c.K[layer]); err != nil {
-				return nil, nil, err
-			}
-			if err := assignNarrow(vbuf, 0, prior, c.V[layer]); err != nil {
-				return nil, nil, err
-			}
-		}
-		c.kBuf[layer], c.vBuf[layer] = buf, vbuf
+	T := k.Dim(2)
+	buf, vbuf, prior, err := c.ensureBuf(layer, k, T)
+	if err != nil {
+		return nil, nil, err
 	}
 	if err := assignNarrow(buf, prior, T, k); err != nil {
 		return nil, nil, err
@@ -443,16 +426,192 @@ func (c *KVCache) appendKV(layer int, k, v *tensor.Tensor) (*tensor.Tensor, *ten
 	if err := assignNarrow(vbuf, prior, T, v); err != nil {
 		return nil, nil, err
 	}
-	kAll, err := buf.Narrow(2, 0, need)
-	if err != nil {
+	if err := c.setView(layer, prior+T); err != nil {
 		return nil, nil, err
 	}
-	vAll, err := vbuf.Narrow(2, 0, need)
-	if err != nil {
-		return nil, nil, err
+	return c.K[layer], c.V[layer], nil
+}
+
+// ensureBuf returns the layer's capacity buffers with room for `add` more
+// positions after the `prior` it holds, allocating or growing them (and
+// carrying the cached positions over) as needed. like supplies the batch,
+// head count, head dim, dtype and device.
+func (c *KVCache) ensureBuf(layer int, like *tensor.Tensor, add int) (kbuf, vbuf *tensor.Tensor, prior int, err error) {
+	if len(c.kBuf) != len(c.K) { // cache built by hand, not NewKVCache
+		c.kBuf = make([]*tensor.Tensor, len(c.K))
+		c.vBuf = make([]*tensor.Tensor, len(c.K))
 	}
-	c.K[layer], c.V[layer] = kAll, vAll
-	return kAll, vAll, nil
+	B, KH, HD := like.Dim(0), like.Dim(1), like.Dim(3)
+	if c.K[layer] != nil {
+		prior = c.K[layer].Dim(2)
+	}
+	need := prior + add
+	buf, vb := c.kBuf[layer], c.vBuf[layer]
+	fits := buf != nil && buf.Dim(0) == B && buf.Dim(1) == KH && buf.Dim(3) == HD && buf.Dim(2) >= need &&
+		buf.DType() == like.DType() && buf.Device().SameAs(like.Device()) &&
+		(c.K[layer] == nil || c.K[layer].Storage() == buf.Storage())
+	if fits {
+		return buf, vb, prior, nil
+	}
+	capacity := (need/kvCapacityStep + 1) * kvCapacityStep
+	if buf != nil && buf.Dim(2)*2 > capacity {
+		capacity = buf.Dim(2) * 2
+	}
+	if buf, err = tensor.Empty(like.DType(), []int{B, KH, capacity, HD}, like.Device()); err != nil {
+		return nil, nil, 0, err
+	}
+	if vb, err = tensor.Empty(like.DType(), []int{B, KH, capacity, HD}, like.Device()); err != nil {
+		return nil, nil, 0, err
+	}
+	if prior > 0 { // carry the positions already cached (rare: growth)
+		if err := assignNarrow(buf, 0, prior, c.K[layer]); err != nil {
+			return nil, nil, 0, err
+		}
+		if err := assignNarrow(vb, 0, prior, c.V[layer]); err != nil {
+			return nil, nil, 0, err
+		}
+	}
+	c.kBuf[layer], c.vBuf[layer] = buf, vb
+	if prior > 0 {
+		if err := c.setView(layer, prior); err != nil {
+			return nil, nil, 0, err
+		}
+	}
+	return buf, vb, prior, nil
+}
+
+// setView points K[layer] / V[layer] at the first n positions of the
+// layer's capacity buffers.
+func (c *KVCache) setView(layer, n int) error {
+	k, err := c.kBuf[layer].Narrow(2, 0, n)
+	if err != nil {
+		return err
+	}
+	v, err := c.vBuf[layer].Narrow(2, 0, n)
+	if err != nil {
+		return err
+	}
+	c.K[layer], c.V[layer] = k, v
+	return nil
+}
+
+// Reserve grows every layer's capacity buffers to hold at least n
+// positions, so a run of decode steps up to n allocates nothing (a
+// captured decode graph relies on the buffer addresses staying put).
+// Layers without a key / value cache yet are left alone.
+func (c *KVCache) Reserve(n int) error {
+	for i, k := range c.K {
+		if k == nil {
+			continue
+		}
+		if _, _, _, err := c.ensureBuf(i, k, n-k.Dim(2)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Capacity is the smallest capacity among the layers' key / value buffers
+// (0 when none exists yet).
+func (c *KVCache) Capacity() int {
+	capacity := 0
+	for _, b := range c.kBuf {
+		if b != nil && (capacity == 0 || b.Dim(2) < capacity) {
+			capacity = b.Dim(2)
+		}
+	}
+	return capacity
+}
+
+// position returns Len as an I64 (1,) tensor on dev, uploading it when
+// the device copy is stale.
+func (c *KVCache) position(dev device.Device) (*tensor.Tensor, error) {
+	if c.pos == nil || !c.pos.Device().SameAs(dev) {
+		p, err := tensor.New([]int64{int64(c.Len)}, []int{1}, dev)
+		if err != nil {
+			return nil, err
+		}
+		c.pos, c.posSynced = p, true
+		return p, nil
+	}
+	if !c.posSynced {
+		host, err := tensor.New([]int64{int64(c.Len)}, []int{1}, device.CPU())
+		if err != nil {
+			return nil, err
+		}
+		if err := c.pos.CopyFrom(host); err != nil {
+			return nil, err
+		}
+		c.posSynced = true
+	}
+	return c.pos, nil
+}
+
+// advance records that T more positions were cached. A single decode
+// token also bumps the device position in place, so the next step needs
+// no upload; a longer run (prefill) leaves it for position() to refresh.
+func (c *KVCache) advance(T int) error {
+	c.Len += T
+	if c.pos != nil && c.posSynced && T == 1 {
+		return ops.IncrementI64(c.pos)
+	}
+	c.posSynced = false
+	return nil
+}
+
+// errNotCapturable marks a step that a DecodeGraph must not record.
+var errNotCapturable = errors.New("not capturable")
+
+// DecodeGraphOK reports whether the model's single-token step can be
+// captured into a DecodeGraph: every layer must take the device-position
+// decode path (no sliding windows, no diffusion block).
+func (m *Llama) DecodeGraphOK() error {
+	for i := range m.Blocks {
+		if w := m.Cfg.slidingWindowFor(i); w > 0 {
+			return fmt.Errorf("layer %d has a sliding window of %d", i, w)
+		}
+	}
+	if m.diffBlock > 0 {
+		return errors.New("diffusion decoding")
+	}
+	return nil
+}
+
+// decodeAttend is one token's attention over the layer's capacity buffers
+// with the position read on the device: append k, v (B, KH, 1, HD) at
+// pos, attend q (B, NH, 1, HD) over the valid prefix, and return (B, NH,
+// 1, HD). The launches are the same at every position (see
+// ops.DecodeAttention).
+func (c *KVCache) decodeAttend(layer int, q, k, v, pos *tensor.Tensor, scale float64) (*tensor.Tensor, error) {
+	kbuf, vbuf, prior, err := c.ensureBuf(layer, k, 1)
+	if err != nil {
+		return nil, err
+	}
+	if err := ops.KVAppend(kbuf, vbuf, k, v, pos); err != nil {
+		return nil, err
+	}
+	if err := c.setView(layer, prior+1); err != nil {
+		return nil, err
+	}
+	return ops.DecodeAttention(q, kbuf, vbuf, pos, scale)
+}
+
+// keepState stores a layer's recurrent state. For a single decode token
+// the new state is copied into the buffer already held, so the state's
+// address is stable across steps (a captured graph writes it in place).
+func (c *KVCache) keepState(layer int, conv, rec *tensor.Tensor, inPlace bool) error {
+	store := func(slot **tensor.Tensor, fresh *tensor.Tensor) error {
+		old := *slot
+		if inPlace && old != nil && fresh != nil && old != fresh && old.Shape().Equal(fresh.Shape()) && old.DType() == fresh.DType() && old.Device().SameAs(fresh.Device()) && old.IsContiguous() && old.Offset() == 0 {
+			return old.CopyFrom(fresh)
+		}
+		*slot = fresh
+		return nil
+	}
+	if err := store(&c.Conv[layer], conv); err != nil {
+		return err
+	}
+	return store(&c.Rec[layer], rec)
 }
 
 // assignNarrow writes src into positions [start, start+n) of buf's
@@ -524,6 +683,7 @@ func (c *KVCache) Truncate(n int) error {
 		}
 	}
 	c.Len = n
+	c.posSynced = false
 	return nil
 }
 
@@ -540,6 +700,7 @@ func (c *KVCache) Reset() {
 		c.Rec[i] = nil
 	}
 	c.Len = 0
+	c.posSynced = false
 	c.ring = false
 }
 
@@ -815,7 +976,9 @@ func (m *Llama) ForwardEmbeds(h *tensor.Tensor, cache *KVCache) (*tensor.Tensor,
 		return nil, err
 	}
 	if cache != nil && !(m.diffBlock > 0 && !m.diffStore) {
-		cache.Len = prior + T
+		if err := cache.advance(T); err != nil {
+			return nil, err
+		}
 	}
 	m.LastHidden = h                   // the LM head's input; an MTP draft head reads it
 	logits, err := m.LMHead.Forward(h) // (B, T, V)
@@ -843,7 +1006,6 @@ func (m *Llama) ForwardEmbeds(h *tensor.Tensor, cache *KVCache) (*tensor.Tensor,
 func (m *Llama) runBlock(blk *llamaBlock, x *tensor.Tensor, B, T, prior int, dev device.Device, cache *KVCache, layerIdx int) (*tensor.Tensor, error) {
 	cfg := m.Cfg
 	NH, KH, HD := cfg.NumHeads, cfg.NumKVHeads, cfg.HeadDim
-	g := NH / KH
 
 	var h *tensor.Tensor
 	var err error
@@ -891,7 +1053,12 @@ func (m *Llama) runBlock(blk *llamaBlock, x *tensor.Tensor, B, T, prior int, dev
 	// RoPE positions are [prior..prior+T-1]. The per-token rotation depends
 	// only on its absolute index, so cached past K (already rotated) is left
 	// alone; only the new K, Q get RoPE.
-	pos, err := m.positionsFor(T, prior, dev)
+	var pos *tensor.Tensor
+	if cache != nil && T == 1 {
+		pos, err = cache.position(dev) // the device-side position, kept in step with Len
+	} else {
+		pos, err = m.positionsFor(T, prior, dev)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -913,7 +1080,17 @@ func (m *Llama) runBlock(blk *llamaBlock, x *tensor.Tensor, B, T, prior int, dev
 	window := cfg.slidingWindowFor(layerIdx)
 	totalT := T
 	kvPrior := 0
-	if cache != nil && window == 0 && m.diffBlock == 0 && !k.RequiresGrad() {
+	var ctx *tensor.Tensor // (B, NH, T, HD)
+	fixedCache := cache != nil && window == 0 && m.diffBlock == 0 && !k.RequiresGrad()
+	if fixedCache && T == 1 && m.keyValid == 0 && !q.RequiresGrad() {
+		// Decode step: append and attend with the position read on the
+		// device, the same launches at every position.
+		if ctx, err = cache.decodeAttend(layerIdx, q, k, v, pos, float64(m.scaleVal)); err != nil {
+			return nil, err
+		}
+	} else if cache != nil && cache.capturing {
+		return nil, fmt.Errorf("%w: layer %d (window %d) does not take the decode path", errNotCapturable, layerIdx, window)
+	} else if fixedCache {
 		// Fixed-capacity cache: the new k / v go in place after the cached
 		// positions and attention reads the buffer through strided views.
 		if cache.K[layerIdx] != nil {
@@ -936,101 +1113,31 @@ func (m *Llama) runBlock(blk *llamaBlock, x *tensor.Tensor, B, T, prior int, dev
 			}
 		}
 		totalT = kvPrior + T
-		if m.diffBlock > 0 && !m.diffStore {
-			// Denoising pass: attend over the cache, but leave it untouched.
-			goto attend
-		}
-		cache.K[layerIdx], cache.V[layerIdx] = k, v
-		// Rotating cache: keep only the last `window` keys for next time.
-		// Attention below still sees the full concat, since the earliest
-		// query of this step may reach further back than the last one.
-		if window > 0 && totalT > window {
-			cache.K[layerIdx], err = trimKV(k, totalT-window, window)
-			if err != nil {
-				return nil, err
+		// A denoising pass (diffBlock without diffStore) attends over the
+		// cache but leaves it untouched.
+		if !(m.diffBlock > 0 && !m.diffStore) {
+			cache.K[layerIdx], cache.V[layerIdx] = k, v
+			// Rotating cache: keep only the last `window` keys for next
+			// time. Attention below still sees the full concat, since the
+			// earliest query of this step may reach further back than the
+			// last one.
+			if window > 0 && totalT > window {
+				cache.K[layerIdx], err = trimKV(k, totalT-window, window)
+				if err != nil {
+					return nil, err
+				}
+				cache.V[layerIdx], err = trimKV(v, totalT-window, window)
+				if err != nil {
+					return nil, err
+				}
 			}
-			cache.V[layerIdx], err = trimKV(v, totalT-window, window)
-			if err != nil {
-				return nil, err
-			}
 		}
 	}
-
-	// GQA without materialising repeated K / V: query heads kh·g .. kh·g+g−1
-	// share KV head kh, so folding the group into the row axis, q (B, NH, T,
-	// HD) → (B·KH, g·T, HD), lets one batched matmul per KV head serve all
-	// its query heads. Scores come out as (B·KH, g·T, S), which is the same
-	// memory as (B·NH, T, S) (row j·T + t of group kh is head kh·g + j), so
-	// the mask, softmax and the value product are unchanged. This removes
-	// 2·g concat copies of the whole cache per layer and step.
-attend:
-	q, err = autograd.Reshape(q, B*KH, g*T, HD)
-	if err != nil {
-		return nil, err
-	}
-	k, err = foldBatchHeads(k)
-	if err != nil {
-		return nil, err
-	}
-	v, err = foldBatchHeads(v)
-	if err != nil {
-		return nil, err
-	}
-
-	kT, err := autograd.Transpose(k, 1, 2)
-	if err != nil {
-		return nil, err
-	}
-	kTC := kT
-	if dev.Kind() != device.KindCUDA {
-		// The CUDA batched GEMM reads the transposed view in place
-		// (cublas op T); other backends want a contiguous kᵀ.
-		if kTC, err = autograd.Contiguous(kT); err != nil {
-			return nil, err
-		}
-	}
-	scores, err := autograd.MatMul(q, kTC) // (B*KH, g*T, totalT)
-	if err != nil {
-		return nil, err
-	}
-	scores, err = autograd.Reshape(scores, B*NH, T, totalT)
-	if err != nil {
-		return nil, err
-	}
-	if scores.RequiresGrad() {
-		scores, err = autograd.Mul(scores, m.scale)
-	} else {
-		// One launch with the scale as an argument: the broadcast multiply
-		// is a strided kernel plus a metadata upload per layer.
-		scores, err = ops.Affine(scores, float64(m.scaleVal), 0)
-	}
-	if err != nil {
-		return nil, err
-	}
-	// Mask: only when there's potential ambiguity among new queries (T > 1)
-	// or a sliding window excludes some cached keys. In plain single-token
-	// decode (T=1) we simply attend to everything cached.
-	if T > 1 || (window > 0 && totalT > window) {
-		mask, err := m.queryKeyMask(T, kvPrior, window, dev)
+	if ctx == nil {
+		ctx, err = m.attend(q, k, v, B, T, totalT, kvPrior, window, layerIdx, dev)
 		if err != nil {
 			return nil, err
 		}
-		scores, err = autograd.Add(scores, mask)
-		if err != nil {
-			return nil, err
-		}
-	}
-	attn, err := autograd.Softmax(scores, -1)
-	if err != nil {
-		return nil, err
-	}
-	attn, err = autograd.Reshape(attn, B*KH, g*T, totalT)
-	if err != nil {
-		return nil, err
-	}
-	ctx, err := autograd.MatMul(attn, v) // (B*KH, g*T, HD) == (B*NH, T, HD)
-	if err != nil {
-		return nil, err
 	}
 
 	ctx, err = autograd.Reshape(ctx, B, NH, T, HD)
@@ -1263,6 +1370,89 @@ func (m *Llama) applyRoPEDim(x, pos *tensor.Tensor, seqLen, rotDim int, base flo
 		return nil, err
 	}
 	return ops.Cast(o32, dt)
+}
+
+// attend is the attention core shared by prefill and the concat paths:
+// q (B, NH, T, HD) against k, v (B, KH, totalT, HD), with the causal /
+// sliding-window mask when T > 1 or a window bites, as (B·NH, T, HD).
+func (m *Llama) attend(q, k, v *tensor.Tensor, B, T, totalT, kvPrior, window, layerIdx int, dev device.Device) (*tensor.Tensor, error) {
+	cfg := m.Cfg
+	NH, KH, HD := cfg.NumHeads, cfg.NumKVHeads, cfg.HeadDim
+	g := NH / KH
+	var err error
+	// GQA without materialising repeated K / V: query heads kh·g .. kh·g+g−1
+	// share KV head kh, so folding the group into the row axis, q (B, NH, T,
+	// HD) → (B·KH, g·T, HD), lets one batched matmul per KV head serve all
+	// its query heads. Scores come out as (B·KH, g·T, S), which is the same
+	// memory as (B·NH, T, S) (row j·T + t of group kh is head kh·g + j), so
+	// the mask, softmax and the value product are unchanged. This removes
+	// 2·g concat copies of the whole cache per layer and step.
+	q, err = autograd.Reshape(q, B*KH, g*T, HD)
+	if err != nil {
+		return nil, err
+	}
+	k, err = foldBatchHeads(k)
+	if err != nil {
+		return nil, err
+	}
+	v, err = foldBatchHeads(v)
+	if err != nil {
+		return nil, err
+	}
+
+	kT, err := autograd.Transpose(k, 1, 2)
+	if err != nil {
+		return nil, err
+	}
+	kTC := kT
+	if dev.Kind() != device.KindCUDA {
+		// The CUDA batched GEMM reads the transposed view in place
+		// (cublas op T); other backends want a contiguous kᵀ.
+		if kTC, err = autograd.Contiguous(kT); err != nil {
+			return nil, err
+		}
+	}
+	scores, err := autograd.MatMul(q, kTC) // (B*KH, g*T, totalT)
+	if err != nil {
+		return nil, err
+	}
+	scores, err = autograd.Reshape(scores, B*NH, T, totalT)
+	if err != nil {
+		return nil, err
+	}
+	if scores.RequiresGrad() {
+		scores, err = autograd.Mul(scores, m.scale)
+	} else {
+		// One launch with the scale as an argument: the broadcast multiply
+		// is a strided kernel plus a metadata upload per layer.
+		scores, err = ops.Affine(scores, float64(m.scaleVal), 0)
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Mask: only when there's potential ambiguity among new queries (T > 1)
+	// or a sliding window excludes some cached keys. In plain single-token
+	// decode (T=1) we simply attend to everything cached.
+	if T > 1 || (window > 0 && totalT > window) {
+		mask, err := m.queryKeyMask(T, kvPrior, window, dev)
+		if err != nil {
+			return nil, err
+		}
+		scores, err = autograd.Add(scores, mask)
+		if err != nil {
+			return nil, err
+		}
+	}
+	attn, err := autograd.Softmax(scores, -1)
+	if err != nil {
+		return nil, err
+	}
+	attn, err = autograd.Reshape(attn, B*KH, g*T, totalT)
+	if err != nil {
+		return nil, err
+	}
+	return autograd.MatMul(attn, v) // (B*KH, g*T, HD) == (B*NH, T, HD)
+
 }
 
 // headsForward reshapes (B, T, H*HD) to (B, H, T, HD) and contiguifies.

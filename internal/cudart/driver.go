@@ -153,6 +153,9 @@ func LaunchKernel(
 			traceCaller(fn.name + " by")
 		}
 	}
+	if stream == 0 {
+		stream = current.Load()
+	}
 	runtime.LockOSThread() // ensureContext and the launch on one thread
 	defer runtime.UnlockOSThread()
 	if err := ensureContext(); err != nil {

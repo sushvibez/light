@@ -19,6 +19,7 @@ import (
 // BlasHandle wraps a cublasHandle_t. Handles are per-device; use GetBlasHandle.
 type BlasHandle struct {
 	handle C.cublasHandle_t
+	stream uintptr // the stream the handle was last pointed at
 }
 
 var blasHandleMu sync.Mutex
@@ -30,7 +31,7 @@ func GetBlasHandle(ordinal int) (*BlasHandle, error) {
 	blasHandleMu.Lock()
 	defer blasHandleMu.Unlock()
 	if bh, ok := blasHandleByOrd[ordinal]; ok {
-		return bh, nil
+		return bh, bh.useStream(current.Load())
 	}
 	if err := SetDevice(ordinal); err != nil {
 		return nil, err
@@ -41,7 +42,20 @@ func GetBlasHandle(ordinal int) (*BlasHandle, error) {
 	}
 	bh := &BlasHandle{handle: h}
 	blasHandleByOrd[ordinal] = bh
-	return bh, nil
+	return bh, bh.useStream(current.Load())
+}
+
+// useStream points the handle at s (the package's current stream) when
+// that changed since the last call.
+func (bh *BlasHandle) useStream(s uintptr) error {
+	if bh.stream == s {
+		return nil
+	}
+	if rc := C.cublasSetStream(bh.handle, C.cudaStream_t(unsafe.Pointer(s))); rc != C.CUBLAS_STATUS_SUCCESS {
+		return fmt.Errorf("cublasSetStream: status %d", int(rc))
+	}
+	bh.stream = s
+	return nil
 }
 
 // SgemmRowMajor computes C = A @ B in row-major semantics.
