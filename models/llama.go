@@ -103,6 +103,12 @@ func (cfg LlamaConfig) slidingWindowFor(layer int) int {
 	if cfg.SlidingWindow <= 0 {
 		return 0
 	}
+	// A window at least as long as the context never bites (Phi-4-mini
+	// declares 262144 on a 131072 context): full attention, so the
+	// fixed-capacity cache and the decode graph apply.
+	if cfg.MaxPosition > 0 && cfg.SlidingWindow >= cfg.MaxPosition {
+		return 0
+	}
 	if cfg.SlidingLayers != nil && layer < len(cfg.SlidingLayers) && !cfg.SlidingLayers[layer] {
 		return 0
 	}
