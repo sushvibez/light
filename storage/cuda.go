@@ -125,6 +125,7 @@ type cudaCachingPool struct {
 	cached int // bytes held in free lists
 	order  []poolKey
 	fresh  atomic.Int64 // bytes of cudaMalloc since the last forced GC
+	handed atomic.Int64 // bytes handed out (cache hits too) since the last forced GC
 }
 
 // PoolCapBytes is the most device memory the allocator keeps cached; 0
@@ -155,7 +156,8 @@ func poolCap() int {
 }
 
 // FreshBytesPerGC is how much device memory may be cudaMalloc'd between
-// forced garbage collections (0 disables them); see cudaCachingPool.alloc.
+// forced garbage collections (0 disables them, including the one after
+// every half pool cap handed out); see cudaCachingPool.alloc.
 var FreshBytesPerGC int64 = 1 << 30
 
 // sizeClass rounds a byte count to its class: 512-byte steps below 1 MB,
@@ -173,6 +175,17 @@ func (p *cudaCachingPool) alloc(ord, bytes int) (uintptr, int, error) {
 	}
 	class := sizeClass(bytes)
 	key := poolKey{ord, class}
+	// Dead tensors come back only through GC cleanups. Collecting after every
+	// half cap handed out returns them while the cache still has room for
+	// them: waiting for misses instead (FreshBytesPerGC alone) lets a
+	// step drain the whole cache, malloc more, then get it all back at once,
+	// past the cap, as cudaFree evictions every cycle.
+	if FreshBytesPerGC > 0 && p.handed.Add(int64(class)) >= int64(poolCap()/2) {
+		p.handed.Store(0)
+		p.fresh.Store(0)
+		poolStats.forcedGCs.Add(1)
+		runtime.GC()
+	}
 	p.mu.Lock()
 	if l := p.free[key]; len(l) > 0 {
 		ptr := l[len(l)-1]
@@ -190,6 +203,7 @@ func (p *cudaCachingPool) alloc(ord, bytes int) (uintptr, int, error) {
 	// prefill held 5 GB of dead activations otherwise).
 	if FreshBytesPerGC > 0 && p.fresh.Add(int64(class)) >= FreshBytesPerGC {
 		p.fresh.Store(0)
+		p.handed.Store(0)
 		poolStats.forcedGCs.Add(1)
 		runtime.GC()
 	}
