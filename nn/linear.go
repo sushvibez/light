@@ -342,6 +342,56 @@ func (l *Linear) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 	return y, nil
 }
 
+// Mixed16Input rounds x for ForwardMixed16 when this layer computes at 16
+// bits (Mixed16 with a BF16 / F16 weight, F32 x, on CUDA), so several
+// layers reading the same activation (q / k / v, a gated MLP's two input
+// projections) cast it once. It returns nil when Forward would not round.
+func (l *Linear) Mixed16Input(x *tensor.Tensor) (*tensor.Tensor, error) {
+	if !l.Mixed16 || l.W == nil || x.DType() != dtype.F32 || !device.IsCUDA(x.Device()) ||
+		(l.W.DType() != dtype.BF16 && l.W.DType() != dtype.F16) {
+		return nil, nil
+	}
+	return ops.Cast(x, l.W.DType())
+}
+
+// ForwardMixed16 is Forward for x already rounded by Mixed16Input (of this
+// layer or one with the same weight dtype): F32 out, as Forward gives.
+func (l *Linear) ForwardMixed16(xr *tensor.Tensor) (*tensor.Tensor, error) {
+	if l.W == nil || xr.DType() != l.W.DType() || xr.Dim(-1) != l.inFeatures {
+		return nil, fmt.Errorf("nn.Linear.ForwardMixed16: want a %v (..., %d) input, got %v %v", l.W.DType(), l.inFeatures, xr.DType(), xr.Shape())
+	}
+	dims := xr.Shape().Dims()
+	flat, err := xr.Contiguous()
+	if err != nil {
+		return nil, err
+	}
+	if flat, err = flat.Reshape(xr.NumElements()/l.inFeatures, l.inFeatures); err != nil {
+		return nil, err
+	}
+	wT, err := l.W.Transpose(0, 1)
+	if err != nil {
+		return nil, err
+	}
+	y, err := ops.MatMulMixedF32Out(flat, wT)
+	if err != nil {
+		return nil, err
+	}
+	if l.B != nil {
+		b := l.B
+		if b.DType() != dtype.F32 {
+			if b, err = ops.Cast(b, dtype.F32); err != nil {
+				return nil, err
+			}
+		}
+		if y, err = ops.Add(y, b); err != nil {
+			return nil, err
+		}
+	}
+	out := append([]int(nil), dims...)
+	out[len(out)-1] = l.outFeatures
+	return y.Reshape(out...)
+}
+
 // Parameters returns [W] or [W, B].
 func (l *Linear) Parameters() []*tensor.Tensor {
 	var ps []*tensor.Tensor

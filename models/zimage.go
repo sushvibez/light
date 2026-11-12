@@ -215,14 +215,25 @@ func (m *ZImageTransformer) block(b *zImageBlock, x, adaln, cos, sin *tensor.Ten
 	if n, err = scale(n, scaleM); err != nil {
 		return nil, err
 	}
-	g, err := b.W1.Forward(n)
+	// W1 and W3 read the same input: on 16-bit-compute layers round it once.
+	nr, err := b.W1.Mixed16Input(n)
+	if err != nil {
+		return nil, err
+	}
+	fwd := func(l *nn.Linear) (*tensor.Tensor, error) {
+		if nr != nil && l.Mixed16 && l.W.DType() == nr.DType() {
+			return l.ForwardMixed16(nr)
+		}
+		return l.Forward(n)
+	}
+	g, err := fwd(b.W1)
 	if err != nil {
 		return nil, err
 	}
 	if g, err = ops.SiLU(g); err != nil {
 		return nil, err
 	}
-	u, err := b.W3.Forward(n)
+	u, err := fwd(b.W3)
 	if err != nil {
 		return nil, err
 	}

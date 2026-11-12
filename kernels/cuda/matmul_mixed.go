@@ -64,11 +64,12 @@ func matmulBF16BF16W(ctx *registry.Context) error {
 
 // matmulMixedF32BF16W expects:
 //
-//	a (F32, contiguous, rank 2 (M, K))
+//	a (F32, contiguous, rank 2 (M, K)), or already b's 16-bit type
+//	  (ops.MatMulMixedF32Out: callers sharing one input cast it once)
 //	b (BF16, rank 2 — either contiguous (K, N) or transpose-view of (N, K))
 //	out (F32, (M, N))
 //
-// It casts `a` to BF16 in a transient device buffer and dispatches
+// It casts an F32 `a` to BF16 in a transient device buffer and dispatches
 // cublasGemmEx with BF16×BF16→F32, F32 accumulate. The transposed-weight
 // fast path is preserved.
 func matmulMixedF32BF16W(ctx *registry.Context) error {
@@ -76,8 +77,17 @@ func matmulMixedF32BF16W(ctx *registry.Context) error {
 	if a.Rank() != 2 || b.Rank() != 2 {
 		return fmt.Errorf("cuda matmul_mixed: only 2-D supported (got %d, %d)", a.Rank(), b.Rank())
 	}
-	if a.DType() != dtype.F32 || (b.DType() != dtype.BF16 && b.DType() != dtype.F16) || out.DType() != dtype.F32 {
+	if (a.DType() != dtype.F32 && a.DType() != b.DType()) || (b.DType() != dtype.BF16 && b.DType() != dtype.F16) || out.DType() != dtype.F32 {
 		return fmt.Errorf("cuda matmul_mixed: dtype combo unsupported (a=%v b=%v out=%v)", a.DType(), b.DType(), out.DType())
+	}
+	if a.DType() == dtype.F16 { // pre-rounded activation: GemmEx with F32 out
+		if !a.IsContiguous() || a.Offset() != 0 {
+			var err error
+			if a, err = a.Contiguous(); err != nil {
+				return err
+			}
+		}
+		return gemmEx2D(a, b, out, cudart.DataF16, cudart.DataF16, cudart.DataF32)
 	}
 	if b.DType() == dtype.F16 {
 		// F32 × F16 weight → F32: cast the activation to F16, GemmEx with F32 out.
@@ -97,14 +107,17 @@ func matmulMixedF32BF16W(ctx *registry.Context) error {
 			return err
 		}
 	}
-	// Cast the activation to BF16 in a fresh device buffer. ~T·H·2 bytes —
-	// tiny next to the BF16 weights we're avoiding to materialize.
-	aBF16, err := tensor.Empty(dtype.BF16, a.Shape().Dims(), a.Device()) // the cast writes every element
-	if err != nil {
-		return err
-	}
-	if err := registryDispatch("cast", a, aBF16); err != nil {
-		return fmt.Errorf("cuda matmul_mixed: cast a→BF16: %w", err)
+	aBF16 := a // already BF16 (pre-rounded by the caller)
+	if a.DType() == dtype.F32 {
+		// Cast the activation to BF16 in a fresh device buffer. ~T·H·2 bytes —
+		// tiny next to the BF16 weights we're avoiding to materialize.
+		var err error
+		if aBF16, err = tensor.Empty(dtype.BF16, a.Shape().Dims(), a.Device()); err != nil { // the cast writes every element
+			return err
+		}
+		if err := registryDispatch("cast", a, aBF16); err != nil {
+			return fmt.Errorf("cuda matmul_mixed: cast a→BF16: %w", err)
+		}
 	}
 	ord := out.Device().Ordinal()
 	if err := cudart.SetDevice(ord); err != nil {
