@@ -55,7 +55,14 @@ func GatedDeltaRuleFused(qkv, a, b, dtBias, negA, state *tensor.Tensor, Hk, dk, 
 	chunked := opts.Mode == GatedDeltaChunked || (opts.Mode == GatedDeltaAuto && T > 1)
 	kern, err := registry.Lookup(registry.Key{Op: "gated_delta_rule_fused", Dev: dev.Kind(), DType: dtype.F32})
 	if err != nil || chunked {
-		return gatedDeltaUnfused(qkv, a, b, dtBias, negA, state, Hk, dk, Hv, dv, tiled, opts)
+		out, final, err := gatedDeltaUnfused(qkv, a, b, dtBias, negA, state, Hk, dk, Hv, dv, tiled, opts)
+		if err != nil || !opts.InPlace || state == nil {
+			return out, final, err
+		}
+		if err := state.CopyFrom(final); err != nil { // honour InPlace without the fused kernel
+			return nil, nil, err
+		}
+		return out, state, nil
 	}
 	ins := []*tensor.Tensor{qkv, a, b, dtBias, negA}
 	for i, t := range ins {
@@ -81,7 +88,11 @@ func GatedDeltaRuleFused(qkv, a, b, dtBias, negA, state *tensor.Tensor, Hk, dk, 
 	if out, err = tensor.Empty(dtype.F32, []int{B, T, Hv, dv}, dev); err != nil {
 		return nil, nil, err
 	}
-	if final, err = tensor.Empty(dtype.F32, []int{B, Hv, dk, dv}, dev); err != nil {
+	if opts.InPlace {
+		// The kernel stages each state column in registers before writing
+		// it back, so the final state may overwrite the initial one.
+		final = state
+	} else if final, err = tensor.Empty(dtype.F32, []int{B, Hv, dk, dv}, dev); err != nil {
 		return nil, nil, err
 	}
 	if err := kern(&registry.Context{

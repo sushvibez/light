@@ -27,6 +27,10 @@ type GatedDeltaOptions struct {
 	Mode      GatedDeltaMode
 	ChunkSize int  // chunked form block length; 0 = 64 (transformers' default)
 	QKL2Norm  bool // L2-normalise q and k over the head dim first (eps 1e-6); Qwen3.5 / Qwen3-Next set it
+	// InPlace writes the final state over the initial one (GatedDeltaRuleFused
+	// only, with a non-nil state): a decode step then keeps its state at a
+	// fixed address, which a captured graph needs.
+	InPlace bool
 }
 
 // GatedDeltaRule is the gated delta rule of Gated DeltaNet linear attention
@@ -129,6 +133,22 @@ func GatedDeltaRule(q, k, v, g, beta, state *tensor.Tensor, opts GatedDeltaOptio
 //
 // It returns the output (B, C, T) and the new state (B, C, K−1).
 func CausalConv1dDepthwise(x, w, state *tensor.Tensor, silu bool) (out, newState *tensor.Tensor, err error) {
+	return causalConv1dDepthwise(x, w, state, silu, false)
+}
+
+// CausalConv1dDepthwiseInPlace is CausalConv1dDepthwise writing the new
+// state over `state` (which must be a contiguous (B, C, K-1) F32 tensor)
+// instead of allocating one: a decode step then keeps its state at a
+// fixed address, which a captured graph needs.
+func CausalConv1dDepthwiseInPlace(x, w, state *tensor.Tensor, silu bool) (*tensor.Tensor, error) {
+	if state == nil || !state.IsContiguous() || state.Offset() != 0 {
+		return nil, fmt.Errorf("CausalConv1dDepthwiseInPlace: state must be a contiguous tensor")
+	}
+	out, _, err := causalConv1dDepthwise(x, w, state, silu, true)
+	return out, err
+}
+
+func causalConv1dDepthwise(x, w, state *tensor.Tensor, silu, inPlace bool) (out, newState *tensor.Tensor, err error) {
 	if x.Rank() != 3 || w.Rank() != 2 || w.Dim(0) != x.Dim(1) {
 		return nil, nil, fmt.Errorf("CausalConv1dDepthwise: want x (B, C, T) and w (C, K), got %v %v", x.Shape(), w.Shape())
 	}
@@ -165,7 +185,9 @@ func CausalConv1dDepthwise(x, w, state *tensor.Tensor, silu bool) (out, newState
 	if out, err = tensor.Empty(dtype.F32, x.Shape().Dims(), dev); err != nil {
 		return nil, nil, err
 	}
-	if newState, err = tensor.Empty(dtype.F32, []int{B, C, K - 1}, dev); err != nil {
+	if inPlace {
+		newState = ins[2]
+	} else if newState, err = tensor.Empty(dtype.F32, []int{B, C, K - 1}, dev); err != nil {
 		return nil, nil, err
 	}
 	kern, err := registry.Lookup(registry.Key{Op: "causal_conv1d_depthwise", Dev: dev.Kind(), DType: dtype.F32})

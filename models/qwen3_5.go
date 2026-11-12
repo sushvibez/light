@@ -555,7 +555,14 @@ func (m *Qwen35) deltaNet(blk *qwen35Block, h *tensor.Tensor, B, T int, cache *K
 	if cache != nil {
 		convState, recState = cache.Conv[layer], cache.Rec[layer]
 	}
-	qkv, convState, err = ops.CausalConv1dDepthwise(qkv, blk.ConvW, convState, true)
+	// One token with a state already held: update it in place, so decode
+	// steps keep their state addresses (no copy-back, graph-stable).
+	inPlace := cache != nil && T == 1 && convState != nil && recState != nil && convState.IsContiguous() && convState.Offset() == 0
+	if inPlace {
+		qkv, err = ops.CausalConv1dDepthwiseInPlace(qkv, blk.ConvW, convState, true)
+	} else {
+		qkv, convState, err = ops.CausalConv1dDepthwise(qkv, blk.ConvW, convState, true)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -581,7 +588,7 @@ func (m *Qwen35) deltaNet(blk *qwen35Block, h *tensor.Tensor, B, T int, cache *K
 		}
 	}
 	out, recState, err := ops.GatedDeltaRuleFused(qkv, aProj, bProj, blk.DtBias, blk.NegA, recState, Hk, dk, Hv, dv, cfg.VHeadsTiled,
-		ops.GatedDeltaOptions{Mode: m.deltaMode, QKL2Norm: true})
+		ops.GatedDeltaOptions{Mode: m.deltaMode, QKL2Norm: true, InPlace: inPlace})
 	if err != nil {
 		return nil, err
 	}
