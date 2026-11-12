@@ -616,6 +616,7 @@ GGUF decode on CUDA (2026-11-09, `desktop/cuda`: lane-cooperative M = 1 kernels 
 | Workload | Result |
 |----------|--------|
 | Moshi speech-to-speech (Moshiko Q8 + Mimi, L4) | 58 ms per 80 ms frame through the engine (1.4× real time); model loop 61.9 ms / frame (LM 34.2, depformer 10.7, Mimi 9.8 + 7.2) |
+| Z-Image-Turbo 1024², 8 steps (L4) | 34.8 s generate (was 178 s): transformer load 8.1 s (parallel CPU cast of its F32 checkpoint), 2.75 s / step (Mixed16 BF16 GEMMs, BF16 tensor-core flash attention at 35 TFLOPS); PSNR 30.5 dB vs the F32 render |
 | Qwen3.5-9B BF16 heavy test (A100) | 32 s for load + prefill + 16 greedy steps |
 | Qwen3.5-27B-FP8, DeepSeek-V2-Lite, GLM-4-9B (A100) | 47–48 s each for load + prefill + 16 decode steps |
 | Qwen3.5-27B / Muse Glimmer 30B GGUF Q4 (A100) | 35–42 s each for load + prefill + 16 decode steps |
