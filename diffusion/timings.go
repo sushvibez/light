@@ -3,10 +3,12 @@ package diffusion
 import (
 	"fmt"
 	"os"
+	"runtime/metrics"
 	"time"
 
 	"light/device"
 	"light/internal/cudart"
+	"light/storage"
 	"light/tensor"
 )
 
@@ -18,11 +20,33 @@ type phaseTimer struct {
 	on    bool
 	t     time.Time
 	total time.Time
+	host  hostCounts
+}
+
+// hostCounts are the host-side events of a phase that can stall the GPU
+// queue: driver calls, allocator slow paths and Go collections.
+type hostCounts struct {
+	cu                    cudart.Counters
+	gcs, forced, oom, evi int64
+}
+
+func readHostCounts() hostCounts {
+	s := []metrics.Sample{{Name: "/gc/cycles/total:gc-cycles"}}
+	metrics.Read(s)
+	var h hostCounts
+	h.cu = cudart.ReadCounters()
+	h.gcs = int64(s[0].Value.Uint64())
+	h.forced, h.oom, h.evi = storage.CUDAPoolStats()
+	return h
 }
 
 func newPhaseTimer() *phaseTimer {
 	now := time.Now()
-	return &phaseTimer{on: os.Getenv("LIGHT_TIMINGS") != "", t: now, total: now}
+	pt := &phaseTimer{on: os.Getenv("LIGHT_TIMINGS") != "", t: now, total: now}
+	if pt.on {
+		pt.host = readHostCounts()
+	}
+	return pt
 }
 
 func (pt *phaseTimer) mark(phase string, sync *tensor.Tensor) {
@@ -33,8 +57,12 @@ func (pt *phaseTimer) mark(phase string, sync *tensor.Tensor) {
 		waitFor(sync)
 	}
 	now := time.Now()
-	fmt.Fprintf(os.Stderr, "timing %-18s %7.2f s  (total %.1f s)\n", phase, now.Sub(pt.t).Seconds(), now.Sub(pt.total).Seconds())
-	pt.t = now
+	h := readHostCounts()
+	d := h.cu.Sub(pt.host.cu)
+	fmt.Fprintf(os.Stderr, "timing %-18s %7.2f s  (total %.1f s)  launch %d gemm %d malloc %d free %d memset %d dtoh %d htod %d sync %d | gc %d (forced %d) oom-retry %d evict %d\n",
+		phase, now.Sub(pt.t).Seconds(), now.Sub(pt.total).Seconds(), d.Launches, d.Gemms, d.Mallocs, d.Frees, d.Memsets,
+		d.DtoH, d.HtoD, d.Syncs, h.gcs-pt.host.gcs, h.forced-pt.host.forced, h.oom-pt.host.oom, h.evi-pt.host.evi)
+	pt.t, pt.host = now, h
 }
 
 // waitFor reads one element of t back to the host.

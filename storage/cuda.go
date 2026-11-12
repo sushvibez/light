@@ -166,6 +166,7 @@ func (p *cudaCachingPool) alloc(ord, bytes int) (uintptr, int, error) {
 	// prefill held 5 GB of dead activations otherwise).
 	if FreshBytesPerGC > 0 && p.fresh.Add(int64(class)) >= FreshBytesPerGC {
 		p.fresh.Store(0)
+		poolStats.forcedGCs.Add(1)
 		runtime.GC()
 	}
 	ptr, err := cudart.Malloc(uintptr(class))
@@ -174,6 +175,7 @@ func (p *cudaCachingPool) alloc(ord, bytes int) (uintptr, int, error) {
 	// their own goroutine, hence the short waits) and the GC cannot see
 	// device memory pressure.
 	for attempt := 0; err != nil && attempt < 4; attempt++ {
+		poolStats.oomRetries.Add(1)
 		if attempt > 0 {
 			runtime.GC()
 			time.Sleep(time.Duration(10<<attempt) * time.Millisecond)
@@ -206,6 +208,7 @@ func (p *cudaCachingPool) release(ord int, ptr uintptr, class int) {
 		p.cached -= k.class
 	}
 	p.mu.Unlock()
+	poolStats.evictions.Add(int64(len(evict)))
 	for _, e := range evict {
 		_ = cudart.Free(e)
 	}
@@ -226,6 +229,17 @@ func (p *cudaCachingPool) Drain() {
 	for _, e := range all {
 		_ = cudart.Free(e)
 	}
+}
+
+// poolStats counts the caching allocator's slow paths (CUDAPoolStats).
+var poolStats struct{ forcedGCs, oomRetries, evictions atomic.Int64 }
+
+// CUDAPoolStats reports how often the caching allocator forced a GC after
+// FreshBytesPerGC of misses, retried a failed cudaMalloc (each retry drains
+// the cache; later ones also collect and wait), and evicted a cached block
+// past PoolCapBytes (a cudaFree each), since the process started.
+func CUDAPoolStats() (forcedGCs, oomRetries, evictions int64) {
+	return poolStats.forcedGCs.Load(), poolStats.oomRetries.Load(), poolStats.evictions.Load()
 }
 
 // DrainCUDAPool frees the allocator's cached device blocks.

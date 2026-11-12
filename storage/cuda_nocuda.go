@@ -11,3 +11,6 @@ func SetCUDAAllocObserver(fn func(*Storage)) func(*Storage) { return nil }
 
 // CUDAPtr panics without CUDA: no storage lives on a CUDA device.
 func (s *Storage) CUDAPtr() uintptr { panic("storage.CUDAPtr: CUDA support not compiled in") }
+
+// CUDAPoolStats reports zeros without CUDA.
+func CUDAPoolStats() (forcedGCs, oomRetries, evictions int64) { return 0, 0, 0 }

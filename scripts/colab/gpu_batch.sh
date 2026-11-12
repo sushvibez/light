@@ -214,7 +214,7 @@ for g in "${SEL[@]}"; do
 		ZI=Tongyi-MAI/Z-Image-Turbo
 		fetch $ZI
 		say "zperf"
-		LIGHT_TIMINGS=1 LIGHT_PROFILE_GPU=1 "$WORK/light-bin" image -device gpu -o "$LOGS/zperf.png" -width 1024 -height 1024 -seed 11 $ZI 			"A cozy reading nook by a large window on a rainy evening, warm lamp light, a ginger cat curled on a knitted blanket, shelves of old books, photorealistic" 2>&1 | tee "$LOGS/zperf.log"
+		LIGHT_TIMINGS=1 LIGHT_PROFILE_GPU=1 "$WORK/light-bin" image -device gpu -cpuprofile "$LOGS/zperf.cpu" -o "$LOGS/zperf.png" -width 1024 -height 1024 -seed 11 $ZI 			"A cozy reading nook by a large window on a rainy evening, warm lamp light, a ginger cat curled on a knitted blanket, shelves of old books, photorealistic" 2>&1 | tee "$LOGS/zperf.log"
 		SUMMARY+=("zperf $(grep -c '^timing' "$LOGS/zperf.log") phases, $(grep -oE 'generated in [0-9.]+ s' "$LOGS/zperf.log")")
 		;;
 	examples)
