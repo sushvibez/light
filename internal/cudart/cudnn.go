@@ -173,12 +173,16 @@ func Conv2DForward(
 	}
 	var wsPtr uintptr
 	if wsBytes > 0 {
-		p, err := Malloc(uintptr(wsBytes))
+		p, err := MallocRetry(uintptr(wsBytes))
 		if err != nil {
-			return fmt.Errorf("conv workspace malloc (%d bytes): %w", uint64(wsBytes), err)
+			// No room for the workspace even after freeing what can be freed:
+			// implicit GEMM needs none (slower, but the convolution still runs).
+			algo = C.CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM
+			wsBytes = 0
+		} else {
+			wsPtr = p
+			defer Free(wsPtr)
 		}
-		wsPtr = p
-		defer Free(wsPtr)
 	}
 
 	alpha := C.float(1.0)

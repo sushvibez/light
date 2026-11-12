@@ -57,6 +57,16 @@ func NewCUDA(dev device.Device, dt dtype.DType, nelems int) (*Storage, error) {
 	}), nil
 }
 
+func init() {
+	cudart.OOMHook = func() {
+		for range 2 {
+			runtime.GC()
+			time.Sleep(30 * time.Millisecond) // the storage cleanups run on their own goroutine
+		}
+		cudaPool.Drain()
+	}
+}
+
 // cudaPool is a caching device allocator. cudaMalloc is slow and cudaFree
 // synchronises the whole device, and inference allocates thousands of
 // short-lived buffers per step, so freed blocks are kept per size class and

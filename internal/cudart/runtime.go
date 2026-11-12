@@ -50,6 +50,21 @@ func Malloc(bytes uintptr) (uintptr, error) {
 	return uintptr(ptr), nil
 }
 
+// OOMHook, when set (package storage sets it), frees cached and dead device
+// memory — a GC, a wait for the storage cleanups, a pool drain — so that a
+// failed allocation can be retried.
+var OOMHook func()
+
+// MallocRetry is Malloc that, on failure, runs OOMHook once and retries.
+func MallocRetry(bytes uintptr) (uintptr, error) {
+	p, err := Malloc(bytes)
+	if err != nil && OOMHook != nil {
+		OOMHook()
+		p, err = Malloc(bytes)
+	}
+	return p, err
+}
+
 // Free releases a device pointer. Safe on 0.
 func Free(ptr uintptr) error {
 	if ptr == 0 {

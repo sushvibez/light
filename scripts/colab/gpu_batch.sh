@@ -182,7 +182,8 @@ for g in "${SEL[@]}"; do
 			shift
 			local log="$LOGS/$STAMP-$name.log" t0=$SECONDS
 			say "$name"
-			"$WORK/light-bin" image -device gpu "$@" -o "$LOGS/$name.png" 2>&1 | tee "$log" | tail -4
+			# flags before the positional repo / prompt: Go's flag parsing stops at the first positional
+			"$WORK/light-bin" image -device gpu -o "$LOGS/$name.png" "$@" 2>&1 | tee "$log" | tail -4
 			local st=${PIPESTATUS[0]}
 			local times
 			times=$(grep -oE '(loaded [^ ]+|generated) in [0-9.]+ s' "$log" | paste -sd ' ')
@@ -218,7 +219,7 @@ for g in "${SEL[@]}"; do
 			mkdir -p "$LOGS/examples/$model"
 			local log="$LOGS/$STAMP-$model-$name.log" t0=$SECONDS
 			say "$model/$name"
-			"$WORK/light-bin" image -device gpu "$@" -o "$LOGS/examples/$model/$name.png" 2>&1 | tee "$log" | tail -4
+			"$WORK/light-bin" image -device gpu -o "$LOGS/examples/$model/$name.png" "$@" 2>&1 | tee "$log" | tail -4
 			local st=${PIPESTATUS[0]}
 			local times
 			times=$(grep -oE '(loaded [^ ]+|generated) in [0-9.]+ s' "$log" | paste -sd ' ')
