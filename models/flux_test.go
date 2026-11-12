@@ -398,3 +398,52 @@ func TestQwenImage21TransformerTinyMatchesDiffusers(t *testing.T) {
 		})
 	}
 }
+
+// A tiny AutoencoderKLQwenImage21 (scripts/verify/ref_qwenimage_vae.py)
+// decoding one frame against diffusers, on the CPU and WebGPU.
+func TestQwenImageVAETinyMatchesDiffusers(t *testing.T) {
+	raw, err := os.ReadFile("testdata/qwenimage21-tiny/vae.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ref struct {
+		Latents, Image []float32
+		Z, H, W        int
+		ImageShape     []int `json:"image_shape"`
+	}
+	if err := json.Unmarshal(raw, &ref); err != nil {
+		t.Fatal(err)
+	}
+	devs := []device.Device{device.CPU()}
+	if g, err := device.WebGPU(0); err == nil {
+		devs = append(devs, g)
+	}
+	for _, dev := range devs {
+		t.Run(dev.String(), func(t *testing.T) {
+			v, err := LoadQwenImageVAE("testdata/qwenimage21-tiny/vae", dev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			z, _ := tensor.New(ref.Latents, []int{1, ref.Z, ref.H, ref.W}, dev)
+			img, err := v.Decode(z)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(img.Shape().Dims(), ref.ImageShape) {
+				t.Fatalf("image %v, want %v", img.Shape(), ref.ImageShape)
+			}
+			if img, err = img.To(device.CPU()); err != nil {
+				t.Fatal(err)
+			}
+			got := tensor.MustSlice[float32](img)
+			md := 0.0
+			for i := range ref.Image {
+				md = math.Max(md, math.Abs(float64(got[i]-ref.Image[i])))
+			}
+			t.Logf("image: max diff %.3g over %d values", md, len(got))
+			if md > 1e-4 {
+				t.Errorf("image differs by %.3g", md)
+			}
+		})
+	}
+}
