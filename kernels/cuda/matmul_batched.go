@@ -13,93 +13,60 @@ import (
 )
 
 func init() {
-	registry.Register(registry.Key{Op: "matmul_batched", Dev: device.KindCUDA, DType: dtype.F32}, batchedMatmulF32CUDA)
-	registry.Register(registry.Key{Op: "matmul_batched", Dev: device.KindCUDA, DType: dtype.BF16}, batchedMatmulBF16CUDA)
+	registry.Register(registry.Key{Op: "matmul_batched", Dev: device.KindCUDA, DType: dtype.F32}, batchedMatmulLauncher(cudart.DataF32))
+	registry.Register(registry.Key{Op: "matmul_batched", Dev: device.KindCUDA, DType: dtype.BF16}, batchedMatmulLauncher(cudart.DataBF16))
+	registry.Register(registry.Key{Op: "matmul_batched", Dev: device.KindCUDA, DType: dtype.F16}, batchedMatmulLauncher(cudart.DataF16))
 }
 
-func batchedMatmulBF16CUDA(ctx *registry.Context) error {
-	a, b, out := ctx.Inputs[0], ctx.Inputs[1], ctx.Output
-	a, b, transB, err := batchedMatmulPrep(a, b)
-	if err != nil {
-		return err
-	}
-	ord := out.Device().Ordinal()
-	if err := cudart.SetDevice(ord); err != nil {
-		return err
-	}
-	h, err := cudart.GetBlasHandle(ord)
-	if err != nil {
-		return err
-	}
-	B := a.Dim(0)
-	M := a.Dim(1)
-	K := a.Dim(2)
-	N := b.Dim(2)
-	gemm := cudart.GemmExBF16BatchedRowMajor
-	if transB {
-		gemm = cudart.GemmExBF16BatchedRowMajorTransB
-	}
-	return gemm(h, M, N, K, a.Storage().CUDAPtr(), b.Storage().CUDAPtr(), out.Storage().CUDAPtr(), B)
-}
-
-func batchedMatmulF32CUDA(ctx *registry.Context) error {
-	a, b, out := ctx.Inputs[0], ctx.Inputs[1], ctx.Output
-	a, b, transB, err := batchedMatmulPrep(a, b)
-	if err != nil {
-		return err
-	}
-	ord := out.Device().Ordinal()
-	if err := cudart.SetDevice(ord); err != nil {
-		return err
-	}
-	h, err := cudart.GetBlasHandle(ord)
-	if err != nil {
-		return err
-	}
-	B := a.Dim(0)
-	M := a.Dim(1)
-	K := a.Dim(2)
-	N := b.Dim(2)
-	gemm := cudart.SgemmStridedBatchedRowMajor
-	if transB {
-		gemm = cudart.SgemmStridedBatchedRowMajorTransB
-	}
-	return gemm(h, M, N, K, a.Storage().CUDAPtr(), b.Storage().CUDAPtr(), out.Storage().CUDAPtr(), B)
-}
-
-// batchedMatmulPrep makes both operands cuBLAS-ready. A transpose view of a
-// contiguous (count, N, K) block as b (attention's kᵀ against the key cache)
-// is passed through with transB set, so the cache is never copied.
-func batchedMatmulPrep(a, b *tensor.Tensor) (*tensor.Tensor, *tensor.Tensor, bool, error) {
-	if a.Rank() != 3 || b.Rank() != 3 {
-		return nil, nil, false, fmt.Errorf("cuda matmul_batched: need rank-3, got %d and %d", a.Rank(), b.Rank())
-	}
-	var err error
-	if !a.IsContiguous() || a.Offset() != 0 {
-		a, err = a.Contiguous()
-		if err != nil {
-			return nil, nil, false, err
+// batchedMatmulLauncher runs (count, M, K) × (count, K, N) → (count, M, N)
+// on cuBLAS's strided-batched GEMM. Either operand may be any view whose
+// slices are row-major blocks with a leading dimension and slice stride,
+// or the transpose of one: attention's kᵀ against the key cache, and the
+// narrowed, batch-and-head-folded views of a fixed-capacity KV cache, all
+// read in place. Other layouts are contiguified first.
+func batchedMatmulLauncher(dt cudart.DataType) registry.Kernel {
+	return func(ctx *registry.Context) error {
+		a, b, out := ctx.Inputs[0], ctx.Inputs[1], ctx.Output
+		if a.Rank() != 3 || b.Rank() != 3 {
+			return fmt.Errorf("cuda matmul_batched: need rank-3, got %d and %d", a.Rank(), b.Rank())
 		}
-	}
-	if isTransposedBlock(b) {
-		return a, b, true, nil
-	}
-	if !b.IsContiguous() || b.Offset() != 0 {
-		b, err = b.Contiguous()
-		if err != nil {
-			return nil, nil, false, err
+		ord := out.Device().Ordinal()
+		if err := cudart.SetDevice(ord); err != nil {
+			return err
 		}
+		h, err := cudart.GetBlasHandle(ord)
+		if err != nil {
+			return err
+		}
+		opA, err := batchedOperand(a)
+		if err != nil {
+			return err
+		}
+		opB, err := batchedOperand(b)
+		if err != nil {
+			return err
+		}
+		return cudart.GemmStridedBatched(h, a.Dim(1), b.Dim(2), a.Dim(2), opA, opB, out.Storage().CUDAPtr(), dt, a.Dim(0))
 	}
-	return a, b, false, nil
 }
 
-// isTransposedBlock reports whether b (count, K, N) is the transpose view of
-// a contiguous (count, N, K) block at offset 0: strides (N·K, 1, K).
-func isTransposedBlock(b *tensor.Tensor) bool {
-	if b.Offset() != 0 || b.IsContiguous() {
-		return false
+// batchedOperand describes a rank-3 view (count, R, C) to cuBLAS, copying
+// it to a contiguous block only when neither its rows nor its columns are
+// packed.
+func batchedOperand(t *tensor.Tensor) (cudart.BatchedOperand, error) {
+	R, Cc := t.Dim(1), t.Dim(2)
+	st := t.Strides().Slice()
+	es := t.DType().Size()
+	base := t.Storage().CUDAPtr() + uintptr(t.Offset()*es)
+	switch {
+	case st[2] == 1 && st[1] >= Cc:
+		return cudart.BatchedOperand{Ptr: base, LD: st[1], Stride: st[0]}, nil
+	case st[1] == 1 && st[2] >= R && R > 1 && Cc > 1:
+		return cudart.BatchedOperand{Ptr: base, LD: st[2], Stride: st[0], Trans: true}, nil
 	}
-	K, N := b.Dim(1), b.Dim(2)
-	st := b.Strides().Slice()
-	return st[0] == N*K && st[1] == 1 && st[2] == K && K > 1 && N > 1
+	c, err := t.Contiguous()
+	if err != nil {
+		return cudart.BatchedOperand{}, err
+	}
+	return cudart.BatchedOperand{Ptr: c.Storage().CUDAPtr(), LD: Cc, Stride: R * Cc}, nil
 }

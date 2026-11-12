@@ -403,3 +403,69 @@ func (d DataType) String() string {
 		return "F32"
 	}
 }
+
+// BatchedOperand is one row-major operand of GemmStridedBatched: Ptr is
+// the first element of slice 0, LD the distance (elements) between rows as
+// stored, Stride the distance between consecutive slices, and Trans says
+// the logical (rows, cols) matrix is stored as its transpose (cols, rows).
+// A narrowed KV-cache buffer (B·KH slices of (len, HD) rows inside a (cap,
+// HD) block) is LD = HD, Stride = cap·HD; its transpose view for q·kᵀ is
+// the same memory with Trans set.
+type BatchedOperand struct {
+	Ptr    uintptr
+	LD     int
+	Stride int
+	Trans  bool
+}
+
+// GemmStridedBatched computes C[i] = A[i] @ B[i] for `count` row-major
+// slices, A (M, K), B (K, N), C (M, N) contiguous, with each input's
+// leading dimension, slice stride and transposition taken from its
+// BatchedOperand. F32 goes through cublasSgemmStridedBatched, F16 / BF16
+// through cublasGemmStridedBatchedEx with F32 accumulation.
+func GemmStridedBatched(h *BlasHandle, m, n, k int, a, b BatchedOperand, c uintptr, dt DataType, count int) error {
+	tally(&counters.Gemms)
+	// cuBLAS is column-major: Cᵀ (n×m) = op(Bᵀ) · op(Aᵀ). A row-major
+	// (rows, cols) block is the column-major (cols, rows) block with the
+	// same leading dimension, so an operand stored untransposed is op N
+	// and one stored transposed is op T.
+	var opA, opB C.cublasOperation_t = C.CUBLAS_OP_N, C.CUBLAS_OP_N
+	if a.Trans {
+		opA = C.CUBLAS_OP_T
+	}
+	if b.Trans {
+		opB = C.CUBLAS_OP_T
+	}
+	var rc C.cublasStatus_t
+	if dt == DataF32 {
+		alpha, beta := C.float(1.0), C.float(0.0)
+		rc = C.cublasSgemmStridedBatched(
+			h.handle, opB, opA,
+			C.int(n), C.int(m), C.int(k),
+			&alpha,
+			(*C.float)(unsafe.Pointer(b.Ptr)), C.int(b.LD), C.longlong(b.Stride),
+			(*C.float)(unsafe.Pointer(a.Ptr)), C.int(a.LD), C.longlong(a.Stride),
+			&beta,
+			(*C.float)(unsafe.Pointer(c)), C.int(n), C.longlong(m*n),
+			C.int(count),
+		)
+	} else {
+		alpha, beta := C.float(1.0), C.float(0.0)
+		rc = C.cublasGemmStridedBatchedEx(
+			h.handle, opB, opA,
+			C.int(n), C.int(m), C.int(k),
+			unsafe.Pointer(&alpha),
+			unsafe.Pointer(b.Ptr), dt.cuda(), C.int(b.LD), C.longlong(b.Stride),
+			unsafe.Pointer(a.Ptr), dt.cuda(), C.int(a.LD), C.longlong(a.Stride),
+			unsafe.Pointer(&beta),
+			unsafe.Pointer(c), dt.cuda(), C.int(n), C.longlong(m*n),
+			C.int(count),
+			C.CUBLAS_COMPUTE_32F,
+			C.CUBLAS_GEMM_DEFAULT,
+		)
+	}
+	if rc != C.CUBLAS_STATUS_SUCCESS {
+		return fmt.Errorf("cublasGemmStridedBatched(%v, transA=%v, transB=%v): status %d", dt, a.Trans, b.Trans, int(rc))
+	}
+	return nil
+}

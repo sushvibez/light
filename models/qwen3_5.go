@@ -426,17 +426,15 @@ func (m *Qwen35) attention(blk *qwen35Block, h *tensor.Tensor, B, T, prior int, 
 	}
 	kvPrior, totalT := 0, T
 	if cache != nil {
+		// Fixed-capacity cache: in-place append, strided views (see
+		// KVCache.appendKV).
 		if cache.K[layer] != nil {
 			kvPrior = cache.K[layer].Dim(2)
-			if k, err = ops.Concat([]*tensor.Tensor{cache.K[layer], k}, 2); err != nil {
-				return nil, err
-			}
-			if v, err = ops.Concat([]*tensor.Tensor{cache.V[layer], v}, 2); err != nil {
-				return nil, err
-			}
+		}
+		if k, v, err = cache.appendKV(layer, k, v); err != nil {
+			return nil, err
 		}
 		totalT = kvPrior + T
-		cache.K[layer], cache.V[layer] = k, v
 	}
 	// GQA folded into the row axis (see Llama's attention): one batched
 	// matmul per KV head serves its g query heads, no repeated K / V.
@@ -444,10 +442,10 @@ func (m *Qwen35) attention(blk *qwen35Block, h *tensor.Tensor, B, T, prior int, 
 	if q, err = autograd.Reshape(q, B*KH, g*T, HD); err != nil {
 		return nil, err
 	}
-	if k, err = autograd.Reshape(k, B*KH, totalT, HD); err != nil {
+	if k, err = foldBatchHeads(k); err != nil {
 		return nil, err
 	}
-	if v, err = autograd.Reshape(v, B*KH, totalT, HD); err != nil {
+	if v, err = foldBatchHeads(v); err != nil {
 		return nil, err
 	}
 	kT, err := autograd.Transpose(k, 1, 2)

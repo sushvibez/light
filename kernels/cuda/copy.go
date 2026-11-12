@@ -3,6 +3,7 @@
 package cuda
 
 import (
+	"light/device"
 	"light/internal/cudart"
 	"light/tensor"
 )
@@ -32,4 +33,17 @@ func cudaCopyHostImpl(dst, src *tensor.Tensor) error {
 		nbytes = len(srcBytes)
 	}
 	return cudart.MemcpyHtoD(dst.Storage().CUDAPtr(), srcBytes[:nbytes])
+}
+
+func init() {
+	tensor.RegisterPitchedCopy(device.KindCUDA, cudaPitchedCopyImpl)
+}
+
+// cudaPitchedCopyImpl is tensor.Assign's CUDA path: one cudaMemcpy2D writes
+// `rows` runs of `width` elements from contiguous src into dst's storage,
+// `pitch` elements apart (a KV-cache append into a capacity buffer).
+func cudaPitchedCopyImpl(dst, src *tensor.Tensor, rows, width, pitch int) error {
+	es := uintptr(dst.DType().Size())
+	d := dst.Storage().CUDAPtr() + uintptr(dst.Offset())*es
+	return cudart.Memcpy2DDtoD(d, uintptr(pitch)*es, src.Storage().CUDAPtr(), uintptr(width)*es, uintptr(width)*es, uintptr(rows))
 }
