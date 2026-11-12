@@ -168,6 +168,15 @@ func DecodeAttention(q, kBuf, vBuf, pos *tensor.Tensor, scale float64) (*tensor.
 // of 32 up to 256, GQA group up to 16); other shapes compose.
 func decodeAttnKernelOK(hd, g int) bool { return hd%32 == 0 && hd <= 256 && g >= 1 && g <= 16 }
 
+// CanIncrementI64 reports whether IncrementI64 runs on dev.
+func CanIncrementI64(dev device.Device) bool {
+	if dev.Kind() == device.KindCPU {
+		return true
+	}
+	_, err := registry.Lookup(registry.Key{Op: "inc_i64", Dev: dev.Kind(), DType: dtype.I64})
+	return err == nil
+}
+
 // IncrementI64 adds one to every element of t in place.
 func IncrementI64(t *tensor.Tensor) error {
 	if t.DType() != dtype.I64 || !t.IsContiguous() || t.Offset() != 0 {
@@ -199,6 +208,10 @@ func checkPos(pos *tensor.Tensor, dev device.Device) error {
 
 // posValue reads the position back to the host (fallback paths only).
 func posValue(pos *tensor.Tensor) (int, error) {
+	pos, err := pos.To(device.CPU())
+	if err != nil {
+		return 0, err
+	}
 	s, err := tensor.ToSlice[int64](pos)
 	if err != nil {
 		return 0, err
