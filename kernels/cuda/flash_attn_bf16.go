@@ -25,12 +25,20 @@ const (
 // flashAttnBF16CUDA launches flash_attn_bf16_d128 (BF16 tensor cores,
 // FlashAttention-2 tiling; kernels/cuda/src/flash_attn_bf16.cu).
 //
-//	Inputs[0..2]: q, k, v (BH, S, 128) contiguous BF16
-//	Output:       (BH, S, 128) F32
-//	Attrs:        "scale" float64, "causal" bool
+//	Inputs[0..2]: q, k, v contiguous BF16, (BH, S, 128), or (B, S, H, 128)
+//	              with "seq_major"
+//	Output:       F32, same layout
+//	Attrs:        "scale" float64, "causal" bool, "seq_major" bool, "heads" int
+//	              (H, for seq_major)
 func flashAttnBF16CUDA(ctx *registry.Context) error {
 	q, k, v, out := ctx.Inputs[0], ctx.Inputs[1], ctx.Inputs[2], ctx.Output
-	BH, S, D := q.Dim(0), int32(q.Dim(1)), q.Dim(2)
+	BH, S, D := q.Dim(0), int32(q.Dim(1)), q.Dim(q.Rank()-1)
+	H, seqMajor := int32(1), int32(0)
+	if sm, _ := ctx.Attrs["seq_major"].(bool); sm {
+		// (B, S, H, D): a block per (query tile, batch-head) as before.
+		H, seqMajor = int32(q.Dim(2)), 1
+		BH, S = q.Dim(0)*q.Dim(2), int32(q.Dim(1))
+	}
 	if D != flashBF16D {
 		return fmt.Errorf("cuda flash_attention_bf16: head dim %d, want %d", D, flashBF16D)
 	}
@@ -55,7 +63,7 @@ func flashAttnBF16CUDA(ctx *registry.Context) error {
 	qPtr, kPtr, vPtr, oPtr := q.Storage().CUDAPtr(), k.Storage().CUDAPtr(), v.Storage().CUDAPtr(), out.Storage().CUDAPtr()
 	args := []unsafe.Pointer{
 		unsafe.Pointer(&qPtr), unsafe.Pointer(&kPtr), unsafe.Pointer(&vPtr), unsafe.Pointer(&oPtr),
-		unsafe.Pointer(&S), unsafe.Pointer(&scale), unsafe.Pointer(&causal),
+		unsafe.Pointer(&S), unsafe.Pointer(&H), unsafe.Pointer(&seqMajor), unsafe.Pointer(&scale), unsafe.Pointer(&causal),
 	}
 	gridX := uint32((int(S) + flashBF16TileQ - 1) / flashBF16TileQ)
 	if gridX == 0 {

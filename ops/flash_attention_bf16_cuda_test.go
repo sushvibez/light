@@ -159,3 +159,42 @@ func syncGPU(b *testing.B, x *tensor.Tensor) {
 		b.Fatal(err)
 	}
 }
+
+// The (B, S, NH, D) entry point computes exactly what the head-major one
+// does on the permuted operands (same blocks, same arithmetic).
+func TestFlashAttentionBF16SeqMajorMatchesHeadMajor(t *testing.T) {
+	gpu := gpuOrSkip(t)
+	rng := rand.New(rand.NewPCG(9, 10))
+	B, S, NH, D := 2, 177, 3, 128
+	var sm, hm [3]*tensor.Tensor
+	for i := range sm {
+		x := randTensor(t, rng, []int{B, S, NH, D}, 1.5, device.CPU(), dtype.BF16)
+		g, err := x.To(gpu)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sm[i] = g
+		if hm[i], err = g.Permute(0, 2, 1, 3); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, causal := range []bool{false, true} {
+		a, err := ops.FlashAttentionBF16SeqMajor(sm[0], sm[1], sm[2], causal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := ops.FlashAttentionBF16(hm[0], hm[1], hm[2], causal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b, err = b.Permute(0, 2, 1, 3); err != nil {
+			t.Fatal(err)
+		}
+		got, want := f32(t, a), f32(t, b)
+		for i := range got {
+			if got[i] != want[i] {
+				t.Fatalf("causal=%v: element %d: %g, head-major %g", causal, i, got[i], want[i])
+			}
+		}
+	}
+}

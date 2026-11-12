@@ -311,27 +311,23 @@ func attendOpt(q, k, v, cos, sin *tensor.Tensor, bf16 bool) (*tensor.Tensor, err
 // not apply.
 func attendBF16(q, k, v *tensor.Tensor) (*tensor.Tensor, bool, error) {
 	B, S, H, Dh := q.Dim(0), q.Dim(1), q.Dim(2), q.Dim(3)
-	var x [3]*tensor.Tensor
+	var x, hm [3]*tensor.Tensor
 	for i, t := range []*tensor.Tensor{q, k, v} {
 		c, err := ops.Cast(t, dtype.BF16)
 		if err != nil {
 			return nil, false, err
 		}
-		if x[i], err = c.Permute(0, 2, 1, 3); err != nil {
+		x[i] = c
+		if hm[i], err = c.Permute(0, 2, 1, 3); err != nil { // views, for the OK check
 			return nil, false, err
 		}
 	}
-	if !ops.FlashAttentionBF16OK(x[0], x[1], x[2]) {
+	if !ops.FlashAttentionBF16OK(hm[0], hm[1], hm[2]) {
 		return nil, false, nil
 	}
-	o, err := ops.FlashAttentionBF16(x[0], x[1], x[2], false)
+	// The kernel reads and writes (B, S, H, Dh) directly: no permute copies.
+	o, err := ops.FlashAttentionBF16SeqMajor(x[0], x[1], x[2], false)
 	if err != nil {
-		return nil, false, err
-	}
-	if o, err = o.Permute(0, 2, 1, 3); err != nil {
-		return nil, false, err
-	}
-	if o, err = o.Contiguous(); err != nil {
 		return nil, false, err
 	}
 	o, err = o.Reshape(B, S, H*Dh)

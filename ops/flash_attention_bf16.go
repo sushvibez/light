@@ -57,6 +57,53 @@ func FlashAttentionBF16(q, k, v *tensor.Tensor, causal bool) (*tensor.Tensor, er
 	return out.Reshape(B, NH, S, D)
 }
 
+// FlashAttentionBF16SeqMajor is FlashAttentionBF16 on the projections'
+// layout: q, k, v are (B, S, NH, 128) BF16 and the result is (B, S, NH, 128)
+// F32, with no permute copies (the kernel strides over the heads).
+func FlashAttentionBF16SeqMajor(q, k, v *tensor.Tensor, causal bool) (*tensor.Tensor, error) {
+	if q.Rank() != 4 {
+		return nil, fmt.Errorf("FlashAttentionBF16SeqMajor: want (B, S, NH, 128), got %v", q.Shape())
+	}
+	// The head-major check on the permuted views: same shapes, dtype, device, kernel.
+	pq, err := q.Permute(0, 2, 1, 3)
+	if err != nil {
+		return nil, err
+	}
+	pk, err := k.Permute(0, 2, 1, 3)
+	if err != nil {
+		return nil, err
+	}
+	pv, err := v.Permute(0, 2, 1, 3)
+	if err != nil {
+		return nil, err
+	}
+	if !FlashAttentionBF16OK(pq, pk, pv) {
+		return nil, fmt.Errorf("FlashAttentionBF16SeqMajor: want (B, S, NH, 128) BF16 q, k, v on one CUDA device, got %v %v %v", q.Shape(), q.DType(), q.Device())
+	}
+	var in [3]*tensor.Tensor
+	for i, t := range []*tensor.Tensor{q, k, v} {
+		if in[i], err = ensureContig(t); err != nil {
+			return nil, err
+		}
+	}
+	out, err := tensor.Empty(dtype.F32, q.Shape().Dims(), q.Device())
+	if err != nil {
+		return nil, err
+	}
+	kern, err := registry.Lookup(registry.Key{Op: "flash_attention_bf16", Dev: q.Device().Kind(), DType: dtype.BF16})
+	if err != nil {
+		return nil, err
+	}
+	if err := kern(&registry.Context{
+		Inputs: in[:],
+		Output: out,
+		Attrs:  map[string]any{"scale": 1.0 / math.Sqrt(float64(q.Dim(3))), "causal": causal, "seq_major": true},
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // FlashAttentionBF16OK reports whether FlashAttentionBF16 runs on these
 // operands: rank-4 BF16 tensors of one shape with head dim 128, on a device
 // with the kernel.

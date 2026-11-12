@@ -1,7 +1,9 @@
 // FlashAttention-2 forward on BF16 tensor cores (sm_80+), head dim 128.
 //
-// Layout: Q, K, V are (BH, S, D) row-major BF16, O is (BH, S, D) F32; one
-// batch-head is a contiguous S*D slab. A block owns FA16_BQ = 128 query rows
+// Layout: Q, K, V are BF16 and O is F32, each either head-major (B, H, S, D)
+// (seq_major 0: one batch-head is a contiguous S*D slab) or the projections'
+// own (B, S, H, D) (seq_major 1: a head's rows are H*D apart), so callers
+// need no permute copies either way. A block owns FA16_BQ = 128 query rows
 // of one batch-head (8 warps x 16 rows) and streams the keys in tiles of
 // FA16_BK = 64 through shared memory. Each warp keeps its 16 query rows'
 // A fragments, the online-softmax state (running max m, denominator l) and
@@ -45,26 +47,28 @@ __device__ __forceinline__ unsigned fa16_pair(const __nv_bfloat16 *lo, const __n
 
 // Stage rows [row0, row0 + FA16_BK) of a (S, D) BF16 slab into smem
 // (FA16_LD stride), zero-filling rows past S. 16-byte loads.
-__device__ __forceinline__ void fa16_stage(__nv_bfloat16 *dst, const __nv_bfloat16 *src, int row0, int S) {
+__device__ __forceinline__ void fa16_stage(__nv_bfloat16 *dst, const __nv_bfloat16 *src, int row0, int S, long ld) {
   const int chunks = FA16_D / 8; // uint4 per row
   for (int c = threadIdx.x; c < FA16_BK * chunks; c += blockDim.x) {
     int r = c / chunks, k = (c % chunks) * 8;
     uint4 v = make_uint4(0, 0, 0, 0);
-    if (row0 + r < S) v = *reinterpret_cast<const uint4 *>(src + (long)(row0 + r) * FA16_D + k);
+    if (row0 + r < S) v = *reinterpret_cast<const uint4 *>(src + (row0 + r) * ld + k);
     *reinterpret_cast<uint4 *>(dst + r * FA16_LD + k) = v;
   }
 }
 
 extern "C" __global__ void __launch_bounds__(FA16_WARPS * 32)
 flash_attn_bf16_d128(const __nv_bfloat16 *Q, const __nv_bfloat16 *K, const __nv_bfloat16 *V, float *O,
-                     int S, float scale, int causal) {
+                     int S, int H, int seq_major, float scale, int causal) {
   __shared__ __align__(16) __nv_bfloat16 sK[FA16_BK * FA16_LD];
   __shared__ __align__(16) __nv_bfloat16 sV[FA16_BK * FA16_LD];
 
   const int bh = blockIdx.y;
   const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
   const int g = lane / 4, t = lane % 4; // fragment row group, thread in group
-  const long base = (long)bh * S * FA16_D;
+  // Row stride and this batch-head's first element, in either layout.
+  const long ld = seq_major ? (long)H * FA16_D : FA16_D;
+  const long base = seq_major ? ((long)(bh / H) * S * H + bh % H) * FA16_D : (long)bh * S * FA16_D;
   const int q0 = blockIdx.x * FA16_BQ + warp * 16; // this warp's first query row
   const int r0 = q0 + g, r1 = q0 + g + 8;          // the two rows this thread owns
 
@@ -75,8 +79,8 @@ flash_attn_bf16_d128(const __nv_bfloat16 *Q, const __nv_bfloat16 *K, const __nv_
 #pragma unroll
     for (int ks = 0; ks < FA16_D / 16; ks++) {
       int c = ks * 16 + t * 2;
-      const __nv_bfloat16 *p0 = r0 < S ? q + (long)r0 * FA16_D : nullptr;
-      const __nv_bfloat16 *p1 = r1 < S ? q + (long)r1 * FA16_D : nullptr;
+      const __nv_bfloat16 *p0 = r0 < S ? q + r0 * ld : nullptr;
+      const __nv_bfloat16 *p1 = r1 < S ? q + r1 * ld : nullptr;
       qa[ks][0] = p0 ? *reinterpret_cast<const unsigned *>(p0 + c) : 0u;
       qa[ks][1] = p1 ? *reinterpret_cast<const unsigned *>(p1 + c) : 0u;
       qa[ks][2] = p0 ? *reinterpret_cast<const unsigned *>(p0 + c + 8) : 0u;
@@ -94,8 +98,8 @@ flash_attn_bf16_d128(const __nv_bfloat16 *Q, const __nv_bfloat16 *K, const __nv_
   if (causal) kEnd = min(S, (int)(blockIdx.x + 1) * FA16_BQ);
   for (int k0 = 0; k0 < kEnd; k0 += FA16_BK) {
     __syncthreads(); // the previous tile is no longer read
-    fa16_stage(sK, K + base, k0, S);
-    fa16_stage(sV, V + base, k0, S);
+    fa16_stage(sK, K + base, k0, S, ld);
+    fa16_stage(sV, V + base, k0, S, ld);
     __syncthreads();
 
     // S = Q K^T for this warp's 16 rows x 64 keys: 8 n-tiles of 8 keys.
@@ -192,7 +196,7 @@ flash_attn_bf16_d128(const __nv_bfloat16 *Q, const __nv_bfloat16 *K, const __nv_
 #pragma unroll
   for (int n = 0; n < FA16_D / 8; n++) {
     int c = n * 8 + t * 2;
-    if (r0 < S) *reinterpret_cast<float2 *>(o + (long)r0 * FA16_D + c) = make_float2(acc[n][0] * inv0, acc[n][1] * inv0);
-    if (r1 < S) *reinterpret_cast<float2 *>(o + (long)r1 * FA16_D + c) = make_float2(acc[n][2] * inv1, acc[n][3] * inv1);
+    if (r0 < S) *reinterpret_cast<float2 *>(o + r0 * ld + c) = make_float2(acc[n][0] * inv0, acc[n][1] * inv0);
+    if (r1 < S) *reinterpret_cast<float2 *>(o + r1 * ld + c) = make_float2(acc[n][2] * inv1, acc[n][3] * inv1);
   }
 }
