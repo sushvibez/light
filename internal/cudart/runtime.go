@@ -109,6 +109,14 @@ func MallocHost(bytes uintptr) (uintptr, error) {
 	return uintptr(ptr), nil
 }
 
+// FreeHost releases pinned host memory from MallocHost.
+func FreeHost(ptr uintptr) error {
+	if rc := C.cudaFreeHost(unsafe.Pointer(ptr)); rc != C.cudaSuccess {
+		return runtimeError(rc, "cudaFreeHost")
+	}
+	return nil
+}
+
 // MemcpyHtoDAsync queues a copy from pinned host memory on the default
 // stream: it returns at once, ordered after the kernels already queued, and
 // the source must stay untouched until the copy has run.
@@ -120,7 +128,7 @@ func MemcpyHtoDAsync(dst, src, bytes uintptr) error {
 	if bytes == 0 {
 		return nil
 	}
-	rc := C.cudaMemcpyAsync(unsafe.Pointer(dst), unsafe.Pointer(src), C.size_t(bytes), C.cudaMemcpyHostToDevice, nil)
+	rc := C.cudaMemcpyAsync(unsafe.Pointer(dst), unsafe.Pointer(src), C.size_t(bytes), C.cudaMemcpyHostToDevice, C.cudaStream_t(unsafe.Pointer(current.Load())))
 	if rc != C.cudaSuccess {
 		return runtimeError(rc, "cudaMemcpyAsync HtoD")
 	}
@@ -135,6 +143,18 @@ func MemcpyHtoD(dst uintptr, src []byte) error {
 	}
 	if len(src) == 0 {
 		return nil
+	}
+	if cur := current.Load(); cur != 0 {
+		// Queued on the current stream so it orders after the work there;
+		// a pageable source is staged before cudaMemcpyAsync returns, so
+		// src may be reused by the caller. Not capturable (graph capture
+		// rejects it), which is the behaviour a decode graph relies on
+		// to notice a step that uploads per token.
+		rc := C.cudaMemcpyAsync(unsafe.Pointer(dst), unsafe.Pointer(&src[0]), C.size_t(len(src)), C.cudaMemcpyHostToDevice, C.cudaStream_t(unsafe.Pointer(cur)))
+		if rc != C.cudaSuccess {
+			return runtimeError(rc, "cudaMemcpyAsync HtoD")
+		}
+		return StreamSynchronize(cur)
 	}
 	rc := C.cudaMemcpy(
 		unsafe.Pointer(dst),
@@ -153,6 +173,13 @@ func MemcpyDtoH(dst []byte, src uintptr) error {
 	tally(&counters.DtoH)
 	if len(dst) == 0 {
 		return nil
+	}
+	if cur := current.Load(); cur != 0 {
+		rc := C.cudaMemcpyAsync(unsafe.Pointer(&dst[0]), unsafe.Pointer(src), C.size_t(len(dst)), C.cudaMemcpyDeviceToHost, C.cudaStream_t(unsafe.Pointer(cur)))
+		if rc != C.cudaSuccess {
+			return runtimeError(rc, "cudaMemcpyAsync DtoH")
+		}
+		return StreamSynchronize(cur)
 	}
 	rc := C.cudaMemcpy(
 		unsafe.Pointer(&dst[0]),
@@ -176,6 +203,13 @@ func MemcpyDtoD(dst, src uintptr, bytes uintptr) error {
 	if bytes == 0 {
 		return nil
 	}
+	if cur := current.Load(); cur != 0 {
+		rc := C.cudaMemcpyAsync(unsafe.Pointer(dst), unsafe.Pointer(src), C.size_t(bytes), C.cudaMemcpyDeviceToDevice, C.cudaStream_t(unsafe.Pointer(cur)))
+		if rc != C.cudaSuccess {
+			return runtimeError(rc, "cudaMemcpyAsync DtoD")
+		}
+		return nil
+	}
 	rc := C.cudaMemcpy(
 		unsafe.Pointer(dst),
 		unsafe.Pointer(src),
@@ -194,6 +228,18 @@ func MemcpyDtoD(dst, src uintptr, bytes uintptr) error {
 func Memcpy2DDtoD(dst, dpitch, src, spitch, width, height uintptr) error {
 	tally(&counters.DtoD)
 	if width == 0 || height == 0 {
+		return nil
+	}
+	if cur := current.Load(); cur != 0 {
+		rc := C.cudaMemcpy2DAsync(
+			unsafe.Pointer(dst), C.size_t(dpitch),
+			unsafe.Pointer(src), C.size_t(spitch),
+			C.size_t(width), C.size_t(height),
+			C.cudaMemcpyDeviceToDevice, C.cudaStream_t(unsafe.Pointer(cur)),
+		)
+		if rc != C.cudaSuccess {
+			return runtimeError(rc, "cudaMemcpy2DAsync DtoD")
+		}
 		return nil
 	}
 	rc := C.cudaMemcpy2D(
@@ -215,6 +261,13 @@ func Memset(ptr uintptr, value byte, bytes uintptr) error {
 		traceCaller("memset")
 	}
 	if bytes == 0 {
+		return nil
+	}
+	if cur := current.Load(); cur != 0 {
+		rc := C.cudaMemsetAsync(unsafe.Pointer(ptr), C.int(value), C.size_t(bytes), C.cudaStream_t(unsafe.Pointer(cur)))
+		if rc != C.cudaSuccess {
+			return runtimeError(rc, "cudaMemsetAsync")
+		}
 		return nil
 	}
 	rc := C.cudaMemset(unsafe.Pointer(ptr), C.int(value), C.size_t(bytes))

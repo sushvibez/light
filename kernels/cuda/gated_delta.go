@@ -247,11 +247,28 @@ func causalConv1dDepthwiseLauncher(ctx *registry.Context) error {
 	if K <= 1 {
 		return nil
 	}
+	if nP == sP { // in place: the staged, per-channel shift
+		if K-1 > convMaxP {
+			return fmt.Errorf("cuda causal_conv1d_depthwise: in-place state needs K-1 ≤ %d, got %d", convMaxP, K-1)
+		}
+		inplaceFn, err := GetKernel("causal_conv1d_state_inplace_f32")
+		if err != nil {
+			return err
+		}
+		return Launch1D(inplaceFn, uint64(B*C), []unsafe.Pointer{
+			unsafe.Pointer(&xP), unsafe.Pointer(&sP),
+			unsafe.Pointer(&b32), unsafe.Pointer(&c32), unsafe.Pointer(&t32), unsafe.Pointer(&k32),
+		})
+	}
 	return Launch1D(stateFn, uint64(B*C*(K-1)), []unsafe.Pointer{
 		unsafe.Pointer(&xP), unsafe.Pointer(&sP), unsafe.Pointer(&nP),
 		unsafe.Pointer(&b32), unsafe.Pointer(&c32), unsafe.Pointer(&t32), unsafe.Pointer(&k32),
 	})
 }
+
+// convMaxP is CONV_MAX_P in gated_delta.cu: the longest conv state the
+// in-place shift stages in registers.
+const convMaxP = 15
 
 // softplusLauncher: unary softplus over a contiguous F32 tensor.
 func softplusLauncher(ctx *registry.Context) error {

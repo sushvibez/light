@@ -63,12 +63,36 @@ func newCUDA(dev device.Device, dt dtype.DType, nelems int, zero bool) (*Storage
 			return nil, err
 		}
 	}
-	return NewCUDAFromPointer(dev, dt, nelems, bytes, ptr, func() {
+	st := NewCUDAFromPointer(dev, dt, nelems, bytes, ptr, func() {
 		// Re-select the device because the cleanup may fire on a different
 		// goroutine. Ignore errors — best-effort release.
 		_ = cudart.SetDevice(ord)
 		cudaPool.release(ord, ptr, class)
-	}), nil
+	})
+	if obs := allocObserver.Load(); obs != nil {
+		(*obs)(st)
+	}
+	return st, nil
+}
+
+// allocObserver, when set, sees every CUDA storage as it is allocated. A
+// decode-graph capture installs one to retain the step's transients: the
+// captured graph refers to their addresses, so they must outlive it.
+var allocObserver atomic.Pointer[func(*Storage)]
+
+// SetCUDAAllocObserver installs fn (nil removes it) and returns the
+// previous observer.
+func SetCUDAAllocObserver(fn func(*Storage)) func(*Storage) {
+	var prev *func(*Storage)
+	if fn == nil {
+		prev = allocObserver.Swap(nil)
+	} else {
+		prev = allocObserver.Swap(&fn)
+	}
+	if prev == nil {
+		return nil
+	}
+	return *prev
 }
 
 func init() {

@@ -118,6 +118,23 @@ extern "C" __global__ void causal_conv1d_state_f32(
   state_out[idx] = src < 0 ? state_in[bc * P + (P + src)] : x[bc * T + src];
 }
 
+// In-place form of causal_conv1d_state_f32 (state_out == state_in): one
+// thread per (b, c) stages the K−1 values in registers before writing, so
+// the shift does not race with itself. n = B·C.
+#define CONV_MAX_P 15
+extern "C" __global__ void causal_conv1d_state_inplace_f32(const float *x, float *state, int B, int C, int T, int K) {
+  const int P = K - 1;
+  const long long n = (long long)B * C;
+  const long long bc = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (bc >= n || P == 0 || P > CONV_MAX_P) return;
+  float v[CONV_MAX_P];
+  for (int i = 0; i < P; i++) {
+    const int src = T - P + i;
+    v[i] = src < 0 ? state[bc * P + (P + src)] : x[bc * T + src];
+  }
+  for (int i = 0; i < P; i++) state[bc * P + i] = v[i];
+}
+
 // softplus_f32: log(1 + eˣ), x itself above 20 (torch's threshold).
 extern "C" __global__ void softplus_f32(const float *a, float *out, long long n) {
   const long long idx = (long long)blockIdx.x * blockDim.x + threadIdx.x;

@@ -14,6 +14,3 @@ func MemInfo() (free, total uintptr, err error) { return 0, 0, ErrNotBuilt }
 
 // DeviceName reports the CUDA device's name; always fails in nocuda builds.
 func DeviceName(ordinal int) (string, error) { return "", ErrNotBuilt }
-
-// DeviceSynchronize waits for queued device work; always fails in nocuda builds.
-func DeviceSynchronize() error { return ErrNotBuilt }

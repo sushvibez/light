@@ -150,7 +150,7 @@ func MatmulFP8RowMajor(lt *LtHandle, m, n, k int, a, b, c uintptr, aScale, bScal
 		unsafe.Pointer(&beta),
 		unsafe.Pointer(c), cDesc,
 		unsafe.Pointer(c), cDesc,
-		&heur.algo, unsafe.Pointer(lt.workspace), ws, nil)
+		&heur.algo, unsafe.Pointer(lt.workspace), ws, C.cudaStream_t(unsafe.Pointer(current.Load())))
 	if rc != C.CUBLAS_STATUS_SUCCESS {
 		return fmt.Errorf("cublasLtMatmul(FP8→%v): status %d", cType, int(rc))
 	}

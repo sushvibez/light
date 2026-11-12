@@ -11,6 +11,7 @@ import (
 	"light/device"
 	"light/dtype"
 	"light/internal/cudart"
+	"light/ops"
 	"light/tensor"
 )
 
@@ -124,8 +125,52 @@ func TestDecodeStepProfile(t *testing.T) {
 		if os.Getenv("LIGHT_PROFILE_TRACE") != "" {
 			t.Logf("  driver calls per step:%s", cudart.TraceTop(trace, 64))
 		}
+		// The same step as a captured graph: one upload and one launch per
+		// token, the argmax and its read-back as in the engine.
+		g, err := NewDecodeGraph(m, cache, dev, cache.Len+steps+8)
+		if err != nil {
+			t.Logf("  graph: %v", err)
+		} else {
+			for i := 0; i < 4; i++ {
+				logits, err := g.Step(next)
+				if err != nil {
+					t.Fatal(err)
+				}
+				next = int64(argmaxDevice(t, logits))
+			}
+			before := cudart.ReadCounters()
+			t0 := time.Now()
+			for i := 0; i < steps; i++ {
+				logits, err := g.Step(next)
+				if err != nil {
+					t.Fatal(err)
+				}
+				next = int64(argmaxDevice(t, logits))
+			}
+			el := time.Since(t0)
+			c := cudart.ReadCounters().Sub(before)
+			t.Logf("  graph (%d nodes): %.2f ms/step (%.1f tok/s); per step launches %d graph launches %d HtoD %d DtoH %d mallocs %d",
+				g.Nodes(), ms(time.Duration(el)), float64(steps)/el.Seconds(), c.Launches/steps, c.GraphLaunches/steps, c.HtoD/steps, c.DtoH/steps, c.Mallocs/steps)
+			_ = cudart.DeviceSynchronize()
+			g.Close()
+		}
 		cache.Reset()
 	}
+}
+
+// argmaxDevice is the engine's greedy sampler: argmax on the device, one
+// index read back.
+func argmaxDevice(t *testing.T, logits *tensor.Tensor) int {
+	t.Helper()
+	am, err := ops.Argmax(logits, -1, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cpu, err := am.To(device.CPU())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return int(tensor.MustSlice[int64](cpu)[0])
 }
 
 // hfCached reports whether repo has a config.json in the local HF cache.
