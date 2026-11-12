@@ -261,6 +261,14 @@ func (a *fluxAttn) qkv(x *tensor.Tensor, H, Dh int) (q, k, v *tensor.Tensor, err
 // attend runs RoPE + softmax(q·kᵀ/√Dh)·v over (B, S, H, Dh) inputs and
 // returns (B, S, H·Dh).
 func attend(q, k, v, cos, sin *tensor.Tensor) (*tensor.Tensor, error) {
+	return attendOpt(q, k, v, cos, sin, false)
+}
+
+// attendOpt is attend; with bf16 the attention itself runs on BF16 tensor
+// cores where ops.FlashAttentionBF16 applies (q, k, v rounded to BF16 after
+// RoPE, F32 out), for models that run at 16 bits upstream (Mixed16
+// linears on CUDA). Elsewhere it is attend.
+func attendOpt(q, k, v, cos, sin *tensor.Tensor, bf16 bool) (*tensor.Tensor, error) {
 	B, S, H, Dh := q.Dim(0), q.Dim(1), q.Dim(2), q.Dim(3)
 	var err error
 	if q, err = applyFluxRoPE(q, cos, sin); err != nil {
@@ -270,6 +278,11 @@ func attend(q, k, v, cos, sin *tensor.Tensor) (*tensor.Tensor, error) {
 		return nil, err
 	}
 	perm := func(t *tensor.Tensor) (*tensor.Tensor, error) { return autograd.Permute(t, 0, 2, 1, 3) }
+	if bf16 && !q.RequiresGrad() {
+		if o, ok, err := attendBF16(q, k, v); err != nil || ok {
+			return o, err
+		}
+	}
 	if q, err = perm(q); err != nil {
 		return nil, err
 	}
@@ -290,6 +303,35 @@ func attend(q, k, v, cos, sin *tensor.Tensor) (*tensor.Tensor, error) {
 		return nil, err
 	}
 	return o.Reshape(B, S, H*Dh)
+}
+
+// attendBF16 runs attention for (B, S, H, Dh) q, k (rotated) and v on
+// BF16 tensor cores: cast, (B, H, S, Dh), ops.FlashAttentionBF16, back to
+// (B, S, H·Dh) F32. ok is false (and nothing is done) where the kernel does
+// not apply.
+func attendBF16(q, k, v *tensor.Tensor) (*tensor.Tensor, bool, error) {
+	B, S, H, Dh := q.Dim(0), q.Dim(1), q.Dim(2), q.Dim(3)
+	var x, hm [3]*tensor.Tensor
+	for i, t := range []*tensor.Tensor{q, k, v} {
+		c, err := ops.Cast(t, dtype.BF16)
+		if err != nil {
+			return nil, false, err
+		}
+		x[i] = c
+		if hm[i], err = c.Permute(0, 2, 1, 3); err != nil { // views, for the OK check
+			return nil, false, err
+		}
+	}
+	if !ops.FlashAttentionBF16OK(hm[0], hm[1], hm[2]) {
+		return nil, false, nil
+	}
+	// The kernel reads and writes (B, S, H, Dh) directly: no permute copies.
+	o, err := ops.FlashAttentionBF16SeqMajor(x[0], x[1], x[2], false)
+	if err != nil {
+		return nil, false, err
+	}
+	o, err = o.Reshape(B, S, H*Dh)
+	return o, true, err
 }
 
 // modulation is linear(silu(temb)) split into n (B, 1, D) chunks.

@@ -38,7 +38,12 @@ type Linear struct {
 	WBlock      [2]int
 	// W4 holds a group-quantized 4-bit weight (GPTQ / AWQ, converted to
 	// quant.Int4) instead of W; Forward runs ops.MatMulInt4.
-	W4          *quant.Int4
+	W4 *quant.Int4
+	// Mixed16 lets F32 activations against a BF16 / F16 weight round to the
+	// weight's type for a tensor-core GEMM (F32 accumulate and output) on
+	// devices that have one (CUDA); elsewhere the product stays exact.
+	// Set for Linears built under WithWeightStorage16Mixed.
+	Mixed16     bool
 	inFeatures  int
 	outFeatures int
 }
@@ -124,6 +129,7 @@ func newLinearImpl(inFeatures, outFeatures int, bias bool, wdt dtype.DType, dev 
 	}
 	var w *tensor.Tensor
 	var err error
+	mixed := false
 	if kaiming {
 		// Kaiming uniform: U(-k, +k) with k = 1/sqrt(inFeatures). Init in F32
 		// on CPU, cast to wdt on CPU, then transfer — that way no transient
@@ -153,13 +159,14 @@ func newLinearImpl(inFeatures, outFeatures int, bias bool, wdt dtype.DType, dev 
 		// Allocate directly on `dev` at the target dtype. One cudaMalloc, no
 		// CPU pass, no Kaiming init — the loader is expected to fill values
 		// before any forward.
-		wd, _ := weightDType16(wdt, inFeatures) // 16-bit storage loads
+		wd, w16, m := weightDType16Mixed(wdt, inFeatures) // 16-bit storage loads
+		mixed = m && w16
 		w, err = tensor.Zeros(wd, []int{outFeatures, inFeatures}, dev)
 		if err != nil {
 			return nil, err
 		}
 	}
-	l := &Linear{W: w, inFeatures: inFeatures, outFeatures: outFeatures}
+	l := &Linear{W: w, Mixed16: mixed, inFeatures: inFeatures, outFeatures: outFeatures}
 	if bias {
 		// Bias matches W's dtype — no runtime cast needed during Forward.
 		// Loader is responsible for filling the right values via the same
@@ -243,7 +250,15 @@ func (l *Linear) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 		if err2 != nil {
 			return nil, err2
 		}
-		y, err = ops.MatMulW16(flatC, w)
+		if l.Mixed16 && device.IsCUDA(flatC.Device()) {
+			wT, err2 := w.Transpose(0, 1)
+			if err2 != nil {
+				return nil, err2
+			}
+			y, err = ops.MatMulMixed(flatC, wT)
+		} else {
+			y, err = ops.MatMulW16(flatC, w)
+		}
 	} else if quantized {
 		// GGUF weight: fused dequant-matmul (no autograd; inference only).
 		flatC, err2 := flat.Contiguous()

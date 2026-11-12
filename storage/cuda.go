@@ -125,13 +125,39 @@ type cudaCachingPool struct {
 	cached int // bytes held in free lists
 	order  []poolKey
 	fresh  atomic.Int64 // bytes of cudaMalloc since the last forced GC
+	handed atomic.Int64 // bytes handed out (cache hits too) since the last forced GC
 }
 
-// PoolCapBytes is the most device memory the allocator keeps cached.
-var PoolCapBytes = 2 << 30
+// PoolCapBytes is the most device memory the allocator keeps cached; 0
+// (the default) means a quarter of the device's memory, at least
+// poolCapMin. Past the cap every release is a cudaFree, which waits for the
+// device: a fixed 2 GB cap evicted ~860 blocks per Z-Image 1024² step on
+// the L4 (each step cycles tens of GB of activations through the pool) and
+// left the GPU idle about a third of the time. A cudaMalloc that fails
+// drains the cache before retrying, so cached blocks never starve a load.
+var PoolCapBytes = 0
+
+const poolCapMin = 2 << 30
+
+var autoPoolCap = sync.OnceValue(func() int {
+	_, total, err := cudart.MemInfo()
+	if err != nil || int(total)/4 < poolCapMin {
+		return poolCapMin
+	}
+	return int(total) / 4
+})
+
+// poolCap is the cache cap in force.
+func poolCap() int {
+	if PoolCapBytes > 0 {
+		return PoolCapBytes
+	}
+	return autoPoolCap()
+}
 
 // FreshBytesPerGC is how much device memory may be cudaMalloc'd between
-// forced garbage collections (0 disables them); see cudaCachingPool.alloc.
+// forced garbage collections (0 disables them, including the one after
+// every half pool cap handed out); see cudaCachingPool.alloc.
 var FreshBytesPerGC int64 = 1 << 30
 
 // sizeClass rounds a byte count to its class: 512-byte steps below 1 MB,
@@ -149,6 +175,16 @@ func (p *cudaCachingPool) alloc(ord, bytes int) (uintptr, int, error) {
 	}
 	class := sizeClass(bytes)
 	key := poolKey{ord, class}
+	// Dead tensors come back only through GC cleanups. Collecting after every
+	// half cap handed out returns them while the cache still has room for
+	// them: waiting for misses instead (FreshBytesPerGC alone) lets a
+	// step drain the whole cache, malloc more, then get it all back at once,
+	// past the cap, as cudaFree evictions every cycle.
+	if FreshBytesPerGC > 0 && p.handed.Add(int64(class)) >= int64(poolCap()/2) {
+		p.handed.Store(0)
+		p.fresh.Store(0)
+		forcedGC()
+	}
 	p.mu.Lock()
 	if l := p.free[key]; len(l) > 0 {
 		ptr := l[len(l)-1]
@@ -166,7 +202,8 @@ func (p *cudaCachingPool) alloc(ord, bytes int) (uintptr, int, error) {
 	// prefill held 5 GB of dead activations otherwise).
 	if FreshBytesPerGC > 0 && p.fresh.Add(int64(class)) >= FreshBytesPerGC {
 		p.fresh.Store(0)
-		runtime.GC()
+		p.handed.Store(0)
+		forcedGC()
 	}
 	ptr, err := cudart.Malloc(uintptr(class))
 	// Out of memory: drop the cache and retry; then collect, since the device
@@ -174,6 +211,7 @@ func (p *cudaCachingPool) alloc(ord, bytes int) (uintptr, int, error) {
 	// their own goroutine, hence the short waits) and the GC cannot see
 	// device memory pressure.
 	for attempt := 0; err != nil && attempt < 4; attempt++ {
+		poolStats.oomRetries.Add(1)
 		if attempt > 0 {
 			runtime.GC()
 			time.Sleep(time.Duration(10<<attempt) * time.Millisecond)
@@ -194,7 +232,8 @@ func (p *cudaCachingPool) release(ord int, ptr uintptr, class int) {
 	p.order = append(p.order, key)
 	p.cached += class
 	var evict []uintptr
-	for p.cached > PoolCapBytes && len(p.order) > 0 {
+	limit := poolCap()
+	for p.cached > limit && len(p.order) > 0 {
 		k := p.order[0]
 		p.order = p.order[1:]
 		l := p.free[k]
@@ -206,9 +245,56 @@ func (p *cudaCachingPool) release(ord int, ptr uintptr, class int) {
 		p.cached -= k.class
 	}
 	p.mu.Unlock()
-	for _, e := range evict {
+	if len(evict) > 0 {
+		queueEvictions(evict)
+	}
+}
+
+// Evicted blocks are freed on their own goroutine. A cudaFree waits for
+// the device, and release runs on the GC's cleanup goroutine: freeing
+// there held up every other dead tensor's return to the cache behind ~30 ms
+// waits, so allocations missed, malloc'd afresh and overflowed the cap
+// again (hundreds of evictions per Z-Image step).
+var evictQ struct {
+	mu      sync.Mutex
+	pending []uintptr
+	wake    chan struct{}
+	once    sync.Once
+}
+
+func queueEvictions(ptrs []uintptr) {
+	evictQ.once.Do(func() {
+		evictQ.wake = make(chan struct{}, 1)
+		go func() {
+			for range evictQ.wake {
+				flushEvictions()
+			}
+		}()
+	})
+	evictQ.mu.Lock()
+	evictQ.pending = append(evictQ.pending, ptrs...)
+	evictQ.mu.Unlock()
+	select {
+	case evictQ.wake <- struct{}{}:
+	default:
+	}
+}
+
+// flushEvictions frees the queued evictions now.
+func flushEvictions() {
+	evictQ.mu.Lock()
+	ptrs := evictQ.pending
+	evictQ.pending = nil
+	evictQ.mu.Unlock()
+	if len(ptrs) == 0 {
+		return
+	}
+	t0 := time.Now()
+	for _, e := range ptrs {
 		_ = cudart.Free(e)
 	}
+	poolStats.evictions.Add(int64(len(ptrs)))
+	poolStats.evictNanos.Add(int64(time.Since(t0)))
 }
 
 // Drain returns every cached block to the driver (used when a model is
@@ -225,6 +311,33 @@ func (p *cudaCachingPool) Drain() {
 	p.mu.Unlock()
 	for _, e := range all {
 		_ = cudart.Free(e)
+	}
+	flushEvictions() // blocks still queued for the eviction goroutine
+}
+
+// poolStats counts the caching allocator's slow paths (CUDAPoolStats).
+var poolStats struct {
+	forcedGCs, oomRetries, evictions atomic.Int64
+	gcNanos, evictNanos              atomic.Int64
+}
+
+// forcedGC is the allocator's collection, timed.
+func forcedGC() {
+	t0 := time.Now()
+	runtime.GC()
+	poolStats.forcedGCs.Add(1)
+	poolStats.gcNanos.Add(int64(time.Since(t0)))
+}
+
+// CUDAPoolStats reports the caching allocator's slow paths since the
+// process started: forced collections, retries of a failed cudaMalloc
+// (each drains the cache; later ones also collect and wait), and blocks
+// evicted past the cap (a cudaFree each), with the wall time the forced
+// collections and the evictions blocked their caller.
+func CUDAPoolStats() PoolStats {
+	return PoolStats{
+		ForcedGCs: poolStats.forcedGCs.Load(), OOMRetries: poolStats.oomRetries.Load(), Evictions: poolStats.evictions.Load(),
+		GCTime: time.Duration(poolStats.gcNanos.Load()), EvictTime: time.Duration(poolStats.evictNanos.Load()),
 	}
 }
 

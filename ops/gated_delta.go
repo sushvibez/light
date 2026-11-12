@@ -3,6 +3,7 @@ package ops
 import (
 	"fmt"
 
+	"light/device"
 	"light/dtype"
 	"light/internal/registry"
 	"light/tensor"
@@ -185,7 +186,10 @@ func causalConv1dDepthwise(x, w, state *tensor.Tensor, silu, inPlace bool) (out,
 	if out, err = tensor.Empty(dtype.F32, x.Shape().Dims(), dev); err != nil {
 		return nil, nil, err
 	}
-	if inPlace {
+	// WebGPU cannot bind one buffer as both a read-only input and the
+	// written state: there the new state is computed aside and copied back.
+	alias := inPlace && dev.Kind() != device.KindWebGPU
+	if alias {
 		newState = ins[2]
 	} else if newState, err = tensor.Empty(dtype.F32, []int{B, C, K - 1}, dev); err != nil {
 		return nil, nil, err
@@ -201,6 +205,12 @@ func causalConv1dDepthwise(x, w, state *tensor.Tensor, silu, inPlace bool) (out,
 		Attrs:  map[string]any{"silu": silu},
 	}); err != nil {
 		return nil, nil, err
+	}
+	if inPlace && !alias {
+		if err := ins[2].CopyFrom(newState); err != nil {
+			return nil, nil, err
+		}
+		newState = ins[2]
 	}
 	return out, newState, nil
 }

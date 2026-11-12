@@ -294,6 +294,12 @@ func TestClampParity(t *testing.T) {
 	}
 }
 
+// ops.Affine (x*mul + add), the attention-score scale.
+func TestAffineParity(t *testing.T) {
+	x := mustNew(t, randF32(1000, 81), []int{10, 100}, device.CPU())
+	parity1(t, "affine", x, func(a *tensor.Tensor) (*tensor.Tensor, error) { return ops.Affine(a, 0.125, -0.5) }, 1e-6)
+}
+
 func TestNormParity(t *testing.T) {
 	cpu := device.CPU()
 	rows, cols := 37, 768

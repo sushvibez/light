@@ -10,7 +10,6 @@ import (
 	"light/device"
 	"light/dtype"
 	"light/ops"
-	"light/tensor"
 )
 
 // The batched GEMM must read KV-cache views in place: a (B, KH, cap, HD)
@@ -74,18 +73,4 @@ func TestMatMulBatchedStridedViewsCUDA(t *testing.T) {
 			check("attn·v", c, f32(t, refC))
 		}
 	}
-}
-
-func f32(t *testing.T, x *tensor.Tensor) []float32 {
-	t.Helper()
-	c, err := x.To(device.CPU())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.DType() != dtype.F32 {
-		if c, err = ops.Cast(c, dtype.F32); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return tensor.MustSlice[float32](c)
 }

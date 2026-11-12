@@ -1,3 +1,5 @@
+//go:build !nocuda && cgo
+
 package ops_test
 
 import (

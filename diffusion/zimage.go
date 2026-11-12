@@ -131,8 +131,14 @@ func (p *ZImage) loadEncoder() (err error) {
 	return nil
 }
 
+// loadTransformer loads the DiT; with 16-bit storage its linears compute
+// at BF16 on CUDA (nn.WithWeightStorage16Mixed), as diffusers runs it.
 func (p *ZImage) loadTransformer() (err error) {
-	if err = p.load16(func() (err error) {
+	load := p.load16
+	if p.opts.Storage16 {
+		load = func(f func() error) error { return nn.WithWeightStorage16Mixed(dtype.BF16, f) }
+	}
+	if err = load(func() (err error) {
 		p.Transformer, err = models.LoadZImageTransformer(filepath.Join(p.dir, "transformer"), p.Dev)
 		return
 	}); err != nil {
@@ -217,15 +223,18 @@ func (p *ZImage) Generate(o ZImageOptions) (*ZImageResult, error) {
 	if o.Height == 0 {
 		o.Height = 1024
 	}
+	pt := newPhaseTimer()
 	if p.TextEncoder == nil {
 		if err := p.loadEncoder(); err != nil {
 			return nil, err
 		}
+		pt.mark("load encoder", nil)
 	}
 	cap, ids, err := p.encode(o.Prompt, o.MaxSeqLen)
 	if err != nil {
 		return nil, err
 	}
+	pt.mark("encode", cap)
 	var neg *tensor.Tensor
 	if o.Guidance > 0 {
 		if neg, _, err = p.encode(o.NegativePrompt, o.MaxSeqLen); err != nil {
@@ -236,10 +245,12 @@ func (p *ZImage) Generate(o ZImageOptions) (*ZImageResult, error) {
 		p.TextEncoder = nil
 		releaseMemory()
 	}
+	pt.mark("free encoder", nil)
 	if p.Transformer == nil {
 		if err := p.loadTransformer(); err != nil {
 			return nil, err
 		}
+		pt.mark("load transformer", nil)
 	}
 	C := p.inC
 	h := 2 * (o.Height / (p.vaeScale * 2))
@@ -282,6 +293,7 @@ func (p *ZImage) Generate(o ZImageOptions) (*ZImageResult, error) {
 	for i := first; i < o.Steps; i++ {
 		t := sigmas[i] * float32(p.Scheduler.NumTrainTimesteps)
 		tm := (1000 - t) / 1000
+		endProfile := stepProfile(i, p.Dev)
 		v, err := p.Transformer.Forward(x, cap, tm)
 		if err != nil {
 			return nil, fmt.Errorf("z-image step %d: %w", i, err)
@@ -311,11 +323,14 @@ func (p *ZImage) Generate(o ZImageOptions) (*ZImageResult, error) {
 		if x, err = ops.Add(x, v); err != nil {
 			return nil, err
 		}
+		endProfile()
+		pt.mark(fmt.Sprintf("step %d", i), x)
 	}
 	if p.opts.Sequential {
 		p.Transformer = nil
 		releaseMemory()
 	}
+	pt.mark("free transformer", nil)
 	z, err := x.Reshape(1, C, h, w)
 	if err != nil {
 		return nil, err
@@ -335,5 +350,6 @@ func (p *ZImage) Generate(o ZImageOptions) (*ZImageResult, error) {
 	if img, err = toUnitRange(img); err != nil {
 		return nil, err
 	}
+	pt.mark("vae decode", img)
 	return &ZImageResult{Image: img, Caption: cap, IDs: ids, Sigmas: sigmas}, nil
 }

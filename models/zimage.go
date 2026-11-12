@@ -57,6 +57,17 @@ type ZImageTransformer struct {
 	CtxRefiner   []*zImageBlock
 	Layers       []*zImageBlock
 	ones, zeros  *tensor.Tensor
+	onesDim      *tensor.Tensor // (Dim,) ones for the final LayerNorm, built on first use
+	rope         *zImageRoPE    // the last shape's RoPE tables (the same every step)
+}
+
+// zImageRoPE caches the RoPE tables for one token layout: building them is
+// host work plus uploads, and an upload waits for the GPU queue to drain.
+type zImageRoPE struct {
+	lp, sp, xReal, wt  int
+	dev                device.Device
+	xc, xs, cc, cs, uc *tensor.Tensor
+	us                 *tensor.Tensor
 }
 
 type zImageBlock struct {
@@ -182,7 +193,7 @@ func (m *ZImageTransformer) block(b *zImageBlock, x, adaln, cos, sin *tensor.Ten
 	if err != nil {
 		return nil, err
 	}
-	a, err := attend(q, k, v, cos, sin)
+	a, err := attendOpt(q, k, v, cos, sin, b.Out.Mixed16)
 	if err != nil {
 		return nil, err
 	}
@@ -338,24 +349,11 @@ func (m *ZImageTransformer) Forward(latents, caption *tensor.Tensor, tModel floa
 	if xe, err = withPadToken(xe, xReal, m.XPad); err != nil {
 		return nil, err
 	}
-	// Position ids: caption (1+i, 0, 0); image (Lp+1, row, col), pads (0, 0, 0).
-	capIDs := make([]float32, Lp*3)
-	for i := range Lp {
-		capIDs[i*3] = float32(1 + i)
-	}
-	xIDs := make([]float32, Sp*3)
-	for i := range xReal {
-		xIDs[i*3], xIDs[i*3+1], xIDs[i*3+2] = float32(Lp+1), float32(i/wt), float32(i%wt)
-	}
-	Dh := cfg.headDim()
-	xc, xs, err := fluxRoPETables(cfg.AxesDims, cfg.RopeTheta, Dh, xIDs, Sp, dev)
+	rp, err := m.ropeTables(Lp, Sp, xReal, wt, dev)
 	if err != nil {
 		return nil, err
 	}
-	cc, cs, err := fluxRoPETables(cfg.AxesDims, cfg.RopeTheta, Dh, capIDs, Lp, dev)
-	if err != nil {
-		return nil, err
-	}
+	xc, xs, cc, cs := rp.xc, rp.xs, rp.cc, rp.cs
 	for i, b := range m.NoiseRefiner {
 		if xe, err = m.block(b, xe, temb, xc, xs); err != nil {
 			return nil, fmt.Errorf("z-image: noise refiner %d: %w", i, err)
@@ -370,14 +368,7 @@ func (m *ZImageTransformer) Forward(latents, caption *tensor.Tensor, tModel floa
 	if err != nil {
 		return nil, err
 	}
-	uc, err := ops.Concat([]*tensor.Tensor{xc, cc}, 1)
-	if err != nil {
-		return nil, err
-	}
-	us, err := ops.Concat([]*tensor.Tensor{xs, cs}, 1)
-	if err != nil {
-		return nil, err
-	}
+	uc, us := rp.uc, rp.us
 	for i, b := range m.Layers {
 		if u, err = m.block(b, u, temb, uc, us); err != nil {
 			return nil, fmt.Errorf("z-image: layer %d: %w", i, err)
@@ -398,11 +389,12 @@ func (m *ZImageTransformer) Forward(latents, caption *tensor.Tensor, tModel floa
 	if sc, err = sc.Reshape(1, 1, cfg.Dim); err != nil {
 		return nil, err
 	}
-	ones, err := tensor.Ones(dtype.F32, []int{cfg.Dim}, dev)
-	if err != nil {
-		return nil, err
+	if m.onesDim == nil || !m.onesDim.Device().SameAs(dev) {
+		if m.onesDim, err = tensor.Ones(dtype.F32, []int{cfg.Dim}, dev); err != nil {
+			return nil, err
+		}
 	}
-	o, err := ops.LayerNorm(u, ones, m.zeros, 1e-6)
+	o, err := ops.LayerNorm(u, m.onesDim, m.zeros, 1e-6)
 	if err != nil {
 		return nil, err
 	}
@@ -429,6 +421,40 @@ func (m *ZImageTransformer) Forward(latents, caption *tensor.Tensor, tModel floa
 		return nil, err
 	}
 	return o.Reshape(C, Hh, Ww)
+}
+
+// ropeTables returns the RoPE tables for a token layout: image tokens
+// (Lp+1, row, col) with pads at (0, 0, 0), caption tokens (1+i, 0, 0), and
+// their concatenation for the joint layers. The last layout's are kept.
+func (m *ZImageTransformer) ropeTables(Lp, Sp, xReal, wt int, dev device.Device) (*zImageRoPE, error) {
+	if r := m.rope; r != nil && r.lp == Lp && r.sp == Sp && r.xReal == xReal && r.wt == wt && r.dev.SameAs(dev) {
+		return r, nil
+	}
+	cfg := m.Cfg
+	capIDs := make([]float32, Lp*3)
+	for i := range Lp {
+		capIDs[i*3] = float32(1 + i)
+	}
+	xIDs := make([]float32, Sp*3)
+	for i := range xReal {
+		xIDs[i*3], xIDs[i*3+1], xIDs[i*3+2] = float32(Lp+1), float32(i/wt), float32(i%wt)
+	}
+	r := &zImageRoPE{lp: Lp, sp: Sp, xReal: xReal, wt: wt, dev: dev}
+	var err error
+	if r.xc, r.xs, err = fluxRoPETables(cfg.AxesDims, cfg.RopeTheta, cfg.headDim(), xIDs, Sp, dev); err != nil {
+		return nil, err
+	}
+	if r.cc, r.cs, err = fluxRoPETables(cfg.AxesDims, cfg.RopeTheta, cfg.headDim(), capIDs, Lp, dev); err != nil {
+		return nil, err
+	}
+	if r.uc, err = ops.Concat([]*tensor.Tensor{r.xc, r.cc}, 1); err != nil {
+		return nil, err
+	}
+	if r.us, err = ops.Concat([]*tensor.Tensor{r.xs, r.cs}, 1); err != nil {
+		return nil, err
+	}
+	m.rope = r
+	return r, nil
 }
 
 // zImageTimestep is TimestepEmbedder.timestep_embedding(t, 256): [cos | sin]

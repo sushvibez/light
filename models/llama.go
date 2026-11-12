@@ -579,10 +579,11 @@ func (c *KVCache) position(dev device.Device) (*tensor.Tensor, error) {
 
 // advance records that T more positions were cached. A single decode
 // token also bumps the device position in place, so the next step needs
-// no upload; a longer run (prefill) leaves it for position() to refresh.
+// no upload; a longer run (prefill), or a device without an in-place
+// increment kernel (WebGPU), leaves it for position() to refresh.
 func (c *KVCache) advance(T int) error {
 	c.Len += T
-	if c.pos != nil && c.posSynced && T == 1 {
+	if c.pos != nil && c.posSynced && T == 1 && ops.CanIncrementI64(c.pos.Device()) {
 		return ops.IncrementI64(c.pos)
 	}
 	c.posSynced = false

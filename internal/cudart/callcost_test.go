@@ -1,3 +1,5 @@
+//go:build !nocuda && cgo
+
 package cudart_test
 
 import (

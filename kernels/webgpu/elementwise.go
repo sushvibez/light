@@ -27,12 +27,17 @@ func init() {
 	for op, code := range unaryOp {
 		registry.Register(registry.Key{Op: op, Dev: device.KindWebGPU, DType: dtype.F32}, makeUnary(op, code))
 	}
-	registry.Register(registry.Key{Op: "clamp", Dev: device.KindWebGPU, DType: dtype.F32}, clampF32)
+	registry.Register(registry.Key{Op: "clamp", Dev: device.KindWebGPU, DType: dtype.F32}, makeUnaryParam(18))
+	registry.Register(registry.Key{Op: "affine", Dev: device.KindWebGPU, DType: dtype.F32}, makeUnaryParam(19))
 }
 
-// clampF32: ops.Clamp (unary op 18 with the bounds in the params' last two
-// slots; ±Inf bounds pass through).
-func clampF32(ctx *registry.Context) error {
+// makeUnaryParam: a two-parameter unary op with p0, p1 in the params' last
+// two slots: ops.Clamp (18; ±Inf bounds pass through), ops.Affine (19).
+func makeUnaryParam(code uint32) registry.Kernel {
+	return func(ctx *registry.Context) error { return unaryParamF32(ctx, code) }
+}
+
+func unaryParamF32(ctx *registry.Context, code uint32) error {
 	a, out := ctx.Inputs[0], ctx.Output
 	lo, _ := ctx.Attrs["p0"].(float64)
 	hi, _ := ctx.Attrs["p1"].(float64)
@@ -48,7 +53,7 @@ func clampF32(ctx *registry.Context) error {
 	if n == 0 {
 		return nil
 	}
-	params, err := d.Uniform(18, uint32(n), f32bits(float32(lo)), f32bits(float32(hi)))
+	params, err := d.Uniform(code, uint32(n), f32bits(float32(lo)), f32bits(float32(hi)))
 	if err != nil {
 		return err
 	}
