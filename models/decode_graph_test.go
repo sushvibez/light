@@ -27,14 +27,17 @@ func TestDecodeGraphMatchesEager(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
-		repo string
-		load func(string, device.Device, dtype.DType) (CausalLM, error)
+		repo   string
+		prompt int // prefill length (past a sliding window where the model has one)
+		load   func(string, device.Device, dtype.DType) (CausalLM, error)
 	}{
-		{"meta-llama/Llama-3.2-1B-Instruct", func(r string, d device.Device, dt dtype.DType) (CausalLM, error) { return LoadCausalLMFromHF(r, d, dt) }},
-		{"Qwen/Qwen3.5-0.8B", func(r string, d device.Device, dt dtype.DType) (CausalLM, error) { return LoadQwen35FromHF(r, d, dt) }},
-		{"gguf:llama-3.2-1b-instruct-q4_k_m.gguf", func(r string, d device.Device, dt dtype.DType) (CausalLM, error) {
+		{"meta-llama/Llama-3.2-1B-Instruct", 200, func(r string, d device.Device, dt dtype.DType) (CausalLM, error) { return LoadCausalLMFromHF(r, d, dt) }},
+		{"Qwen/Qwen3.5-0.8B", 200, func(r string, d device.Device, dt dtype.DType) (CausalLM, error) { return LoadQwen35FromHF(r, d, dt) }},
+		{"gguf:llama-3.2-1b-instruct-q4_k_m.gguf", 200, func(r string, d device.Device, dt dtype.DType) (CausalLM, error) {
 			return LoadLlamaGGUF(filepath.Join(ggufSearchDir(), strings.TrimPrefix(r, "gguf:")), d)
 		}},
+		{"unsloth/gemma-3-1b-it", 600, func(r string, d device.Device, dt dtype.DType) (CausalLM, error) { return LoadGemma3FromHF(r, d, dt) }},
+		{"ibm-granite/granite-4.0-micro", 200, func(r string, d device.Device, dt dtype.DType) (CausalLM, error) { return LoadCausalLMFromHF(r, d, dt) }},
 	} {
 		if f := os.Getenv("LIGHT_PROFILE_MODEL"); f != "" && !strings.Contains(tc.repo, f) {
 			continue
@@ -53,7 +56,7 @@ func TestDecodeGraphMatchesEager(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ids := make([]int64, 200) // prefill past the first split-K block of 128 keys
+		ids := make([]int64, tc.prompt) // past the first split-K blocks; past the window for Gemma 3
 		for i := range ids {
 			ids[i] = int64(1000 + 7*i)
 		}

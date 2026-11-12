@@ -3,6 +3,7 @@ package models
 import (
 	"fmt"
 	"math"
+	"sync"
 
 	"light/autograd"
 	"light/device"
@@ -75,9 +76,12 @@ type Gemma3 struct {
 	embScale  *tensor.Tensor // (1,) √D rounded to the activation dtype
 	embNorm   *nn.RMSNorm    // weightless (ones) RMSNorm on the embedding, when Cfg.EmbedNorm
 	attnScale *tensor.Tensor // (1,) QueryPreAttnScalar^-½
-	masks     map[[3]int]*tensor.Tensor
-	masksDev  device.Device
-	invFreq   *tensor.Tensor // (HeadDim/2,) global-layer table with RopeScale applied; nil when RopeScale ≤ 1
+	// attnScaleVal is attnScale's value as the decode kernel takes it (a
+	// scalar argument), rounded like the tensor.
+	attnScaleVal float64
+	masks        map[[3]int]*tensor.Tensor
+	masksDev     device.Device
+	invFreq      *tensor.Tensor // (HeadDim/2,) global-layer table with RopeScale applied; nil when RopeScale ≤ 1
 }
 
 func (cfg Gemma3Config) activationDType() dtype.DType {
@@ -216,8 +220,22 @@ func NewGemma3(cfg Gemma3Config, dev device.Device) (*Gemma3, error) {
 	if err != nil {
 		return nil, err
 	}
+	attnScaleVal := float32(1 / math.Sqrt(qs))
+	if act == dtype.BF16 {
+		attnScaleVal = bf16RoundF32(attnScaleVal)
+	}
 	return &Gemma3{Cfg: cfg, TokenEmb: emb, Blocks: blocks, FinalNorm: fn, LMHead: head,
-		embScale: embScale, embNorm: embNorm, attnScale: attnScale}, nil
+		embScale: embScale, embNorm: embNorm, attnScale: attnScale, attnScaleVal: float64(attnScaleVal)}, nil
+}
+
+// DecodeGraphOK: the single-token step reads its position (and each
+// sliding layer's window start) on the device; only Gemma 2's attention
+// softcap keeps the concat path.
+func (m *Gemma3) DecodeGraphOK() error {
+	if m.Cfg.AttnLogitSoftcap > 0 {
+		return fmt.Errorf("attention logit softcap %.0f", m.Cfg.AttnLogitSoftcap)
+	}
+	return nil
 }
 
 func (m *Gemma3) NumLayers() int     { return m.Cfg.NumLayers }
@@ -288,11 +306,16 @@ func (m *Gemma3) ForwardWithCache(tokens *tensor.Tensor, cache *KVCache) (*tenso
 	if err != nil {
 		return nil, err
 	}
-	posData := make([]int64, T)
-	for i := range posData {
-		posData[i] = int64(prior + i)
+	var pos *tensor.Tensor
+	if cache != nil && T == 1 {
+		pos, err = cache.position(dev) // the device-side position, kept in step with Len
+	} else {
+		posData := make([]int64, T)
+		for i := range posData {
+			posData[i] = int64(prior + i)
+		}
+		pos, err = tensor.New(posData, []int{T}, dev)
 	}
-	pos, err := tensor.New(posData, []int{T}, dev)
 	if err != nil {
 		return nil, err
 	}
@@ -305,7 +328,9 @@ func (m *Gemma3) ForwardWithCache(tokens *tensor.Tensor, cache *KVCache) (*tenso
 		return nil, err
 	}
 	if cache != nil {
-		cache.Len = prior + T
+		if err := cache.advance(T); err != nil {
+			return nil, err
+		}
 	}
 	logits, err := m.LMHead.Forward(h)
 	if err != nil {
@@ -317,11 +342,7 @@ func (m *Gemma3) ForwardWithCache(tokens *tensor.Tensor, cache *KVCache) (*tenso
 		}
 	}
 	if mult := m.Cfg.OutputMultiplier; mult != 0 && mult != 1 {
-		s, err := tensor.New([]float32{float32(mult)}, []int{1}, logits.Device())
-		if err != nil {
-			return nil, err
-		}
-		if logits, err = ops.Mul(logits, s); err != nil {
+		if logits, err = ops.Affine(logits, float64(float32(mult)), 0); err != nil {
 			return nil, err
 		}
 	}
@@ -334,30 +355,29 @@ func (m *Gemma3) ForwardWithCache(tokens *tensor.Tensor, cache *KVCache) (*tenso
 }
 
 // mulScalarF32 returns x · s with the product formed in F32 and rounded
-// once to x's dtype.
+// once to x's dtype. One launch with the scalar as a kernel argument: a
+// (1,) tensor per call would be an upload per step, which a captured
+// decode graph cannot contain.
 func mulScalarF32(x *tensor.Tensor, s float64) (*tensor.Tensor, error) {
-	st, err := tensor.New([]float32{float32(s)}, []int{1}, x.Device())
-	if err != nil {
-		return nil, err
-	}
-	if x.DType() == dtype.F32 {
-		return ops.Mul(x, st)
+	if x.DType() == dtype.F32 || x.DType() == dtype.BF16 {
+		return ops.Affine(x, float64(float32(s)), 0)
 	}
 	dt := x.DType()
 	x32, err := ops.Cast(x, dtype.F32)
 	if err != nil {
 		return nil, err
 	}
-	if x32, err = ops.Mul(x32, st); err != nil {
+	if x32, err = ops.Affine(x32, float64(float32(s)), 0); err != nil {
 		return nil, err
 	}
 	return ops.Cast(x32, dt)
 }
 
 // divScalarF32 is x / s computed in F32 and rounded once to x's dtype
-// (PyTorch's 16-bit tensor ÷ Python float).
+// (PyTorch's 16-bit tensor ÷ Python float). The divisor tensor is kept
+// per value and device so the step uploads nothing.
 func divScalarF32(x *tensor.Tensor, s float64) (*tensor.Tensor, error) {
-	st, err := tensor.New([]float32{float32(s)}, []int{1}, x.Device())
+	st, err := cachedScalar(float32(s), dtype.F32, x.Device())
 	if err != nil {
 		return nil, err
 	}
@@ -375,32 +395,49 @@ func divScalarF32(x *tensor.Tensor, s float64) (*tensor.Tensor, error) {
 	return ops.Cast(x32, dt)
 }
 
-// softcap returns c·tanh(x/c).
+// softcap returns c·tanh(x/c), the factors rounded to x's dtype as the
+// (1,) tensors they replaced were.
 func softcap(x *tensor.Tensor, c float64) (*tensor.Tensor, error) {
-	inv, err := tensor.New([]float32{float32(1 / c)}, []int{1}, x.Device())
-	if err != nil {
-		return nil, err
+	inv, capV := float32(1/c), float32(c)
+	if x.DType() == dtype.BF16 {
+		inv, capV = bf16RoundF32(inv), bf16RoundF32(capV)
 	}
-	cap_, err := tensor.New([]float32{float32(c)}, []int{1}, x.Device())
-	if err != nil {
-		return nil, err
-	}
-	if x.DType() != dtype.F32 {
-		if inv, err = ops.Cast(inv, x.DType()); err != nil {
-			return nil, err
-		}
-		if cap_, err = ops.Cast(cap_, x.DType()); err != nil {
-			return nil, err
-		}
-	}
-	y, err := ops.Mul(x, inv)
+	y, err := ops.Affine(x, float64(inv), 0)
 	if err != nil {
 		return nil, err
 	}
 	if y, err = ops.Tanh(y); err != nil {
 		return nil, err
 	}
-	return ops.Mul(y, cap_)
+	return ops.Affine(y, float64(capV), 0)
+}
+
+var scalarCache sync.Map // scalarKey → *tensor.Tensor
+
+type scalarKey struct {
+	v   float32
+	dt  dtype.DType
+	dev string
+}
+
+// cachedScalar returns a (1,) tensor holding v, one per value, dtype and
+// device for the life of the process.
+func cachedScalar(v float32, dt dtype.DType, dev device.Device) (*tensor.Tensor, error) {
+	key := scalarKey{v, dt, dev.String()}
+	if t, ok := scalarCache.Load(key); ok {
+		return t.(*tensor.Tensor), nil
+	}
+	t, err := tensor.New([]float32{v}, []int{1}, dev)
+	if err != nil {
+		return nil, err
+	}
+	if dt != dtype.F32 {
+		if t, err = ops.Cast(t, dt); err != nil {
+			return nil, err
+		}
+	}
+	scalarCache.Store(key, t)
+	return t, nil
 }
 
 func (m *Gemma3) runBlock(blk *gemmaBlock, x *tensor.Tensor, B, T int, pos *tensor.Tensor, dev device.Device, cache *KVCache, layer int) (*tensor.Tensor, error) {
@@ -469,7 +506,20 @@ func (m *Gemma3) runBlock(blk *gemmaBlock, x *tensor.Tensor, B, T int, pos *tens
 
 	kvPrior := 0
 	totalT := T
-	if cache != nil {
+	var ctx *tensor.Tensor // (B, NH, T, HD)
+	if cache != nil && T == 1 && cfg.AttnLogitSoftcap == 0 {
+		// Decode step over the capacity buffers with the position (and
+		// the sliding window's start) read on the device: the same
+		// launches at every position, so the step captures into a graph.
+		// The cache keeps every position; the window is applied in the
+		// kernel, as the mask applies it below.
+		if ctx, err = cache.decodeAttend(layer, q, k, v, pos, m.attnScaleVal, window); err != nil {
+			return nil, err
+		}
+	} else if cache != nil {
+		if cache.capturing {
+			return nil, fmt.Errorf("%w: layer %d does not take the decode path", errNotCapturable, layer)
+		}
 		if cache.K[layer] != nil {
 			kvPrior = cache.K[layer].Dim(2)
 			if k, err = ops.Concat([]*tensor.Tensor{cache.K[layer], k}, 2); err != nil {
@@ -481,65 +531,11 @@ func (m *Gemma3) runBlock(blk *gemmaBlock, x *tensor.Tensor, B, T int, pos *tens
 		}
 		totalT = kvPrior + T
 		cache.K[layer], cache.V[layer] = k, v
-		if window > 0 && totalT > window {
-			if cache.K[layer], err = trimKV(k, totalT-window, window); err != nil {
-				return nil, err
-			}
-			if cache.V[layer], err = trimKV(v, totalT-window, window); err != nil {
-				return nil, err
-			}
-		}
 	}
-	if k, err = repeatKV(k, g, B, KH, totalT, HD); err != nil {
-		return nil, err
-	}
-	if v, err = repeatKV(v, g, B, KH, totalT, HD); err != nil {
-		return nil, err
-	}
-	if q, err = autograd.Reshape(q, B*NH, T, HD); err != nil {
-		return nil, err
-	}
-	if k, err = autograd.Reshape(k, B*NH, totalT, HD); err != nil {
-		return nil, err
-	}
-	if v, err = autograd.Reshape(v, B*NH, totalT, HD); err != nil {
-		return nil, err
-	}
-	kT, err := autograd.Transpose(k, 1, 2)
-	if err != nil {
-		return nil, err
-	}
-	if kT, err = autograd.Contiguous(kT); err != nil {
-		return nil, err
-	}
-	scores, err := autograd.MatMul(q, kT)
-	if err != nil {
-		return nil, err
-	}
-	if scores, err = ops.Mul(scores, m.attnScale); err != nil {
-		return nil, err
-	}
-	if c := cfg.AttnLogitSoftcap; c > 0 {
-		if scores, err = softcap(scores, c); err != nil {
+	if ctx == nil {
+		if ctx, err = m.attend(q, k, v, B, T, totalT, kvPrior, window, g, dev); err != nil {
 			return nil, err
 		}
-	}
-	if T > 1 || (window > 0 && totalT > window) {
-		mask, err := m.mask(T, kvPrior, window, scores.DType(), dev)
-		if err != nil {
-			return nil, err
-		}
-		if scores, err = ops.Add(scores, mask); err != nil {
-			return nil, err
-		}
-	}
-	attn, err := ops.Softmax(scores, -1)
-	if err != nil {
-		return nil, err
-	}
-	ctx, err := autograd.MatMul(attn, v)
-	if err != nil {
-		return nil, err
 	}
 	if ctx, err = autograd.Reshape(ctx, B, NH, T, HD); err != nil {
 		return nil, err
@@ -608,6 +604,63 @@ func (m *Gemma3) runBlock(blk *gemmaBlock, x *tensor.Tensor, B, T int, pos *tens
 		return nil, err
 	}
 	return ops.Add(x, mlp)
+}
+
+// attend is the prefill attention core: q (B, NH, T, HD) against k, v
+// (B, KH, totalT, HD) repeated over the GQA group, scaled, softcapped
+// (Gemma 2) and masked, as (B·NH, T, HD).
+func (m *Gemma3) attend(q, k, v *tensor.Tensor, B, T, totalT, kvPrior, window, g int, dev device.Device) (*tensor.Tensor, error) {
+	cfg := m.Cfg
+	NH, KH, HD := cfg.NumHeads, cfg.NumKVHeads, cfg.HeadDim
+	var err error
+	if k, err = repeatKV(k, g, B, KH, totalT, HD); err != nil {
+		return nil, err
+	}
+	if v, err = repeatKV(v, g, B, KH, totalT, HD); err != nil {
+		return nil, err
+	}
+	if q, err = autograd.Reshape(q, B*NH, T, HD); err != nil {
+		return nil, err
+	}
+	if k, err = autograd.Reshape(k, B*NH, totalT, HD); err != nil {
+		return nil, err
+	}
+	if v, err = autograd.Reshape(v, B*NH, totalT, HD); err != nil {
+		return nil, err
+	}
+	kT, err := autograd.Transpose(k, 1, 2)
+	if err != nil {
+		return nil, err
+	}
+	if kT, err = autograd.Contiguous(kT); err != nil {
+		return nil, err
+	}
+	scores, err := autograd.MatMul(q, kT)
+	if err != nil {
+		return nil, err
+	}
+	if scores, err = ops.Mul(scores, m.attnScale); err != nil {
+		return nil, err
+	}
+	if c := cfg.AttnLogitSoftcap; c > 0 {
+		if scores, err = softcap(scores, c); err != nil {
+			return nil, err
+		}
+	}
+	if T > 1 || (window > 0 && totalT > window) {
+		mask, err := m.mask(T, kvPrior, window, scores.DType(), dev)
+		if err != nil {
+			return nil, err
+		}
+		if scores, err = ops.Add(scores, mask); err != nil {
+			return nil, err
+		}
+	}
+	attn, err := ops.Softmax(scores, -1)
+	if err != nil {
+		return nil, err
+	}
+	return autograd.MatMul(attn, v)
 }
 
 // mask returns the cached (T, prior+T) additive causal / sliding-window mask.

@@ -451,7 +451,7 @@ func (m *Qwen35) attention(blk *qwen35Block, h *tensor.Tensor, B, T, prior int, 
 	if cache != nil && T == 1 {
 		// Decode step: append and attend with the position read on the
 		// device, the same launches at every position.
-		if ctx, err = cache.decodeAttend(layer, q, k, v, pos, m.attnScaleVal); err != nil {
+		if ctx, err = cache.decodeAttend(layer, q, k, v, pos, m.attnScaleVal, 0); err != nil {
 			return nil, err
 		}
 	} else {

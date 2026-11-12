@@ -24,12 +24,16 @@ func TestDecodeAttentionCUDAParity(t *testing.T) {
 		name          string
 		B, NH, KH, HD int
 		capacity, n   int
+		window        int
 		dt            dtype.DType
 	}{
-		{"f32 short", 2, 8, 2, 64, 256, 7, dtype.F32},
-		{"bf16 llama-ish", 1, 32, 8, 64, 512, 300, dtype.BF16},
-		{"bf16 qwen-ish", 1, 16, 2, 128, 512, 129, dtype.BF16},
-		{"f32 hd256 g1", 1, 4, 4, 256, 256, 200, dtype.F32},
+		{"f32 short", 2, 8, 2, 64, 256, 7, 0, dtype.F32},
+		{"bf16 llama-ish", 1, 32, 8, 64, 512, 300, 0, dtype.BF16},
+		{"bf16 qwen-ish", 1, 16, 2, 128, 512, 129, 0, dtype.BF16},
+		{"f32 hd256 g1", 1, 4, 4, 256, 256, 200, 0, dtype.F32},
+		{"bf16 gemma-ish window", 1, 4, 1, 256, 1024, 700, 512, dtype.BF16}, // window starts mid-block (188)
+		{"f32 window short", 2, 8, 2, 64, 256, 100, 33, dtype.F32},
+		{"f32 window wider than n", 1, 8, 2, 64, 256, 20, 512, dtype.F32},
 	} {
 		tol := 1e-4
 		if tc.dt == dtype.BF16 {
@@ -54,7 +58,7 @@ func TestDecodeAttentionCUDAParity(t *testing.T) {
 			if err := ops.KVAppend(kb, vb, kn, vn, pos); err != nil {
 				t.Fatalf("%s on %v: append: %v", tc.name, dev, err)
 			}
-			out, err := ops.DecodeAttention(qd, kb, vb, pos, scale)
+			out, err := ops.DecodeAttention(qd, kb, vb, pos, scale, tc.window)
 			if err != nil {
 				t.Fatalf("%s on %v: attention: %v", tc.name, dev, err)
 			}

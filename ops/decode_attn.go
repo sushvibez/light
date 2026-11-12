@@ -70,10 +70,11 @@ func KVAppend(kBuf, vBuf, k, v, pos *tensor.Tensor) error {
 // DecodeAttention is single-query attention of q (B, NH, 1, HD) against
 // the first pos[0]+1 positions of kBuf, vBuf (B, KH, cap, HD) with GQA
 // group NH / KH, scores scaled by scale; the result is (B, NH, 1, HD) at
-// q's dtype. No mask: a decode token attends to everything cached. Scores
-// and the softmax are F32 on CUDA; the composed fallback runs the batched
-// matmul, scale and softmax at the tensor dtype.
-func DecodeAttention(q, kBuf, vBuf, pos *tensor.Tensor, scale float64) (*tensor.Tensor, error) {
+// q's dtype. window > 0 keeps only the last `window` positions (sliding
+// window attention); otherwise a decode token attends to everything
+// cached. Scores and the softmax are F32 on CUDA; the composed fallback
+// runs the batched matmul, scale and softmax at the tensor dtype.
+func DecodeAttention(q, kBuf, vBuf, pos *tensor.Tensor, scale float64, window int) (*tensor.Tensor, error) {
 	if q.Rank() != 4 || q.Dim(2) != 1 || kBuf.Rank() != 4 || !kBuf.Shape().Equal(vBuf.Shape()) {
 		return nil, fmt.Errorf("DecodeAttention: want q (B, NH, 1, HD) and buffers (B, KH, cap, HD), got %v / %v", q.Shape(), kBuf.Shape())
 	}
@@ -101,7 +102,7 @@ func DecodeAttention(q, kBuf, vBuf, pos *tensor.Tensor, scale float64) (*tensor.
 		if err != nil {
 			return nil, err
 		}
-		if err := kern(&registry.Context{Inputs: []*tensor.Tensor{q, kBuf, vBuf, pos}, Output: out, Attrs: map[string]any{"scale": scale}}); err != nil {
+		if err := kern(&registry.Context{Inputs: []*tensor.Tensor{q, kBuf, vBuf, pos}, Output: out, Attrs: map[string]any{"scale": scale, "window": window}}); err != nil {
 			return nil, err
 		}
 		return out, nil
@@ -114,26 +115,30 @@ func DecodeAttention(q, kBuf, vBuf, pos *tensor.Tensor, scale float64) (*tensor.
 	if n < 1 || n > capacity {
 		return nil, fmt.Errorf("DecodeAttention: %d valid positions of %d", n, capacity)
 	}
+	start := 0
+	if window > 0 && n > window {
+		start = n - window
+	}
 	// Composed: fold batch and KV heads, q (B·KH, g, HD) against the
-	// narrowed buffers (B·KH, n, HD) read in place.
+	// narrowed buffers (B·KH, n − start, HD) read in place.
 	qf, err := q.Reshape(B*KH, g, HD)
 	if err != nil {
 		return nil, err
 	}
-	kn, err := kBuf.Narrow(2, 0, n)
+	kn, err := kBuf.Narrow(2, start, n-start)
 	if err != nil {
 		return nil, err
 	}
-	vn, err := vBuf.Narrow(2, 0, n)
+	vn, err := vBuf.Narrow(2, start, n-start)
 	if err != nil {
 		return nil, err
 	}
 	st := kn.Strides().Slice()
-	k, err := kn.AsStrided([]int{B * KH, n, HD}, []int{st[1], st[2], st[3]}, 0)
+	k, err := kn.AsStrided([]int{B * KH, n - start, HD}, []int{st[1], st[2], st[3]}, kn.Offset())
 	if err != nil {
 		return nil, err
 	}
-	v, err := vn.AsStrided([]int{B * KH, n, HD}, []int{st[1], st[2], st[3]}, 0)
+	v, err := vn.AsStrided([]int{B * KH, n - start, HD}, []int{st[1], st[2], st[3]}, vn.Offset())
 	if err != nil {
 		return nil, err
 	}

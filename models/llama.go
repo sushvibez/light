@@ -612,7 +612,7 @@ func (m *Llama) DecodeGraphOK() error {
 // pos, attend q (B, NH, 1, HD) over the valid prefix, and return (B, NH,
 // 1, HD). The launches are the same at every position (see
 // ops.DecodeAttention).
-func (c *KVCache) decodeAttend(layer int, q, k, v, pos *tensor.Tensor, scale float64) (*tensor.Tensor, error) {
+func (c *KVCache) decodeAttend(layer int, q, k, v, pos *tensor.Tensor, scale float64, window int) (*tensor.Tensor, error) {
 	kbuf, vbuf, prior, err := c.ensureBuf(layer, k, 1)
 	if err != nil {
 		return nil, err
@@ -623,7 +623,7 @@ func (c *KVCache) decodeAttend(layer int, q, k, v, pos *tensor.Tensor, scale flo
 	if err := c.setView(layer, prior+1); err != nil {
 		return nil, err
 	}
-	return ops.DecodeAttention(q, kbuf, vbuf, pos, scale)
+	return ops.DecodeAttention(q, kbuf, vbuf, pos, scale, window)
 }
 
 // keepState stores a layer's recurrent state. For a single decode token
@@ -1139,7 +1139,7 @@ func (m *Llama) runBlock(blk *llamaBlock, x *tensor.Tensor, B, T, prior int, dev
 	if fixedCache && T == 1 && m.keyValid == 0 && !q.RequiresGrad() {
 		// Decode step: append and attend with the position read on the
 		// device, the same launches at every position.
-		if ctx, err = cache.decodeAttend(layerIdx, q, k, v, pos, float64(m.scaleVal)); err != nil {
+		if ctx, err = cache.decodeAttend(layerIdx, q, k, v, pos, float64(m.scaleVal), 0); err != nil {
 			return nil, err
 		}
 	} else if cache != nil && cache.capturing {

@@ -55,7 +55,7 @@ __device__ __forceinline__ float2 da_ld2(const __nv_bfloat16 *p) {
 // banks).
 template <typename T>
 __device__ __forceinline__ void decode_attn_partial_t(const T *Q, const T *K, const T *V, float *part, const long long *pos,
-                                                      int NH, int KH, int Cap, int D, float scale) {
+                                                      int NH, int KH, int Cap, int D, float scale, int window) {
   extern __shared__ float sm[];
   const int g = NH / KH;
   const int qp = D + 1;
@@ -63,8 +63,12 @@ __device__ __forceinline__ void decode_attn_partial_t(const T *Q, const T *K, co
   const int bkh = blockIdx.x, s = blockIdx.y, splits = gridDim.y;
   const int b = bkh / KH, kh = bkh % KH;
   const int n = (int)pos[0] + 1;
+  // A sliding window keeps keys [n - window, n); blocks wholly before it
+  // return (the combine skips them too), keys inside a block before it
+  // score -inf.
+  const int start = window > 0 ? max(0, n - window) : 0;
   const int j0 = s * DA_KEYS;
-  if (j0 >= n) return;
+  if (j0 >= n || j0 + DA_KEYS <= start) return;
   const int cnt = min(DA_KEYS, n - j0);
   const T *qsrc = Q + ((long long)b * NH + (long long)kh * g) * D;
   for (int i = threadIdx.x; i < g * D; i += blockDim.x) q[(i / D) * qp + (i % D)] = da_ld(qsrc + i);
@@ -81,7 +85,7 @@ __device__ __forceinline__ void decode_attn_partial_t(const T *Q, const T *K, co
       const float2 kv = da_ld2(kr + d);
       a += qh[d] * kv.x + qh[d + 1] * kv.y;
     }
-    p[h * DA_KEYS + j] = a * scale;
+    p[h * DA_KEYS + j] = j0 + j < start ? -INFINITY : a * scale;
   }
   __syncthreads();
   const int lane = threadIdx.x & 31, w = threadIdx.x >> 5, nw = blockDim.x >> 5;
@@ -111,39 +115,44 @@ __device__ __forceinline__ void decode_attn_partial_t(const T *Q, const T *K, co
   }
 }
 extern "C" __global__ void decode_attn_partial_f32(const float *Q, const float *K, const float *V, float *part,
-                                                   const long long *pos, int NH, int KH, int Cap, int D, float scale) {
-  decode_attn_partial_t(Q, K, V, part, pos, NH, KH, Cap, D, scale);
+                                                   const long long *pos, int NH, int KH, int Cap, int D, float scale,
+                                                   int window) {
+  decode_attn_partial_t(Q, K, V, part, pos, NH, KH, Cap, D, scale, window);
 }
 extern "C" __global__ void decode_attn_partial_bf16(const __nv_bfloat16 *Q, const __nv_bfloat16 *K, const __nv_bfloat16 *V,
                                                     float *part, const long long *pos, int NH, int KH, int Cap, int D,
-                                                    float scale) {
-  decode_attn_partial_t(Q, K, V, part, pos, NH, KH, Cap, D, scale);
+                                                    float scale, int window) {
+  decode_attn_partial_t(Q, K, V, part, pos, NH, KH, Cap, D, scale, window);
 }
 
 // Pass 2: one block per (b, nh) merges the ceil(n / DA_KEYS) live splits
 // into O (B*NH, D).
 template <typename T>
-__device__ __forceinline__ void decode_attn_combine_t(const float *part, T *O, const long long *pos, int splits, int D) {
+__device__ __forceinline__ void decode_attn_combine_t(const float *part, T *O, const long long *pos, int splits, int D,
+                                                      int window) {
   int bh = blockIdx.x;
   int n = (int)pos[0] + 1;
+  int start = window > 0 ? max(0, n - window) : 0;
+  int s0 = start / DA_KEYS;
   int ns = (n + DA_KEYS - 1) / DA_KEYS;
   const float *pp = part + (long long)bh * splits * (D + 2);
   float M = -INFINITY;
-  for (int s = 0; s < ns; s++) M = fmaxf(M, pp[s * (D + 2)]);
+  for (int s = s0; s < ns; s++) M = fmaxf(M, pp[s * (D + 2)]);
   float L = 0.f;
-  for (int s = 0; s < ns; s++) L += expf(pp[s * (D + 2)] - M) * pp[s * (D + 2) + 1];
+  for (int s = s0; s < ns; s++) L += expf(pp[s * (D + 2)] - M) * pp[s * (D + 2) + 1];
   for (int d = threadIdx.x; d < D; d += blockDim.x) {
     float a = 0.f;
-    for (int s = 0; s < ns; s++) a += expf(pp[s * (D + 2)] - M) * pp[s * (D + 2) + 2 + d];
+    for (int s = s0; s < ns; s++) a += expf(pp[s * (D + 2)] - M) * pp[s * (D + 2) + 2 + d];
     da_st(O + (long long)bh * D + d, a / L);
   }
 }
-extern "C" __global__ void decode_attn_combine_f32(const float *part, float *O, const long long *pos, int splits, int D) {
-  decode_attn_combine_t(part, O, pos, splits, D);
+extern "C" __global__ void decode_attn_combine_f32(const float *part, float *O, const long long *pos, int splits, int D,
+                                                   int window) {
+  decode_attn_combine_t(part, O, pos, splits, D, window);
 }
 extern "C" __global__ void decode_attn_combine_bf16(const float *part, __nv_bfloat16 *O, const long long *pos, int splits,
-                                                    int D) {
-  decode_attn_combine_t(part, O, pos, splits, D);
+                                                    int D, int window) {
+  decode_attn_combine_t(part, O, pos, splits, D, window);
 }
 
 // p[i] += 1 for i < n (the device-side position counter after a step).

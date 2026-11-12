@@ -100,16 +100,18 @@ func decodeAttnLauncher(ctx *registry.Context) error {
 	qP, kP, vP, pP, posP, oP := devPtr(q), devPtr(kbuf), devPtr(vbuf), devPtr(part), devPtr(pos), devPtr(out)
 	nh32, kh32, cap32, d32 := int32(NH), int32(KH), int32(Cap), int32(D)
 	scale := float32(ctx.Attrs["scale"].(float64))
+	window := int32(ctx.Attrs["window"].(int))
 	args := []unsafe.Pointer{
 		unsafe.Pointer(&qP), unsafe.Pointer(&kP), unsafe.Pointer(&vP), unsafe.Pointer(&pP), unsafe.Pointer(&posP),
 		unsafe.Pointer(&nh32), unsafe.Pointer(&kh32), unsafe.Pointer(&cap32), unsafe.Pointer(&d32), unsafe.Pointer(&scale),
+		unsafe.Pointer(&window),
 	}
 	shared := uint32((g*(D+1) + g*decodeAttnKeys) * 4)
 	if err := cudart.LaunchKernel(f1, uint32(B*KH), uint32(splits), 1, 128, 1, 1, shared, 0, args); err != nil {
 		return err
 	}
 	s32 := int32(splits)
-	args2 := []unsafe.Pointer{unsafe.Pointer(&pP), unsafe.Pointer(&oP), unsafe.Pointer(&posP), unsafe.Pointer(&s32), unsafe.Pointer(&d32)}
+	args2 := []unsafe.Pointer{unsafe.Pointer(&pP), unsafe.Pointer(&oP), unsafe.Pointer(&posP), unsafe.Pointer(&s32), unsafe.Pointer(&d32), unsafe.Pointer(&window)}
 	block := uint32(min(max(D, 32), 1024))
 	return cudart.LaunchKernel(f2, uint32(B*NH), 1, 1, block, 1, 1, 0, 0, args2)
 }

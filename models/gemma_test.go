@@ -111,12 +111,11 @@ func TestGemma3CacheConsistencyF32Window(t *testing.T) {
 	for i := 9; i < len(gemmaChatIDs); i++ {
 		step = lastLogits(t, m, gemmaChatIDs[i:i+1], cache, dev)
 	}
+	// Every layer keeps every position (the window is applied by the
+	// mask and the decode kernel, not by trimming the cache).
 	for l, k := range cache.K {
-		if m.Cfg.isSliding(l) && k.Dim(2) > 5 {
-			t.Fatalf("layer %d holds %d keys, window 5", l, k.Dim(2))
-		}
-		if !m.Cfg.isSliding(l) && k.Dim(2) != len(gemmaChatIDs) {
-			t.Fatalf("global layer %d holds %d keys, want %d", l, k.Dim(2), len(gemmaChatIDs))
+		if k.Dim(2) != len(gemmaChatIDs) {
+			t.Fatalf("layer %d holds %d keys, want %d", l, k.Dim(2), len(gemmaChatIDs))
 		}
 	}
 	d := maxAbsDiff(full, step)
