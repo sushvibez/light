@@ -127,8 +127,32 @@ type cudaCachingPool struct {
 	fresh  atomic.Int64 // bytes of cudaMalloc since the last forced GC
 }
 
-// PoolCapBytes is the most device memory the allocator keeps cached.
-var PoolCapBytes = 2 << 30
+// PoolCapBytes is the most device memory the allocator keeps cached; 0
+// (the default) means a quarter of the device's memory, at least
+// poolCapMin. Past the cap every release is a cudaFree, which waits for the
+// device: a fixed 2 GB cap evicted ~860 blocks per Z-Image 1024² step on
+// the L4 (each step cycles tens of GB of activations through the pool) and
+// left the GPU idle about a third of the time. A cudaMalloc that fails
+// drains the cache before retrying, so cached blocks never starve a load.
+var PoolCapBytes = 0
+
+const poolCapMin = 2 << 30
+
+var autoPoolCap = sync.OnceValue(func() int {
+	_, total, err := cudart.MemInfo()
+	if err != nil || int(total)/4 < poolCapMin {
+		return poolCapMin
+	}
+	return int(total) / 4
+})
+
+// poolCap is the cache cap in force.
+func poolCap() int {
+	if PoolCapBytes > 0 {
+		return PoolCapBytes
+	}
+	return autoPoolCap()
+}
 
 // FreshBytesPerGC is how much device memory may be cudaMalloc'd between
 // forced garbage collections (0 disables them); see cudaCachingPool.alloc.
@@ -196,7 +220,8 @@ func (p *cudaCachingPool) release(ord int, ptr uintptr, class int) {
 	p.order = append(p.order, key)
 	p.cached += class
 	var evict []uintptr
-	for p.cached > PoolCapBytes && len(p.order) > 0 {
+	limit := poolCap()
+	for p.cached > limit && len(p.order) > 0 {
 		k := p.order[0]
 		p.order = p.order[1:]
 		l := p.free[k]
@@ -237,7 +262,7 @@ var poolStats struct{ forcedGCs, oomRetries, evictions atomic.Int64 }
 // CUDAPoolStats reports how often the caching allocator forced a GC after
 // FreshBytesPerGC of misses, retried a failed cudaMalloc (each retry drains
 // the cache; later ones also collect and wait), and evicted a cached block
-// past PoolCapBytes (a cudaFree each), since the process started.
+// past the cap (a cudaFree each), since the process started.
 func CUDAPoolStats() (forcedGCs, oomRetries, evictions int64) {
 	return poolStats.forcedGCs.Load(), poolStats.oomRetries.Load(), poolStats.evictions.Load()
 }
