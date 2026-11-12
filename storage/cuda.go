@@ -246,13 +246,55 @@ func (p *cudaCachingPool) release(ord int, ptr uintptr, class int) {
 	}
 	p.mu.Unlock()
 	if len(evict) > 0 {
-		t0 := time.Now()
-		for _, e := range evict {
-			_ = cudart.Free(e)
-		}
-		poolStats.evictions.Add(int64(len(evict)))
-		poolStats.evictNanos.Add(int64(time.Since(t0)))
+		queueEvictions(evict)
 	}
+}
+
+// Evicted blocks are freed on their own goroutine. A cudaFree waits for
+// the device, and release runs on the GC's cleanup goroutine: freeing
+// there held up every other dead tensor's return to the cache behind ~30 ms
+// waits, so allocations missed, malloc'd afresh and overflowed the cap
+// again (hundreds of evictions per Z-Image step).
+var evictQ struct {
+	mu      sync.Mutex
+	pending []uintptr
+	wake    chan struct{}
+	once    sync.Once
+}
+
+func queueEvictions(ptrs []uintptr) {
+	evictQ.once.Do(func() {
+		evictQ.wake = make(chan struct{}, 1)
+		go func() {
+			for range evictQ.wake {
+				flushEvictions()
+			}
+		}()
+	})
+	evictQ.mu.Lock()
+	evictQ.pending = append(evictQ.pending, ptrs...)
+	evictQ.mu.Unlock()
+	select {
+	case evictQ.wake <- struct{}{}:
+	default:
+	}
+}
+
+// flushEvictions frees the queued evictions now.
+func flushEvictions() {
+	evictQ.mu.Lock()
+	ptrs := evictQ.pending
+	evictQ.pending = nil
+	evictQ.mu.Unlock()
+	if len(ptrs) == 0 {
+		return
+	}
+	t0 := time.Now()
+	for _, e := range ptrs {
+		_ = cudart.Free(e)
+	}
+	poolStats.evictions.Add(int64(len(ptrs)))
+	poolStats.evictNanos.Add(int64(time.Since(t0)))
 }
 
 // Drain returns every cached block to the driver (used when a model is
@@ -270,6 +312,7 @@ func (p *cudaCachingPool) Drain() {
 	for _, e := range all {
 		_ = cudart.Free(e)
 	}
+	flushEvictions() // blocks still queued for the eviction goroutine
 }
 
 // poolStats counts the caching allocator's slow paths (CUDAPoolStats).
