@@ -5,6 +5,7 @@ import (
 
 	"light/device"
 	"light/dtype"
+	"light/internal/parallel"
 	"light/internal/registry"
 )
 
@@ -40,6 +41,9 @@ func castKernel(ctx *registry.Context) error {
 		return nil
 	}
 	n := a.NumElements()
+	if castFloatFast(from, to, aBuf, outBuf, n) {
+		return nil
+	}
 	for i := range n {
 		v := readF64Buf(from, aBuf, i)
 		if err := writeFromF64Buf(to, outBuf, i, v); err != nil {
@@ -127,4 +131,49 @@ func asSliceBytes[T any](buf []byte) []T {
 	var zero T
 	sz := int(unsafeSizeof(zero))
 	return unsafeSliceFromBytes[T](buf, len(buf)/sz)
+}
+
+// castFloatGrain is the elements per parallel chunk of a float cast.
+const castFloatGrain = 1 << 16
+
+// castFloatFast converts between F32 and the 16-bit floats with typed
+// loops split across cores (checkpoint loading casts billions of weights).
+// The element conversions are the generic path's, so results are
+// bit-identical. It reports false for other dtype pairs.
+func castFloatFast(from, to dtype.DType, in, out []byte, n int) bool {
+	var fn func(lo, hi int)
+	switch {
+	case from == dtype.F32 && to == dtype.BF16:
+		a, o := asSliceBytes[float32](in)[:n], asSliceBytes[uint16](out)[:n]
+		fn = func(lo, hi int) {
+			for i := lo; i < hi; i++ {
+				o[i] = uint16(dtype.BF16FromF32(a[i]))
+			}
+		}
+	case from == dtype.F32 && to == dtype.F16:
+		a, o := asSliceBytes[float32](in)[:n], asSliceBytes[uint16](out)[:n]
+		fn = func(lo, hi int) {
+			for i := lo; i < hi; i++ {
+				o[i] = uint16(dtype.HalfFromF32(a[i]))
+			}
+		}
+	case from == dtype.BF16 && to == dtype.F32:
+		a, o := asSliceBytes[uint16](in)[:n], asSliceBytes[float32](out)[:n]
+		fn = func(lo, hi int) {
+			for i := lo; i < hi; i++ {
+				o[i] = dtype.BFloat16(a[i]).ToF32()
+			}
+		}
+	case from == dtype.F16 && to == dtype.F32:
+		a, o := asSliceBytes[uint16](in)[:n], asSliceBytes[float32](out)[:n]
+		fn = func(lo, hi int) {
+			for i := lo; i < hi; i++ {
+				o[i] = dtype.Half(a[i]).ToF32()
+			}
+		}
+	default:
+		return false
+	}
+	parallel.For(n, castFloatGrain, fn)
+	return true
 }
