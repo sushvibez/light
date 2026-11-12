@@ -178,7 +178,7 @@ func fetchQwenConfig(repo string) (LlamaConfig, error) {
 		TieEmbed:            hf.TieWordEmbed,
 		PartialRotary:       hf.PartialRotary,
 		QKVBias:             qkvBias,
-		QKNorm:              hf.ModelType == "qwen3" || hf.ModelType == "qwen3_moe" || hf.ModelType == "mellum" || hf.ModelType == "sdar",
+		QKNorm:              hf.ModelType == "qwen3" || hf.ModelType == "qwen3_moe" || hf.ModelType == "mellum" || hf.ModelType == "sdar" || hf.ModelType == "qwen3_vl_text",
 		NumExperts:          hf.NumExperts,
 		NumExpertsPerTok:    hf.NumExpertsPerTok,
 		MoEIntermediateSize: hf.MoEIntermediateSize,
@@ -193,6 +193,8 @@ func mapHFToLlama(m *Llama, hf map[string]*tensor.Tensor) error {
 	if _, ok := hf["model.embed_tokens.weight"]; !ok {
 		if _, ok := hf["embed_tokens.weight"]; ok {
 			prefix = "" // a bare base model (Qwen3Model: a diffusion text encoder)
+		} else if _, ok := hf["model.language_model.embed_tokens.weight"]; ok {
+			prefix = "model.language_model." // the text model of a VLM (Qwen3-VL)
 		}
 	}
 	return mapHFToLlamaPrefix(m, hf, prefix)

@@ -169,6 +169,81 @@ for g in "${SEL[@]}"; do
 		run speech ./engine 'TestOpenAISpeechToSpeech'
 		drop kyutai/moshiko-candle-q8 kyutai/mimi
 		;;
+	imgbench | imgbench-sd | imgbench-klein)
+		# Cost per image: build the CLI with CUDA and time real generations
+		# (each twice: the first load is cold). Seconds x the runtime's
+		# compute units per hour gives units per image.
+		if [ ! -x "$WORK/light-bin" ]; then
+			say "build light"
+			go build -o "$WORK/light-bin" ./cmd/light || { SUMMARY+=("$g FAIL build"); continue; }
+		fi
+		bench() {
+			local name=$1
+			shift
+			local log="$LOGS/$STAMP-$name.log" t0=$SECONDS
+			say "$name"
+			# flags before the positional repo / prompt: Go's flag parsing stops at the first positional
+			"$WORK/light-bin" image -device gpu -o "$LOGS/$name.png" "$@" 2>&1 | tee "$log" | tail -4
+			local st=${PIPESTATUS[0]}
+			local times
+			times=$(grep -oE '(loaded [^ ]+|generated) in [0-9.]+ s' "$log" | paste -sd ' ')
+			SUMMARY+=("$(printf '%-16s %s  %s  wall %ds' "$name" "$([ "$st" = 0 ] && echo OK || echo FAIL)" "$times" $((SECONDS - t0)))")
+		}
+		if [ "$g" != imgbench-klein ]; then
+			SD=stable-diffusion-v1-5/stable-diffusion-v1-5
+			fetch $SD model_index.json 'scheduler/*' 'tokenizer/*' text_encoder/config.json text_encoder/model.safetensors \
+				unet/config.json unet/diffusion_pytorch_model.safetensors vae/config.json vae/diffusion_pytorch_model.safetensors
+			for i in 1 2; do bench "sd15-512-30s-$i" -steps 30 -seed $i $SD "a lighthouse on a rocky cliff at sunset, oil painting"; done
+			drop $SD
+		fi
+		if [ "$g" != imgbench-sd ]; then
+			KL=black-forest-labs/FLUX.2-klein-4B
+			fetch $KL
+			for i in 1 2; do bench "klein-512-$i" -width 512 -height 512 -seed $i $KL "a red fox sitting in a snowy forest at sunrise, photograph"; done
+			for i in 1 2; do bench "klein-1024-$i" -width 1024 -height 1024 -seed $i $KL "a red fox sitting in a snowy forest at sunrise, photograph"; done
+			drop $KL
+		fi
+		nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader
+		;;
+	examples)
+		# Example images for scratch/examples: 1024^2 generations kept in
+		# $LOGS/examples/<model>/ (run with colab run --keep, then colab download).
+		# FLUX 3 Image Klein is gated: it runs only when HF_TOKEN is set.
+		if [ ! -x "$WORK/light-bin" ]; then
+			say "build light"
+			go build -o "$WORK/light-bin" ./cmd/light || { SUMMARY+=("$g FAIL build"); continue; }
+		fi
+		gen() {
+			local model=$1 name=$2
+			shift 2
+			mkdir -p "$LOGS/examples/$model"
+			local log="$LOGS/$STAMP-$model-$name.log" t0=$SECONDS
+			say "$model/$name"
+			"$WORK/light-bin" image -device gpu -o "$LOGS/examples/$model/$name.png" "$@" 2>&1 | tee "$log" | tail -4
+			local st=${PIPESTATUS[0]}
+			local times
+			times=$(grep -oE '(loaded [^ ]+|generated) in [0-9.]+ s' "$log" | paste -sd ' ')
+			SUMMARY+=("$(printf '%-28s %s  %s  wall %ds' "$model/$name" "$([ "$st" = 0 ] && echo OK || echo FAIL)" "$times" $((SECONDS - t0)))")
+		}
+		ZI=Tongyi-MAI/Z-Image-Turbo
+		fetch $ZI
+		gen z-image-turbo reading-nook -width 1024 -height 1024 -seed 11 $ZI \
+			"A cozy reading nook by a large window on a rainy evening, warm lamp light, a ginger cat curled on a knitted blanket, shelves of old books, photorealistic"
+		gen z-image-turbo ramen-stall -width 1024 -height 1024 -seed 12 $ZI \
+			"A ramen stall in a Tokyo alley at night, steam rising from bowls, glowing paper lanterns and neon signs reflected on wet cobblestones, cinematic photograph"
+		drop $ZI
+		if [ -n "${HF_TOKEN:-}" ]; then
+			F3=black-forest-labs/flux-3-image-klein
+			fetch $F3 model_index.json modular_model_index.json 'transformer/*' 'vae/*' 'text_encoder/*'
+			gen flux-3-image-klein knitted-iceberg -width 1024 -height 1024 -seed 21 $F3 \
+				'A chunky knitted diorama: three white cable-knit icebergs with tiny pale blue houses, a cream banner embroidered "KNITTED ICEBERG VILLAGE", a giant magenta knitted whale tail bursting from a yarn sea'
+			gen flux-3-image-klein lighthouse-keeper -width 1024 -height 1024 -seed 22 $F3 \
+				"An elderly lighthouse keeper in a yellow raincoat stands on wet rocks at dusk, holding a brass lantern; behind him a white lighthouse beam cuts through sea spray, and storm clouds glow orange near the horizon. Photographic, 35mm, shallow depth of field."
+			drop $F3
+		else
+			SUMMARY+=("flux-3-image-klein          SKIP  (no HF_TOKEN for the gated repo)")
+		fi
+		;;
 	*) echo "unknown group $g" ;;
 	esac
 done

@@ -19,6 +19,9 @@ import (
 // [IMG] / [IMG_BREAK] / [IMG_END] layout, prefill top-5 and 16 greedy
 // tokens.
 func TestMinistralImageChatMatchesTransformers(t *testing.T) {
+	if os.Getenv("LIGHT_HEAVY_TESTS") == "" {
+		t.Skip("set LIGHT_HEAVY_TESTS=1 (Ministral-3B at F32, ~15 GB)")
+	}
 	const dir = "testdata/ministral-vision/"
 	raw, err := os.ReadFile(dir + "vl.json")
 	if err != nil {

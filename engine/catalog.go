@@ -22,7 +22,7 @@ type Entry struct {
 	VocabSize int    `json:"vocab_size"`
 }
 
-var supportedTypes = map[string]bool{"llama": true, "mistral": true, "qwen2": true, "qwen2_5": true, "qwen3": true, "qwen3_moe": true, "qwen3moe": true, "mellum": true, "qwen3_5": true, "qwen3_5_text": true, "muse_glimmer": true, "muse_glimmer_text": true, "qwen35": true, "muse-glimmer": true, "deepseek_v2": true, "deepseek_v3": true, "glm": true, "glm4": true, "nemotron": true, "granite": true, "granitemoehybrid": true, "mistral3": true, "ministral3": true, "mimo": true, "minimax": true, "sdar": true, "phi3": true, "gemma3_text": true, "gemma3": true, "gemma2": true, "gemma4": true, "gemma4_text": true, "falcon": true, "lfm3": true}
+var supportedTypes = map[string]bool{"llama": true, "mistral": true, "qwen2": true, "qwen2_5": true, "qwen3": true, "qwen3_moe": true, "qwen3moe": true, "mellum": true, "qwen3_5": true, "qwen3_5_text": true, "muse_glimmer": true, "muse_glimmer_text": true, "qwen35": true, "muse-glimmer": true, "deepseek_v2": true, "deepseek_v3": true, "glm": true, "glm4": true, "nemotron": true, "granite": true, "granitemoehybrid": true, "mistral3": true, "ministral3": true, "mimo": true, "minimax": true, "sdar": true, "phi3": true, "gemma3_text": true, "gemma3": true, "gemma2": true, "gemma4": true, "gemma4_text": true, "falcon": true, "lfm3": true, "spark2_5": true}
 
 // Catalog scans the HF hub cache for supported causal LMs and the GGUF
 // directory (LIGHT_GGUF_DIR or ~/.cache/light/gguf) for quantized files.

@@ -20,6 +20,9 @@ import (
 // features, placeholder layout, prefill top-5 and 16 greedy tokens. The LM
 // keeps BF16 weight storage (exact for this checkpoint).
 func TestGemma4ImageChatMatchesTransformers(t *testing.T) {
+	if os.Getenv("LIGHT_HEAVY_TESTS") == "" {
+		t.Skip("set LIGHT_HEAVY_TESTS=1 (gemma-4-E2B, ~10 GB)")
+	}
 	const dir = "testdata/gemma4-vision/"
 	raw, err := os.ReadFile(dir + "vl.json")
 	if err != nil {

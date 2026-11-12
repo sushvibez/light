@@ -139,11 +139,12 @@ func NewFlux2Transformer(cfg Flux2Config, dev device.Device) (*Flux2Transformer,
 func swiglu(x *tensor.Tensor) (*tensor.Tensor, error) {
 	ax := x.Rank() - 1
 	half := x.Dim(ax) / 2
-	a, err := x.Narrow(ax, 0, half)
+	// Contiguous halves: the CUDA elementwise kernels take contiguous inputs only.
+	a, err := narrowContig(x, ax, 0, half)
 	if err != nil {
 		return nil, err
 	}
-	b, err := x.Narrow(ax, half, half)
+	b, err := narrowContig(x, ax, half, half)
 	if err != nil {
 		return nil, err
 	}

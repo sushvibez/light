@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"light/device"
 	"light/dtype"
@@ -94,6 +95,16 @@ func SetCUDAAllocObserver(fn func(*Storage)) func(*Storage) {
 	return *prev
 }
 
+func init() {
+	cudart.OOMHook = func() {
+		for range 2 {
+			runtime.GC()
+			time.Sleep(30 * time.Millisecond) // the storage cleanups run on their own goroutine
+		}
+		cudaPool.Drain()
+	}
+}
+
 // cudaPool is a caching device allocator. cudaMalloc is slow and cudaFree
 // synchronises the whole device, and inference allocates thousands of
 // short-lived buffers per step, so freed blocks are kept per size class and
@@ -158,8 +169,15 @@ func (p *cudaCachingPool) alloc(ord, bytes int) (uintptr, int, error) {
 		runtime.GC()
 	}
 	ptr, err := cudart.Malloc(uintptr(class))
-	if err != nil {
-		// Out of memory: drop the cache and retry once.
+	// Out of memory: drop the cache and retry; then collect, since the device
+	// blocks of dead tensors are freed only by GC cleanups (which run on
+	// their own goroutine, hence the short waits) and the GC cannot see
+	// device memory pressure.
+	for attempt := 0; err != nil && attempt < 4; attempt++ {
+		if attempt > 0 {
+			runtime.GC()
+			time.Sleep(time.Duration(10<<attempt) * time.Millisecond)
+		}
 		p.Drain()
 		ptr, err = cudart.Malloc(uintptr(class))
 	}

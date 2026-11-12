@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"light/device"
 	"light/dtype"
@@ -18,19 +19,24 @@ import (
 	"light/tokenizer"
 )
 
-// Flux2 is diffusers' Flux2KleinPipeline (FLUX.2 klein): Qwen3 hidden
-// states from three layers as the text conditioning, the FLUX.2
-// transformer over 2 x 2-patchified latents, flow-matching Euler with an
-// empirical time shift, classifier-free guidance unless the model is
-// step-distilled, and the batch-normalised FLUX.2 VAE.
+// Flux2 is diffusers' Flux2KleinPipeline (FLUX.2 klein) and Flux2Pipeline
+// (FLUX.2 [dev]): hidden states from three text-encoder layers as the text
+// conditioning (klein: Qwen3; dev: Mistral-Small-3 with BFL's system
+// message), the FLUX.2 transformer over 2 x 2-patchified latents,
+// flow-matching Euler with an empirical time shift, guidance (klein:
+// classifier-free unless step-distilled; dev: the guidance-distilled
+// embedding), and the batch-normalised FLUX.2 VAE.
 type Flux2 struct {
-	TextEncoder *models.Llama // Qwen3
+	TextEncoder *models.Llama // Qwen3 (klein) / Mistral (dev)
 	Tok         tokenizer.Tokenizer
 	Transformer *models.Flux2Transformer
 	VAE         *models.FluxVAE
 	Scheduler   *FlowMatchEuler
 	Distilled   bool
 	Dev         device.Device
+	// Mistral is FLUX.2 [dev]'s Flux2Pipeline: the Mistral3 encoder, its
+	// prompt format and an embedded guidance scale instead of CFG.
+	Mistral bool
 
 	vaeScale int
 	encDev   device.Device // the text encoder's device
@@ -75,10 +81,10 @@ func LoadFlux2(repo string, dev device.Device, o Flux2LoadOptions) (*Flux2, erro
 	if err := json.Unmarshal(raw, &idx); err != nil {
 		return nil, err
 	}
-	if idx.Class != "Flux2KleinPipeline" {
-		return nil, fmt.Errorf("flux2: %s is a %s, not a Flux2KleinPipeline", repo, idx.Class)
+	if idx.Class != "Flux2KleinPipeline" && idx.Class != "Flux2Pipeline" {
+		return nil, fmt.Errorf("flux2: %s is a %s, not a Flux2KleinPipeline / Flux2Pipeline", repo, idx.Class)
 	}
-	p := &Flux2{Distilled: idx.Distilled, Dev: dev, encDev: dev, dir: dir, opts: o}
+	p := &Flux2{Distilled: idx.Distilled, Dev: dev, encDev: dev, dir: dir, opts: o, Mistral: idx.Class == "Flux2Pipeline"}
 	if o.EncoderDevice != nil {
 		p.encDev = o.EncoderDevice
 	}
@@ -157,9 +163,9 @@ type Flux2Options struct {
 	Prompt        string
 	Width, Height int     // pixels, default 1024
 	Steps         int     // default 4 (distilled klein) / 50
-	Guidance      float32 // classifier-free guidance for non-distilled models, default 4
+	Guidance      float32 // klein: classifier-free guidance (non-distilled); dev: the embedded guidance; default 4
 	MaxSeqLen     int     // text tokens, default 512
-	Layers        []int   // text encoder hidden states, default 9, 18, 27
+	Layers        []int   // text encoder hidden states, default 9, 18, 27 (klein) / 10, 20, 30 (dev)
 	Seed          uint64
 	// Images are reference images for editing (multi-reference): each is
 	// VAE-encoded and joins the sequence as extra image tokens. Width /
@@ -184,13 +190,30 @@ func qwen3Prompt(s string) string {
 	return "<|im_start|>user\n" + s + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 }
 
+// flux2DevSystem is BFL's text-encoder system message for FLUX.2 [dev]
+// (diffusers' SYSTEM_MESSAGE).
+const flux2DevSystem = "You are an AI that reasons about image descriptions. You give structured responses focusing on object relationships, object\nattribution and actions without speculation."
+
+// mistralFlux2Prompt is Mistral-Small-3's chat template for the system
+// message and one user turn, without a generation prompt (Flux2Pipeline's
+// apply_chat_template(..., add_generation_prompt=False)). [IMG] markers are
+// dropped from the prompt, as diffusers does.
+func mistralFlux2Prompt(s string) string {
+	s = strings.ReplaceAll(s, "[IMG]", "")
+	return "<s>[SYSTEM_PROMPT]" + flux2DevSystem + "[/SYSTEM_PROMPT][INST]" + s + "[/INST]"
+}
+
 // encode returns the text conditioning (1, L, len(layers)·D) and the ids.
 func (p *Flux2) encode(prompt string, L int, layers []int) (*tensor.Tensor, []int64, error) {
-	pad := p.Tok.TokenToID("<|endoftext|>")
-	if pad < 0 {
-		return nil, nil, fmt.Errorf("flux2: tokenizer has no <|endoftext|> pad token")
+	padTok, text := "<|endoftext|>", qwen3Prompt(prompt)
+	if p.Mistral {
+		padTok, text = "<pad>", mistralFlux2Prompt(prompt)
 	}
-	raw := p.Tok.Encode(qwen3Prompt(prompt))
+	pad := p.Tok.TokenToID(padTok)
+	if pad < 0 {
+		return nil, nil, fmt.Errorf("flux2: tokenizer has no %s pad token", padTok)
+	}
+	raw := p.Tok.Encode(text)
 	if len(raw) > L {
 		raw = raw[:L]
 	}
@@ -233,6 +256,9 @@ func (p *Flux2) Generate(o Flux2Options) (*Flux2Result, error) {
 	}
 	if o.Layers == nil {
 		o.Layers = []int{9, 18, 27}
+		if p.Mistral {
+			o.Layers = []int{10, 20, 30}
+		}
 	}
 	refs, refIDs, rw, rh, err := p.encodeReferences(o.Images)
 	if err != nil {
@@ -250,7 +276,11 @@ func (p *Flux2) Generate(o Flux2Options) (*Flux2Result, error) {
 			o.Height = rh
 		}
 	}
-	cfg := !p.Distilled && o.Guidance > 1
+	cfg := !p.Distilled && !p.Mistral && o.Guidance > 1
+	var guidance []float32 // dev: the guidance-distilled embedding
+	if p.Mistral {
+		guidance = []float32{o.Guidance}
+	}
 	if p.TextEncoder == nil {
 		if err := p.loadEncoder(); err != nil {
 			return nil, err
@@ -329,7 +359,7 @@ func (p *Flux2) Generate(o Flux2Options) (*Flux2Result, error) {
 				ids = append(append([]float32(nil), imgIDs...), refIDs...)
 			}
 			v, err := p.Transformer.Forward(models.Flux2Inputs{Image: in, Text: txt, Timestep: []float32{t / 1000},
-				ImgIDs: ids, TxtIDs: txtIDs})
+				Guidance: guidance, ImgIDs: ids, TxtIDs: txtIDs})
 			if err != nil || refs == nil {
 				return v, err
 			}

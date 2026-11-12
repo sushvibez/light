@@ -87,8 +87,9 @@ with torch.no_grad():
                 guidance_scale=3.0, latents=edit_latents, max_sequence_length=max_len,
                 text_encoder_out_layers=layers, output_type="pt").images
 print("edit image", tuple(edit.shape))
-# The conditioning in float64 too: transformers' F32 Qwen3 drifts by ~2e-4
-# here (its F32 rotary angles), Light by ~2e-7.
+# The conditioning in float64 too, from the encoder reloaded from disk: the
+# in-memory BF16 round trip above also rounded its RoPE inv_freq buffer, which
+# moves the pipeline's own embeddings by ~2e-4 (Light: ~2e-7 from these).
 te64 = Qwen3ForCausalLM.from_pretrained(os.path.join(out_dir, "text_encoder"), dtype=torch.float64).eval()
 with torch.no_grad():
     hs = te64(input_ids=torch.tensor([enc["input_ids"]]), attention_mask=torch.tensor([enc["attention_mask"]]),

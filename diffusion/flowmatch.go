@@ -23,6 +23,9 @@ type FlowMatchEuler struct {
 	MaxImageSeqLen     int     `json:"max_image_seq_len"`
 	BaseShift          float64 `json:"base_shift"`
 	MaxShift           float64 `json:"max_shift"`
+	// ShiftTerminal, when set, stretches the shifted schedule so its last
+	// non-zero sigma is this value (stretch_shift_to_terminal).
+	ShiftTerminal *float64 `json:"shift_terminal"`
 }
 
 // LoadFlowMatchEuler reads a scheduler_config.json.
@@ -48,7 +51,7 @@ func LoadFlowMatchEuler(dir string) (*FlowMatchEuler, error) {
 	if probe.Class != "" && probe.Class != "FlowMatchEulerDiscreteScheduler" {
 		return nil, fmt.Errorf("scheduler %q is not FlowMatchEulerDiscreteScheduler", probe.Class)
 	}
-	if probe.Karras || probe.Exponential || probe.Beta || probe.Invert || probe.Stochastic || probe.ShiftTerminal != nil ||
+	if probe.Karras || probe.Exponential || probe.Beta || probe.Invert || probe.Stochastic ||
 		(probe.TimeShiftType != "" && probe.TimeShiftType != "exponential") {
 		return nil, fmt.Errorf("FlowMatchEuler: only the plain (optionally shifted) schedule is supported")
 	}
@@ -56,6 +59,17 @@ func LoadFlowMatchEuler(dir string) (*FlowMatchEuler, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// stretch is stretch_shift_to_terminal on the first n sigmas (F32).
+func (s *FlowMatchEuler) stretch(sig []float32, n int) {
+	if s.ShiftTerminal == nil || *s.ShiftTerminal == 0 || n == 0 {
+		return
+	}
+	scale := (1 - sig[n-1]) / float32(1-*s.ShiftTerminal)
+	for i := range n {
+		sig[i] = 1 - (1-sig[i])/scale
+	}
 }
 
 // SigmasMu is Sigmas with an explicit time-shift mu (FLUX.2's empirical
@@ -77,6 +91,7 @@ func (s *FlowMatchEuler) SigmasMu(n int, mu float64) []float32 {
 		}
 		out[i] = sg
 	}
+	s.stretch(out, n)
 	return out
 }
 
@@ -106,5 +121,6 @@ func (s *FlowMatchEuler) Sigmas(n, imageSeqLen int) []float32 {
 		}
 		out[i] = sg
 	}
+	s.stretch(out, n)
 	return out
 }

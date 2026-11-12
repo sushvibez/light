@@ -71,6 +71,7 @@ status are in the commits (and, up to 2026-11-09, the
 | **Nemotron** | `models/nemotron_load.go` | ✅ Verified 2026-11-08 (Nemotron-4-Mini 4B, A100) | LayerNorm1P + ReLU² MLP; Nemotron-4-Mini 4B top-5 ids = transformers, 16 / 16 greedy |
 | **MiMo (Xiaomi MiMo-7B)** | `models/llama3_load.go` (`mimo` → Qwen2 loader), `models/mimo_mtp.go`, `models/spec_decode.go` | ✅ Verified 2026-11-08 (MiMo-7B-RL, A100) | Qwen2 + MTP head; MiMo-7B-RL matches transformers; MTP speculative decoding |
 | **MiniMax-Text-01** | `models/minimax.go`, `minimax_load.go` | ✅ Tiny-verified 2026-11-08 | Lightning attention + MoE; tiny-random matches transformers |
+| **Spark-X 2.5 / 2.6** | `models/spark_load.go` (Llama: `HeadwiseGate`, `GELUMLP`, `SlidingFullRotary`) | ✅ Verified 2026-11-11 (2.6-4B BF16) | Fused QKV, per-head sigmoid output gate, GELU MLP, sliding + partial-RoPE full layers. Remote code only: checked against an F64 PyTorch port (tiny 1.1e-5 CPU / WebGPU; 4B top-5 logits exact to 1e-4, 8 / 8 greedy). Real weights on WebGPU untested (iGPU memory) |
 | **LFM3** | `models/lfm3.go`, `lfm3_load.go` | ✅ Verified 2026-11-11 (1.7B BF16) | Short-conv + full / sliding attention hybrid. No library implements it yet: checked against an F64 PyTorch port of the model code (tiny 1.7e-5; 1.7B top-5 logits 1e-4, 8 / 8 greedy); CPU = WebGPU |
 | **Falcon** | `models/falcon.go`, `falcon_load.go` | ✅ Verified 2026-10-29 | Every decoder variant (ALiBi, MQA, new arch); falcon-rw-1b / 7b match transformers |
 | **SDAR-1.7B-Chat (block-diffusion LM)** | `models/sdar.go` (`Llama.ForwardDiffusion`, `GenerateDiffusion`, `SDAROpts`), `models/llama.go` (block-bidirectional mask, no-store KV pass), `engine/engine.go` (diffusion branch) | ✅ Verified 2026-10-28 | Block-diffusion decoding on a Qwen3 body; first pass = transformers on CUDA BF16 |
@@ -95,7 +96,10 @@ status are in the commits (and, up to 2026-11-09, the
 | **Stable Diffusion 1.5** | `models/sd*.go` | Done — pretrained | CLIP + UNet + VAE + DDIM; text-to-image and img2img match diffusers within 2e-4 (CPU, LIGHT_HEAVY_TESTS). `light image`; BF16 on RTX 5060 Ti |
 | **SDXL base** | `models/sdxl.go`, `sdxl_load.go` (UNet / CLIP generalised in `sd_unet.go`, `sd_clip.go`) | ✅ Verified 2026-11-09 | CLIP-L + OpenCLIP bigG (penultimate states, projected pooled), 3-level UNet with 1/2/10 transformer depth, text-time add-embedding, SDXL VAE; both encoders match diffusers to 1e-4, UNet step within 1.1 % (BF16 vs fp16); 1024² in 34 s / 30 DDIM steps on the RTX 5060 Ti (10.3 GB). `LoadSDXLFromHF`; `examples/43_sdxl_txt2img`; `scripts/verify/ref_sdxl.py` |
 | **Flux (FLUX.1 schnell / dev)** | `models/flux.go`, `diffusion/flux.go` | ✅ Tiny-verified 2026-11-09 | MMDiT + T5 + CLIP pooled + flow-match Euler + 16-ch VAE; diffusers' FluxPipeline within 3.3e-6, FluxImg2ImgPipeline within 6.4e-6 (CPU, WebGPU). Real 12B weights not run yet |
+| **FLUX.2 [dev]** | `diffusion/flux2.go` (Flux2Pipeline) | ✅ Tiny-verified 2026-11-11 | Mistral-Small-3 encoder with BFL's system message, guidance embedding; tiny pipeline within 7.2e-6 (CPU, WebGPU). Real weights: 64 GB DiT + 48 GB encoder, H100 / G4 |
 | **FLUX.2 klein** | `models/flux2.go`, `diffusion/flux2.go` | ✅ Tiny-verified 2026-11-09 | Qwen3 encoder + FLUX.2 DiT; text-to-image within 7.4e-6, multi-reference editing within 8.9e-6 (CPU, WebGPU) |
+| **Qwen-Image 2.1** | `models/qwenimage21.go`, `qwenimage_vae.go`, `diffusion/qwenimage21.go` | ✅ Tiny-verified 2026-11-12 | Block-causal single-stream DiT, Qwen3-VL pre-norm text states, Wan-2.2-style RGBA VAE, exponential shift + terminal stretch; text-to-image within 5.4e-6 (CPU, WebGPU). Editing and the prefix KV cache not wired |
+| **FLUX 3 Image Klein** | `models/flux3.go`, `diffusion/flux3.go` | ✅ Tiny-verified 2026-11-11 | Per-mode + joint DiT, flow-map sampler, Qwen3-VL text (stacked layers, padded window), FLUX.2 VAE; transformer within 2.8e-6 (incl. references), text-to-image within 2.6e-6, editing (1 reference padded, several cropped) within 3e-6 (CPU, WebGPU). Real weights not run yet |
 | **Z-Image (Turbo)** | `models/zimage.go`, `diffusion/zimage.go` | ✅ Tiny-verified 2026-11-09 | Qwen3 encoder + S3-DiT; ZImagePipeline within 4.6e-5, img2img within 6.9e-5 (CPU, WebGPU) |
 
 ### 1.4 Vision (classification and detection)
@@ -520,7 +524,7 @@ Candle's `candle-transformers/src/models` (Oct 2026) by group; details per model
 | Diffusion | flux | stable_diffusion (1.5 only) | SD 2.1 / XL, mmdit (SD3), wuerstchen, z_image |
 | Audio | whisper, mimi, moshi (+ qwen3_asr) | — | encodec, dac, snac, metavoice, parler_tts, csm |
 
-Light-only: Qwen3.5, LFM3, Muse Glimmer, Mellum, Nemotron, MiMo (+ MTP), MiniMax-Text-01, SDAR, Qwen3-ASR, EmbeddingGemma 2, Ministral 3.
+Light-only: Qwen3.5, LFM3, Spark-X, Muse Glimmer, Mellum, Nemotron, MiMo (+ MTP), MiniMax-Text-01, SDAR, Qwen3-ASR, EmbeddingGemma 2, Ministral 3.
 
 ### 4.5 Quantization and precision
 

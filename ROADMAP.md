@@ -115,21 +115,23 @@ Light already has. Sizes are BF16 safetensors.
 
 1. **FLUX.2-klein-4B**: done (real weights on CPU, 512² in 383 s; WebGPU
    blocked by iGPU memory, §4).
-2. **flux-3-image-klein** (gated: needs an HF login with the license
-   accepted; 11 GB DiT + 8.9 GB VL text encoder, modular pipeline).
+2. **flux-3-image-klein**: text-to-image and editing done (tiny-verified).
+   Next: a real-weights run (11 GB DiT + 8.9 GB Qwen3-VL-4B), Lanczos for
+   references over 4 MP (one) / 1 MP (several), the prompt upsampler (9B,
+   optional).
 3. **Image-to-image for every pipeline**: VAE encoder + strength (SDEdit).
    Done for FLUX.1, Z-Image and SD 1.5 (`light image -image -strength`);
    FLUX.2 klein edits via reference images instead. SDXL left.
 4. **Z-Image-Turbo** (most-liked text-to-image; Apache-2.0; 6B single-stream
    DiT, same Qwen3-4B encoder, 8 steps).
 5. **LFM3-1.7B**: done 2026-11-11 (CPU, WebGPU). Next: LFM3-VL-2B.
-6. **Spark-X2.6-4B** (queued; custom code: gated attention output, head
-   dim 256).
+6. **Spark-X2.6-4B**: done 2026-11-11 (CPU; tiny on WebGPU).
 7. **Wan2.1-T2V-1.3B**, then **Wan2.2-TI2V-5B** (text / image to video;
    Apache-2.0; UMT5 encoder): the video DiT + 3D VAE path.
-8. **Qwen-Image-2.1 / Turbo** (most-downloaded text-to-image; 7B DiT +
-   Qwen3-VL-8B encoder, ~32 GB: Q8_0 / desktop / Colab; needs Qwen3-VL
-   deepstack).
+8. **Qwen-Image-2.1 / Turbo**: text-to-image done (tiny-verified; 7B DiT +
+   Qwen3-VL-8B text, 14 + 17.5 GB BF16: Colab). Next: a real run, editing
+   (condition images in the text stream, VAE encoder, Qwen3-VL vision), the
+   prefix KV cache.
 9. Quick non-image wins: Kokoro-82M (TTS), Qwen3-Embedding-0.6B,
    Depth-Anything-V2, BiRefNet / RMBG-2.0 (background removal), Florence-2.
 10. **LTX-2.5** (queued): 76 GB DiT + 24 GB encoder; Colab only, after Wan
@@ -138,6 +140,13 @@ Light already has. Sizes are BF16 safetensors.
     (desktop).
 
 ## 4. Backends
+
+### CUDA (desktop session)
+
+- `matmul_w16` widens through a pooled F32 scratch + SGEMM (2026-11-11); a
+  fused 16-bit GEMM would save the widening pass. Strided inputs for unary ops
+  (`neg_f32` refused a narrowed view; Light makes FLUX's halves contiguous).
+  PTX targets compute 8.0+: Colab's T4 (7.5) cannot run it, L4 / A100 / H100 can.
 
 ### WebGPU
 

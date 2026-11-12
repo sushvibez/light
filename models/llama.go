@@ -46,6 +46,13 @@ type LlamaConfig struct {
 	SlidingLayers      []bool  // optional per-layer switch (len NumLayers); nil = every layer uses SlidingWindow. Gemma alternates local/global layers.
 	QKNorm             bool    // Qwen3: RMSNorm over the head dim of Q and K (per layer weights) before RoPE
 	PostNorms          bool    // GLM-4-0414: RMSNorm on the attention and MLP outputs before each residual add
+	// Spark-X (spark2_5): PartialRotary applies to full-attention layers
+	// only (sliding layers rotate the whole head); a per-head sigmoid gate
+	// (g_proj, D → NumHeads) scales each head's attention output before
+	// o_proj; the gated MLP uses exact (erf) GELU instead of SiLU.
+	SlidingFullRotary bool
+	HeadwiseGate      bool
+	GELUMLP           bool
 	// Granite scaling (0 = off): token embeddings × EmbedMultiplier, the
 	// attention softmax scale AttnScale instead of 1/√HeadDim, residual
 	// branches × ResidualMultiplier before each add, logits ÷ LogitsScaling.
@@ -144,6 +151,7 @@ type llamaBlock struct {
 	N2                         *nn.RMSNorm
 	GateProj, UpProj, DownProj *nn.Linear    // dense SwiGLU MLP; nil on MoE layers
 	MoE                        *nn.SparseMoE // routed-expert FFN; nil on dense layers
+	HeadGate                   *nn.Linear    // Spark-X g_proj (Cfg.HeadwiseGate); nil otherwise
 }
 
 func newLlamaBlock(cfg LlamaConfig, layer int, dev device.Device) (*llamaBlock, error) {
@@ -220,6 +228,11 @@ func newLlamaBlock(cfg LlamaConfig, layer int, dev device.Device) (*llamaBlock, 
 			return nil, err
 		}
 	}
+	if cfg.HeadwiseGate {
+		if blk.HeadGate, err = mkLinear(D, NH, false, wdt, dev); err != nil {
+			return nil, err
+		}
+	}
 	if cfg.QKNorm {
 		if blk.QNorm, err = nn.NewRMSNormWithDType(HD, cfg.RmsEps, wdt, dev); err != nil {
 			return nil, err
@@ -254,6 +267,9 @@ func (b *llamaBlock) parameters() []*tensor.Tensor {
 	ps = append(ps, b.KProj.Parameters()...)
 	ps = append(ps, b.VProj.Parameters()...)
 	ps = append(ps, b.OProj.Parameters()...)
+	if b.HeadGate != nil {
+		ps = append(ps, b.HeadGate.Parameters()...)
+	}
 	if b.QNorm != nil {
 		ps = append(ps, b.QNorm.Parameters()...)
 		ps = append(ps, b.KNorm.Parameters()...)
@@ -314,9 +330,17 @@ type Llama struct {
 	maskValid  int
 	// keyValid > 0 masks keys at positions >= keyValid for every query
 	// (HiddenStates' right padding, as an HF attention_mask does).
-	keyValid  int
-	maskDev   device.Device
-	maskCache *tensor.Tensor
+	keyValid int
+	// padPos >= 0 (with keyValid) gives the padding tokens that fixed RoPE
+	// position instead of their index (FLUX 3's Qwen3-VL text encoder).
+	padPos   int64
+	posValid int
+	posPad   int64
+	// noFinalNorm makes HiddenStates return the last layer's output before
+	// the final norm (HiddenStatesPreNorm).
+	noFinalNorm bool
+	maskDev     device.Device
+	maskCache   *tensor.Tensor
 
 	// Block-diffusion decoding state for the current ForwardDiffusion call
 	// (SDAR): diffBlock > 0 selects the block-bidirectional mask, diffStore
@@ -883,6 +907,22 @@ func (m *Llama) ForwardWithCache(tokens *tensor.Tensor, cache *KVCache) (*tensor
 // means no padding. Used by diffusion pipelines that condition on an LM's
 // intermediate layers (FLUX.2 klein: Qwen3 layers 9, 18, 27).
 func (m *Llama) HiddenStates(tokens *tensor.Tensor, layers []int, valid int) ([]*tensor.Tensor, error) {
+	return m.HiddenStatesPadPos(tokens, layers, valid, -1)
+}
+
+// HiddenStatesPreNorm is HiddenStates whose last-layer entry is taken
+// before the final norm (the "un-normalised" last hidden state Qwen-Image
+// 2.1's transformer was trained on).
+func (m *Llama) HiddenStatesPreNorm(tokens *tensor.Tensor, layers []int) ([]*tensor.Tensor, error) {
+	m.noFinalNorm = true
+	defer func() { m.noFinalNorm = false }()
+	return m.HiddenStatesPadPos(tokens, layers, 0, -1)
+}
+
+// HiddenStatesPadPos is HiddenStates with the padding tokens (positions >=
+// valid) all at RoPE position padPos when padPos >= 0, as an HF forward
+// with explicit position_ids that masks_fill the padding does.
+func (m *Llama) HiddenStatesPadPos(tokens *tensor.Tensor, layers []int, valid int, padPos int64) ([]*tensor.Tensor, error) {
 	if tokens.Rank() != 2 || tokens.DType() != dtype.I64 {
 		return nil, fmt.Errorf("Llama.HiddenStates: tokens must be (B, T) I64, got %v %v", tokens.Shape(), tokens.DType())
 	}
@@ -890,7 +930,8 @@ func (m *Llama) HiddenStates(tokens *tensor.Tensor, layers []int, valid int) ([]
 	dev := tokens.Device()
 	if valid > 0 && valid < T {
 		m.keyValid = valid
-		defer func() { m.keyValid = 0 }()
+		m.padPos = padPos
+		defer func() { m.keyValid, m.padPos = 0, 0 }()
 	}
 	h, err := m.TokenEmb.Forward(tokens)
 	if err != nil {
@@ -921,7 +962,7 @@ func (m *Llama) HiddenStates(tokens *tensor.Tensor, layers []int, valid int) ([]
 		if h, err = m.runBlock(blk, h, B, T, 0, dev, nil, i); err != nil {
 			return nil, err
 		}
-		if i+1 == len(m.Blocks) {
+		if i+1 == len(m.Blocks) && !m.noFinalNorm {
 			if h, err = m.FinalNorm.Forward(h); err != nil {
 				return nil, err
 			}
@@ -1152,6 +1193,21 @@ func (m *Llama) runBlock(blk *llamaBlock, x *tensor.Tensor, B, T, prior int, dev
 	if err != nil {
 		return nil, err
 	}
+	if blk.HeadGate != nil { // (B, T, NH, HD) × sigmoid(g_proj(h)) per head
+		gs, err := blk.HeadGate.Forward(h)
+		if err != nil {
+			return nil, err
+		}
+		if gs, err = ops.Sigmoid(gs); err != nil {
+			return nil, err
+		}
+		if gs, err = autograd.Reshape(gs, B, T, NH, 1); err != nil {
+			return nil, err
+		}
+		if ctx, err = ops.Mul(ctx, gs); err != nil {
+			return nil, err
+		}
+	}
 	// NumHeads·HeadDim need not equal HiddenSize (Qwen3, Mellum 2.1:
 	// 32 × 128 heads on a 2304-wide model); OProj maps back to HiddenSize.
 	ctx, err = autograd.Reshape(ctx, B, T, NH*HD)
@@ -1214,7 +1270,11 @@ func (m *Llama) runBlock(blk *llamaBlock, x *tensor.Tensor, B, T, prior int, dev
 	if err != nil {
 		return nil, err
 	}
-	gate, err = autograd.SiLU(gate)
+	if m.Cfg.GELUMLP {
+		gate, err = ops.GeluErf(gate)
+	} else {
+		gate, err = autograd.SiLU(gate)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1288,6 +1348,9 @@ func (m *Llama) residual(x, branch *tensor.Tensor) (*tensor.Tensor, error) {
 func (m *Llama) applyRoPE(x, pos *tensor.Tensor, seqLen, layer int, dev device.Device) (*tensor.Tensor, error) {
 	base, rs, slot := m.Cfg.ropeFor(layer)
 	rotDim := m.rotaryDim()
+	if m.Cfg.SlidingFullRotary && m.Cfg.slidingWindowFor(layer) > 0 {
+		rotDim = m.Cfg.HeadDim
+	}
 	if rotDim < m.Cfg.HeadDim {
 		// Partial rotary (Phi-4-mini): rotate_half runs over the first rotDim
 		// dims only; the rest pass through untouched.
@@ -1561,13 +1624,21 @@ func (m *Llama) queryKeyMask(T, prior, window int, dev device.Device) (*tensor.T
 // positionsFor returns (and caches) [offset..offset+S-1] as an (S,) I64
 // tensor on dev. The cache hits whenever the same (S, offset, dev) repeats.
 func (m *Llama) positionsFor(S, offset int, dev device.Device) (*tensor.Tensor, error) {
-	if m.posCache != nil && m.posS == S && m.posOff == offset && m.posDev != nil && m.posDev.SameAs(dev) {
+	valid, pad := 0, int64(-1)
+	if m.keyValid > 0 && m.padPos >= 0 {
+		valid, pad = m.keyValid, m.padPos
+	}
+	if m.posCache != nil && m.posS == S && m.posOff == offset && m.posValid == valid && m.posPad == pad && m.posDev != nil && m.posDev.SameAs(dev) {
 		return m.posCache, nil
 	}
 	data := make([]int64, S)
 	for i := range S {
 		data[i] = int64(offset + i)
+		if valid > 0 && offset+i >= valid {
+			data[i] = pad
+		}
 	}
+	m.posValid, m.posPad = valid, pad
 	pos, err := tensor.New(data, []int{S}, dev)
 	if err != nil {
 		return nil, err

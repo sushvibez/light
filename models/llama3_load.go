@@ -384,7 +384,7 @@ func LoadCausalLMFromHF(repo string, dev device.Device, weightDT dtype.DType) (*
 	switch hf.ModelType {
 	case "llama", "mistral":
 		return loadLlama3(repo, dev, weightDT)
-	case "qwen2", "qwen2_5", "qwen3", "qwen3_moe", "mellum", "sdar", "mimo":
+	case "qwen2", "qwen2_5", "qwen3", "qwen3_moe", "mellum", "sdar", "mimo", "qwen3_vl":
 		return loadQwen2(repo, dev, weightDT)
 	case "phi3":
 		return LoadPhi3FromHF(repo, dev, weightDT)
@@ -396,8 +396,10 @@ func LoadCausalLMFromHF(repo string, dev device.Device, weightDT dtype.DType) (*
 		return LoadMinistralFromHF(repo, dev, weightDT)
 	case "granite", "granitemoehybrid":
 		return LoadGraniteFromHF(repo, dev, weightDT)
+	case "spark2_5":
+		return LoadSparkFromHF(repo, dev, weightDT)
 	default:
-		return nil, fmt.Errorf("LoadCausalLMFromHF: model_type %q not supported (llama, mistral, qwen2, qwen3, qwen3_moe, mellum, sdar, phi3, glm, glm4, nemotron, mimo, granite, granitemoehybrid, mistral3, ministral3)", hf.ModelType)
+		return nil, fmt.Errorf("LoadCausalLMFromHF: model_type %q not supported (llama, mistral, qwen2, qwen3, qwen3_moe, mellum, sdar, phi3, glm, glm4, nemotron, mimo, granite, granitemoehybrid, mistral3, ministral3, spark2_5)", hf.ModelType)
 	}
 }
 
