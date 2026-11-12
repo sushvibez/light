@@ -14,6 +14,9 @@ var storage16 struct {
 	mu   sync.Mutex
 	on   bool
 	dt   dtype.DType
+	// mixed: Linears built in the scope round F32 activations to the
+	// weight's 16-bit type on devices with a tensor-core GEMM (Mixed16).
+	mixed bool
 }
 
 // WithWeightStorage16 runs load (a model loader) with 16-bit weight
@@ -41,6 +44,27 @@ func WithWeightStorage16(dt dtype.DType, load func() error) error {
 	return load()
 }
 
+// WithWeightStorage16Mixed is WithWeightStorage16 whose Linears also
+// compute at 16 bits where that is faster (Linear.Mixed16): on CUDA the
+// F32 activations are rounded to the weight's type for a tensor-core GEMM
+// with F32 accumulation and output, as BF16 / F16 inference in PyTorch
+// does. Elsewhere they compute exactly, as under WithWeightStorage16. For
+// models run in 16 bits upstream (diffusion transformers), not for exact
+// F32 parity.
+func WithWeightStorage16Mixed(dt dtype.DType, load func() error) error {
+	return WithWeightStorage16(dt, func() error {
+		storage16.mu.Lock()
+		storage16.mixed = true
+		storage16.mu.Unlock()
+		defer func() {
+			storage16.mu.Lock()
+			storage16.mixed = false
+			storage16.mu.Unlock()
+		}()
+		return load()
+	})
+}
+
 // WeightStorageDType is the dtype a loader that builds its own weight
 // tensors should store a matmul weight (or embedding table) of row width
 // `in` at, given the model's dtype wdt: the 16-bit storage dtype inside
@@ -52,14 +76,21 @@ func WeightStorageDType(wdt dtype.DType, in int) dtype.DType {
 }
 
 // weightDType16 is the dtype an Uninit weight of row width `in` asked for
-// at wdt is allocated at.
+// at wdt is allocated at, and whether it is the 16-bit storage dtype.
 func weightDType16(wdt dtype.DType, in int) (dtype.DType, bool) {
+	dt, ok, _ := weightDType16Mixed(wdt, in)
+	return dt, ok
+}
+
+// weightDType16Mixed is weightDType16 plus whether the scope asks for
+// 16-bit compute (WithWeightStorage16Mixed).
+func weightDType16Mixed(wdt dtype.DType, in int) (dtype.DType, bool, bool) {
 	storage16.mu.Lock()
 	defer storage16.mu.Unlock()
 	if storage16.on && wdt == dtype.F32 && in%2 == 0 {
-		return storage16.dt, true
+		return storage16.dt, true, storage16.mixed
 	}
-	return wdt, false
+	return wdt, false, false
 }
 
 // embeddingDevice16 keeps a 16-bit table too large for one WebGPU buffer in

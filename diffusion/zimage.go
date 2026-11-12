@@ -131,8 +131,14 @@ func (p *ZImage) loadEncoder() (err error) {
 	return nil
 }
 
+// loadTransformer loads the DiT; with 16-bit storage its linears compute
+// at BF16 on CUDA (nn.WithWeightStorage16Mixed), as diffusers runs it.
 func (p *ZImage) loadTransformer() (err error) {
-	if err = p.load16(func() (err error) {
+	load := p.load16
+	if p.opts.Storage16 {
+		load = func(f func() error) error { return nn.WithWeightStorage16Mixed(dtype.BF16, f) }
+	}
+	if err = load(func() (err error) {
 		p.Transformer, err = models.LoadZImageTransformer(filepath.Join(p.dir, "transformer"), p.Dev)
 		return
 	}); err != nil {

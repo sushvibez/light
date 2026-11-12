@@ -99,7 +99,7 @@ func matmulMixedF32BF16W(ctx *registry.Context) error {
 	}
 	// Cast the activation to BF16 in a fresh device buffer. ~T·H·2 bytes —
 	// tiny next to the BF16 weights we're avoiding to materialize.
-	aBF16, err := tensor.Zeros(dtype.BF16, a.Shape().Dims(), a.Device())
+	aBF16, err := tensor.Empty(dtype.BF16, a.Shape().Dims(), a.Device()) // the cast writes every element
 	if err != nil {
 		return err
 	}
