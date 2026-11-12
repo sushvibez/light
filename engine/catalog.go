@@ -71,6 +71,8 @@ func scanHFCache() ([]Entry, error) {
 		if err != nil || len(snaps) == 0 {
 			if e, ok := speechEntry(root, d.Name(), repo); ok {
 				out = append(out, e)
+			} else if e, ok := imageEntry(root, d.Name(), repo); ok {
+				out = append(out, e)
 			}
 			continue
 		}
@@ -292,4 +294,60 @@ func whisperParams(repo string) string {
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
+}
+
+// imagePipelines are the diffusers pipeline classes GenerateImage runs.
+var imagePipelines = map[string]bool{
+	"StableDiffusionPipeline": true, "StableDiffusionXLPipeline": true, "FluxPipeline": true,
+	"Flux2KleinPipeline": true, "Flux2Pipeline": true, "ZImagePipeline": true, "QwenImage21Pipeline": true,
+	"Flux3ModularPipeline": true,
+}
+
+// imageEntry recognises a diffusers pipeline repo (model_index.json, or
+// modular_model_index.json for FLUX 3) in the cache: Kind "image",
+// ModelType the pipeline class.
+func imageEntry(root, dir, repo string) (Entry, bool) {
+	class, snapDir := imagePipelineClass(filepath.Join(root, dir))
+	if class == "" || !imagePipelines[class] {
+		return Entry{}, false
+	}
+	var size int64
+	_ = filepath.WalkDir(snapDir, func(p string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasSuffix(p, ".safetensors") {
+			if fi, err := os.Stat(p); err == nil {
+				size += fi.Size()
+			}
+		}
+		return nil
+	})
+	if size == 0 {
+		return Entry{}, false
+	}
+	return Entry{
+		Spec: Spec{ID: repo, Repo: repo, DType: "bf16", Device: "gpu"}, Kind: "image",
+		ModelType: class, Params: paramsFromName(repo), SizeBytes: size,
+	}, true
+}
+
+// imagePipelineClass reads the pipeline class of a cached diffusers repo
+// and returns it with the snapshot directory ("" when it is not one).
+func imagePipelineClass(modelDir string) (string, string) {
+	if m, _ := filepath.Glob(filepath.Join(modelDir, "snapshots", "*", "modular_model_index.json")); len(m) > 0 {
+		return "Flux3ModularPipeline", filepath.Dir(m[len(m)-1])
+	}
+	m, _ := filepath.Glob(filepath.Join(modelDir, "snapshots", "*", "model_index.json"))
+	if len(m) == 0 {
+		return "", ""
+	}
+	raw, err := os.ReadFile(m[len(m)-1])
+	if err != nil {
+		return "", ""
+	}
+	var mi struct {
+		Class string `json:"_class_name"`
+	}
+	if json.Unmarshal(raw, &mi) != nil {
+		return "", ""
+	}
+	return mi.Class, filepath.Dir(m[len(m)-1])
 }
