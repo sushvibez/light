@@ -130,6 +130,6 @@ func storageReleaseCleanup(s *Storage) {
 
 // PoolStats are the CUDA caching allocator's slow paths (CUDAPoolStats).
 type PoolStats struct {
-	ForcedGCs, OOMRetries, Evictions int64
-	GCTime, EvictTime                time.Duration
+	ForcedGCs, OOMRetries, Evictions, BestFits int64
+	GCTime, EvictTime                          time.Duration
 }

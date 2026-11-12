@@ -193,6 +193,28 @@ func (p *cudaCachingPool) alloc(ord, bytes int) (uintptr, int, error) {
 		p.mu.Unlock()
 		return ptr, class, nil
 	}
+	// No block of this class is back yet (dead tensors return only at a
+	// GC): take the smallest cached block of up to twice the size rather
+	// than malloc one, which would later overflow the cap and be evicted
+	// (a cudaFree, which waits for the device). The block keeps its class.
+	if class >= 1<<20 {
+		best := 0
+		for k, l := range p.free {
+			if k.ord == ord && len(l) > 0 && k.class > class && k.class <= 2*class && (best == 0 || k.class < best) {
+				best = k.class
+			}
+		}
+		if best > 0 {
+			bk := poolKey{ord, best}
+			l := p.free[bk]
+			ptr := l[len(l)-1]
+			p.free[bk] = l[:len(l)-1]
+			p.cached -= best
+			p.mu.Unlock()
+			poolStats.bestFits.Add(1)
+			return ptr, best, nil
+		}
+	}
 	p.mu.Unlock()
 	// Fresh device memory. Buffers come back to the pool only through GC
 	// cleanups, and a long prefill allocates gigabytes of short-lived
@@ -317,8 +339,8 @@ func (p *cudaCachingPool) Drain() {
 
 // poolStats counts the caching allocator's slow paths (CUDAPoolStats).
 var poolStats struct {
-	forcedGCs, oomRetries, evictions atomic.Int64
-	gcNanos, evictNanos              atomic.Int64
+	forcedGCs, oomRetries, evictions, bestFits atomic.Int64
+	gcNanos, evictNanos                        atomic.Int64
 }
 
 // forcedGC is the allocator's collection, timed.
@@ -331,13 +353,15 @@ func forcedGC() {
 
 // CUDAPoolStats reports the caching allocator's slow paths since the
 // process started: forced collections, retries of a failed cudaMalloc
-// (each drains the cache; later ones also collect and wait), and blocks
-// evicted past the cap (a cudaFree each), with the wall time the forced
+// (each drains the cache; later ones also collect and wait), blocks
+// evicted past the cap (a cudaFree each), misses served by a larger cached
+// block, with the wall time the forced
 // collections and the evictions blocked their caller.
 func CUDAPoolStats() PoolStats {
 	return PoolStats{
 		ForcedGCs: poolStats.forcedGCs.Load(), OOMRetries: poolStats.oomRetries.Load(), Evictions: poolStats.evictions.Load(),
-		GCTime: time.Duration(poolStats.gcNanos.Load()), EvictTime: time.Duration(poolStats.evictNanos.Load()),
+		BestFits: poolStats.bestFits.Load(),
+		GCTime:   time.Duration(poolStats.gcNanos.Load()), EvictTime: time.Duration(poolStats.evictNanos.Load()),
 	}
 }
 

@@ -61,10 +61,10 @@ func (pt *phaseTimer) mark(phase string, sync *tensor.Tensor) {
 	h := readHostCounts()
 	d := h.cu.Sub(pt.host.cu)
 	p, q := h.pool, pt.host.pool
-	fmt.Fprintf(os.Stderr, "timing %-18s %7.2f s  (total %.1f s)  launch %d gemm %d malloc %d free %d memset %d dtoh %d htod %d dtod %d sync %d | gc %d (forced %d, %.0f ms) oom-retry %d evict %d (%.0f ms)\n",
+	fmt.Fprintf(os.Stderr, "timing %-18s %7.2f s  (total %.1f s)  launch %d gemm %d malloc %d free %d memset %d dtoh %d htod %d dtod %d sync %d | gc %d (forced %d, %.0f ms) oom-retry %d evict %d (%.0f ms) bestfit %d\n",
 		phase, now.Sub(pt.t).Seconds(), now.Sub(pt.total).Seconds(), d.Launches, d.Gemms, d.Mallocs, d.Frees, d.Memsets,
 		d.DtoH, d.HtoD, d.DtoD, d.Syncs, h.gcs-pt.host.gcs, p.ForcedGCs-q.ForcedGCs, (p.GCTime-q.GCTime).Seconds()*1e3,
-		p.OOMRetries-q.OOMRetries, p.Evictions-q.Evictions, (p.EvictTime-q.EvictTime).Seconds()*1e3)
+		p.OOMRetries-q.OOMRetries, p.Evictions-q.Evictions, (p.EvictTime-q.EvictTime).Seconds()*1e3, p.BestFits-q.BestFits)
 	pt.t, pt.host = now, h
 }
 
