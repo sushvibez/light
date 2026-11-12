@@ -1058,17 +1058,24 @@ func (m *Llama) runBlock(blk *llamaBlock, x *tensor.Tensor, B, T, prior int, dev
 	if err != nil {
 		return nil, err
 	}
-	q, err := blk.QProj.Forward(h)
-	if err != nil {
-		return nil, err
-	}
-	k, err := blk.KProj.Forward(h)
-	if err != nil {
-		return nil, err
-	}
-	v, err := blk.VProj.Forward(h)
-	if err != nil {
-		return nil, err
+	var q, k, v *tensor.Tensor
+	if fusedRow(h, blk.QProj, blk.KProj, blk.VProj) {
+		// Decode: the three projections in one launch.
+		outs, err := ops.LinearMulti(h, []*tensor.Tensor{blk.QProj.W, blk.KProj.W, blk.VProj.W}, dtype.BF16)
+		if err != nil {
+			return nil, err
+		}
+		q, k, v = outs[0], outs[1], outs[2]
+	} else {
+		if q, err = blk.QProj.Forward(h); err != nil {
+			return nil, err
+		}
+		if k, err = blk.KProj.Forward(h); err != nil {
+			return nil, err
+		}
+		if v, err = blk.VProj.Forward(h); err != nil {
+			return nil, err
+		}
 	}
 	q, err = headsForward(q, B, T, NH, HD)
 	if err != nil {
@@ -1266,25 +1273,33 @@ func (m *Llama) runBlock(blk *llamaBlock, x *tensor.Tensor, B, T, prior int, dev
 		}
 		return m.residual(x, mlpOut)
 	}
-	gate, err := blk.GateProj.Forward(h)
-	if err != nil {
-		return nil, err
-	}
-	if m.Cfg.GELUMLP {
-		gate, err = ops.GeluErf(gate)
+	var mlpIn *tensor.Tensor
+	if fusedRow(h, blk.GateProj, blk.UpProj) {
+		// Decode: gate and up projections, the activation and the
+		// product in one launch.
+		if mlpIn, err = ops.GatedLinear(h, blk.GateProj.W, blk.UpProj.W, m.Cfg.GELUMLP); err != nil {
+			return nil, err
+		}
 	} else {
-		gate, err = autograd.SiLU(gate)
-	}
-	if err != nil {
-		return nil, err
-	}
-	up, err := blk.UpProj.Forward(h)
-	if err != nil {
-		return nil, err
-	}
-	mlpIn, err := autograd.Mul(gate, up)
-	if err != nil {
-		return nil, err
+		gate, err := blk.GateProj.Forward(h)
+		if err != nil {
+			return nil, err
+		}
+		if m.Cfg.GELUMLP {
+			gate, err = ops.GeluErf(gate)
+		} else {
+			gate, err = autograd.SiLU(gate)
+		}
+		if err != nil {
+			return nil, err
+		}
+		up, err := blk.UpProj.Forward(h)
+		if err != nil {
+			return nil, err
+		}
+		if mlpIn, err = autograd.Mul(gate, up); err != nil {
+			return nil, err
+		}
 	}
 	mlpOut, err := blk.DownProj.Forward(mlpIn)
 	if err != nil {
