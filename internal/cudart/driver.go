@@ -184,6 +184,7 @@ func LaunchKernel(
 			nil,
 		)
 	}
+	span := gpuSpanBegin(fn.name)
 	rc := launch()
 	if rc == C.CUDA_ERROR_INVALID_CONTEXT {
 		// Same recovery as module loads: re-bind the primary context on
@@ -193,6 +194,7 @@ func LaunchKernel(
 		}
 		rc = launch()
 	}
+	span.end()
 	if rc != C.CUDA_SUCCESS {
 		return driverError(rc, "cuLaunchKernel")
 	}

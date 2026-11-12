@@ -83,12 +83,15 @@ extern "C" __global__ void rmsnorm_bf16(
     float v = bf16_to_f(rowX[j]);
     thread_sum += v * v;
   }
-  sdata_rms[tid] = thread_sum;
+  for (int o = 16; o > 0; o >>= 1) thread_sum += __shfl_xor_sync(0xffffffffu, thread_sum, o);
+  if ((tid & 31) == 0) sdata_rms[tid >> 5] = thread_sum;
   __syncthreads();
-  for (int s = bs / 2; s > 0; s >>= 1) {
-    if (tid < s) sdata_rms[tid] += sdata_rms[tid + s];
-    __syncthreads();
+  if (tid < 32) {
+    float v = tid < (bs >> 5) ? sdata_rms[tid] : 0.f;
+    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+    if (tid == 0) sdata_rms[0] = v;
   }
+  __syncthreads();
   float rms = rsqrtf(sdata_rms[0] / (float)cols + eps);
 
   for (unsigned long j = tid; j < cols; j += bs) {

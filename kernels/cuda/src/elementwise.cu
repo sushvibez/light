@@ -287,18 +287,22 @@ extern "C" __global__ void rmsnorm_f32(
   int tid = threadIdx.x;
   int bs = blockDim.x;
 
-  // Sum of squares.
+  // Sum of squares: warp shuffles, then the warp partials once through
+  // shared memory (two barriers instead of log2(blockDim)).
   float thread_sum = 0.0f;
   for (unsigned long j = tid; j < cols; j += bs) {
     float v = rowX[j];
     thread_sum += v * v;
   }
-  sdata[tid] = thread_sum;
+  for (int o = 16; o > 0; o >>= 1) thread_sum += __shfl_xor_sync(0xffffffffu, thread_sum, o);
+  if ((tid & 31) == 0) sdata[tid >> 5] = thread_sum;
   __syncthreads();
-  for (int s = bs / 2; s > 0; s >>= 1) {
-    if (tid < s) sdata[tid] += sdata[tid + s];
-    __syncthreads();
+  if (tid < 32) {
+    float v = tid < (bs >> 5) ? sdata[tid] : 0.f;
+    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+    if (tid == 0) sdata[0] = v;
   }
+  __syncthreads();
   float rms = rsqrtf(sdata[0] / (float)cols + eps);
 
   // Normalize with weight.

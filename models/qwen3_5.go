@@ -352,19 +352,26 @@ func (m *Qwen35) runBlock(blk *qwen35Block, x *tensor.Tensor, B, T, prior int, p
 	if h, err = blk.PostNorm.Forward(x); err != nil {
 		return nil, err
 	}
-	gate, err := blk.Gate.Forward(h)
-	if err != nil {
-		return nil, err
-	}
-	if gate, err = ops.SiLU(gate); err != nil {
-		return nil, err
-	}
-	up, err := blk.Up.Forward(h)
-	if err != nil {
-		return nil, err
-	}
-	if gate, err = ops.Mul(gate, up); err != nil {
-		return nil, err
+	var gate *tensor.Tensor
+	if fusedRow(h, blk.Gate, blk.Up) {
+		// Decode: gate, up, SiLU and the product in one launch.
+		if gate, err = ops.GatedLinear(h, blk.Gate.W, blk.Up.W, false); err != nil {
+			return nil, err
+		}
+	} else {
+		if gate, err = blk.Gate.Forward(h); err != nil {
+			return nil, err
+		}
+		if gate, err = ops.SiLU(gate); err != nil {
+			return nil, err
+		}
+		up, err := blk.Up.Forward(h)
+		if err != nil {
+			return nil, err
+		}
+		if gate, err = ops.Mul(gate, up); err != nil {
+			return nil, err
+		}
 	}
 	mlp, err := blk.Down.Forward(gate)
 	if err != nil {
@@ -379,9 +386,25 @@ func (m *Qwen35) runBlock(blk *qwen35Block, x *tensor.Tensor, B, T, prior int, p
 func (m *Qwen35) attention(blk *qwen35Block, h *tensor.Tensor, B, T, prior int, pos *tensor.Tensor, dev device.Device, cache *KVCache, layer int) (*tensor.Tensor, error) {
 	cfg := m.Cfg
 	NH, KH, HD := cfg.NumHeads, cfg.NumKVHeads, cfg.HeadDim
-	qg, err := blk.QProj.Forward(h)
-	if err != nil {
-		return nil, err
+	var qg, k, v *tensor.Tensor
+	var err error
+	if fusedRow(h, blk.QProj, blk.KProj, blk.VProj) {
+		// Decode: the three projections in one launch.
+		outs, err := ops.LinearMulti(h, []*tensor.Tensor{blk.QProj.W, blk.KProj.W, blk.VProj.W}, dtype.BF16)
+		if err != nil {
+			return nil, err
+		}
+		qg, k, v = outs[0], outs[1], outs[2]
+	} else {
+		if qg, err = blk.QProj.Forward(h); err != nil {
+			return nil, err
+		}
+		if k, err = blk.KProj.Forward(h); err != nil {
+			return nil, err
+		}
+		if v, err = blk.VProj.Forward(h); err != nil {
+			return nil, err
+		}
 	}
 	q := qg
 	var gate *tensor.Tensor
@@ -401,14 +424,6 @@ func (m *Qwen35) attention(blk *qwen35Block, h *tensor.Tensor, B, T, prior int, 
 		if gate, err = autograd.Reshape(gate, B, T, NH*HD); err != nil {
 			return nil, err
 		}
-	}
-	k, err := blk.KProj.Forward(h)
-	if err != nil {
-		return nil, err
-	}
-	v, err := blk.VProj.Forward(h)
-	if err != nil {
-		return nil, err
 	}
 	if q, err = headsForward(q, B, T, NH, HD); err != nil {
 		return nil, err
@@ -540,8 +555,17 @@ func (m *Qwen35) deltaNet(blk *qwen35Block, h *tensor.Tensor, B, T int, cache *K
 		}
 		return ops.Cast(x, dtype.F32)
 	}
-	qkv, err := blk.InQKV.Forward(h)
-	if err != nil {
+	var qkv, bProj, aProj, z *tensor.Tensor
+	var err error
+	if fusedRow(h, blk.InQKV, blk.InZ, blk.InB, blk.InA) {
+		// Decode: all four projections in one launch (the 16-wide a / b
+		// ones cost a launch each otherwise).
+		outs, err := ops.LinearMulti(h, []*tensor.Tensor{blk.InQKV.W, blk.InZ.W, blk.InB.W, blk.InA.W}, dtype.BF16)
+		if err != nil {
+			return nil, err
+		}
+		qkv, z, bProj, aProj = outs[0], outs[1], outs[2], outs[3]
+	} else if qkv, err = blk.InQKV.Forward(h); err != nil {
 		return nil, err
 	}
 	if qkv, err = toF32(qkv); err != nil {
@@ -571,13 +595,13 @@ func (m *Qwen35) deltaNet(blk *qwen35Block, h *tensor.Tensor, B, T int, cache *K
 	}
 	// The gates from their raw projections: beta = σ(b),
 	// g = −exp(A_log) · softplus(a + dt_bias) ≤ 0, computed inside the rule.
-	bProj, err := blk.InB.Forward(h)
-	if err != nil {
-		return nil, err
-	}
-	aProj, err := blk.InA.Forward(h)
-	if err != nil {
-		return nil, err
+	if bProj == nil {
+		if bProj, err = blk.InB.Forward(h); err != nil {
+			return nil, err
+		}
+		if aProj, err = blk.InA.Forward(h); err != nil {
+			return nil, err
+		}
 	}
 	if act != dtype.BF16 {
 		if bProj, err = toF32(bProj); err != nil {
@@ -601,9 +625,10 @@ func (m *Qwen35) deltaNet(blk *qwen35Block, h *tensor.Tensor, B, T int, cache *K
 	}
 	// Gated RMSNorm over dv per head: norm(o) · w · silu(z), back at the
 	// activation dtype.
-	z, err := blk.InZ.Forward(h)
-	if err != nil {
-		return nil, err
+	if z == nil {
+		if z, err = blk.InZ.Forward(h); err != nil {
+			return nil, err
+		}
 	}
 	if z.DType() != dtype.BF16 {
 		if z, err = toF32(z); err != nil {
