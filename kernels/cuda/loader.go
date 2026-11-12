@@ -38,6 +38,9 @@ var shapeOpsPTX []byte
 //go:embed ptx/conv3d.ptx
 var conv3dPTX []byte
 
+//go:embed ptx/flash_attn_bf16.ptx
+var flashAttnBF16PTX []byte
+
 //go:embed ptx/flash_attn.ptx
 var flashAttnPTX []byte
 
@@ -122,6 +125,7 @@ var modules = []*lazyModule{
 	{name: "shape_ops", data: shapeOpsPTX},
 	{name: "conv3d", data: conv3dPTX},
 	{name: "flash_attn", data: flashAttnPTX},
+	{name: "flash_attn_bf16", data: flashAttnBF16PTX},
 	{name: "matmul_int8", data: matmulInt8PTX},
 	{name: "matmul_q", data: matmulQPTX},
 	{name: "sort", data: sortPTX},

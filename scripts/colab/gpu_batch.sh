@@ -209,6 +209,8 @@ for g in "${SEL[@]}"; do
 		# Z-Image-Turbo 1024^2 with per-phase timings (LIGHT_TIMINGS): load,
 		# encode, each step, VAE decode, the device synchronised at each mark.
 		[ -x "$WORK/light-bin" ] || go build -o "$WORK/light-bin" ./cmd/light || { SUMMARY+=("$g FAIL build"); continue; }
+		say "zperf kernels"
+		go test -count=1 -run 'FlashAttentionBF16' -bench 'FlashAttentionBF16' -benchtime 10x -v ./ops 2>&1 | grep -E '^(=== RUN|\s*--- |ok|FAIL|panic|Benchmark)|_test\.go:[0-9]+:'
 		ZI=Tongyi-MAI/Z-Image-Turbo
 		fetch $ZI
 		say "zperf"

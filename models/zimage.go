@@ -182,7 +182,7 @@ func (m *ZImageTransformer) block(b *zImageBlock, x, adaln, cos, sin *tensor.Ten
 	if err != nil {
 		return nil, err
 	}
-	a, err := attend(q, k, v, cos, sin)
+	a, err := attendOpt(q, k, v, cos, sin, b.Out.Mixed16)
 	if err != nil {
 		return nil, err
 	}
