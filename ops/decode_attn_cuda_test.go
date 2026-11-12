@@ -34,6 +34,7 @@ func TestDecodeAttentionCUDAParity(t *testing.T) {
 		{"bf16 gemma-ish window", 1, 4, 1, 256, 1024, 700, 512, dtype.BF16}, // window starts mid-block (188)
 		{"f32 window short", 2, 8, 2, 64, 256, 100, 33, dtype.F32},
 		{"f32 window wider than n", 1, 8, 2, 64, 256, 20, 512, dtype.F32},
+		{"bf16 gemma4 global hd512", 1, 8, 2, 512, 1024, 650, 0, dtype.BF16},
 	} {
 		tol := 1e-4
 		if tc.dt == dtype.BF16 {

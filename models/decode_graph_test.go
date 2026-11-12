@@ -37,6 +37,7 @@ func TestDecodeGraphMatchesEager(t *testing.T) {
 			return LoadLlamaGGUF(filepath.Join(ggufSearchDir(), strings.TrimPrefix(r, "gguf:")), d)
 		}},
 		{"unsloth/gemma-3-1b-it", 600, func(r string, d device.Device, dt dtype.DType) (CausalLM, error) { return LoadGemma3FromHF(r, d, dt) }},
+		{"unsloth/gemma-4-E2B-it", 600, func(r string, d device.Device, dt dtype.DType) (CausalLM, error) { return LoadGemma4FromHF(r, d, dt) }},
 		{"ibm-granite/granite-4.0-micro", 200, func(r string, d device.Device, dt dtype.DType) (CausalLM, error) { return LoadCausalLMFromHF(r, d, dt) }},
 	} {
 		if f := os.Getenv("LIGHT_PROFILE_MODEL"); f != "" && !strings.Contains(tc.repo, f) {

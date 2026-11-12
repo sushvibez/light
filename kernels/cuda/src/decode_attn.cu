@@ -8,7 +8,6 @@
 
 #define DA_KEYS 32   // keys per block of decode_attn_partial (decodeAttnKeys in decode_attn.go)
 #define DA_MAX_G 16  // query heads per KV head (GQA group)
-#define DA_MAX_D 256 // head dim
 
 __device__ __forceinline__ float da_ld(const float *p) { return *p; }
 __device__ __forceinline__ float da_ld(const __nv_bfloat16 *p) { return __bfloat162float(*p); }

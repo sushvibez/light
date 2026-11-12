@@ -272,6 +272,15 @@ func NewGemma4(cfg Gemma4Config, dev device.Device) (*Gemma4, error) {
 	return m, nil
 }
 
+// DecodeGraphOK: the text decode step reads its position (and each
+// sliding layer's window start) on the device, shared layers included.
+func (m *Gemma4) DecodeGraphOK() error {
+	if m.mmImage != nil {
+		return fmt.Errorf("multimodal forward in progress")
+	}
+	return nil
+}
+
 func (m *Gemma4) NumLayers() int     { return m.Cfg.NumLayers }
 func (m *Gemma4) VocabSize() int     { return m.Cfg.VocabSize }
 func (m *Gemma4) MaxContext() int    { return m.Cfg.MaxPosition }
@@ -378,11 +387,16 @@ func (m *Gemma4) ForwardWithCache(tokens *tensor.Tensor, cache *KVCache) (*tenso
 			return nil, err
 		}
 	}
-	posData := make([]int64, T)
-	for i := range posData {
-		posData[i] = int64(prior + i)
+	var pos *tensor.Tensor
+	if cache != nil && T == 1 {
+		pos, err = cache.position(dev) // the device-side position, kept in step with Len
+	} else {
+		posData := make([]int64, T)
+		for i := range posData {
+			posData[i] = int64(prior + i)
+		}
+		pos, err = tensor.New(posData, []int{T}, dev)
 	}
-	pos, err := tensor.New(posData, []int{T}, dev)
 	if err != nil {
 		return nil, err
 	}
@@ -405,7 +419,9 @@ func (m *Gemma4) ForwardWithCache(tokens *tensor.Tensor, cache *KVCache) (*tenso
 		return nil, err
 	}
 	if cache != nil {
-		cache.Len = prior + T
+		if err := cache.advance(T); err != nil {
+			return nil, err
+		}
 	}
 	logits, err := m.LMHead.Forward(h)
 	if err != nil {
@@ -429,6 +445,9 @@ func (m *Gemma4) ForwardWithCache(tokens *tensor.Tensor, cache *KVCache) (*tenso
 type kvState struct {
 	k, v            *tensor.Tensor
 	kvPrior, totalT int
+	// kbuf / vbuf are the source layer's capacity buffers on the decode
+	// path (a shared layer attends over them with the device position).
+	kbuf, vbuf *tensor.Tensor
 }
 
 func (m *Gemma4) runBlock(blk *gemma4Block, x, pleI *tensor.Tensor, B, T int, pos *tensor.Tensor, dev device.Device, cache *KVCache, layer int, shared map[int]*kvState) (*tensor.Tensor, error) {
@@ -460,13 +479,23 @@ func (m *Gemma4) runBlock(blk *gemma4Block, x, pleI *tensor.Tensor, B, T int, po
 
 	var k, v *tensor.Tensor
 	var kvPrior, totalT int
+	var ctx *tensor.Tensor // (B, NH, T, HD)
+	decode := cache != nil && T == 1
 	if blk.shared {
 		src := cfg.kvSourceLayer(layer)
 		st, ok := shared[src]
 		if !ok {
 			return nil, fmt.Errorf("gemma4: KV-shared layer %d has no source state (layer %d)", layer, src)
 		}
-		k, v, kvPrior, totalT = st.k, st.v, st.kvPrior, st.totalT
+		if decode {
+			// The source layer's buffers, read at the device position
+			// (scale 1: q_norm carries it).
+			if ctx, err = ops.DecodeAttention(q, st.kbuf, st.vbuf, pos, 1, window); err != nil {
+				return nil, err
+			}
+		} else {
+			k, v, kvPrior, totalT = st.k, st.v, st.kvPrior, st.totalT
+		}
 	} else {
 		if k, err = blk.KProj.Forward(h); err != nil {
 			return nil, err
@@ -494,7 +523,20 @@ func (m *Gemma4) runBlock(blk *gemma4Block, x, pleI *tensor.Tensor, B, T int, po
 			return nil, err
 		}
 		totalT = T
-		if cache != nil {
+		if decode {
+			// Decode step over the capacity buffers with the position (and
+			// the window's start) read on the device: the same launches
+			// at every position, so the step captures into a graph. The
+			// cache keeps every position; the window is applied in the
+			// kernel, as the mask applies it below.
+			if ctx, err = cache.decodeAttend(layer, q, k, v, pos, 1, window); err != nil {
+				return nil, err
+			}
+			shared[layer] = &kvState{kbuf: cache.kBuf[layer], vbuf: cache.vBuf[layer]}
+		} else if cache != nil {
+			if cache.capturing {
+				return nil, fmt.Errorf("%w: layer %d does not take the decode path", errNotCapturable, layer)
+			}
 			if cache.K[layer] != nil {
 				kvPrior = cache.K[layer].Dim(2)
 				if k, err = ops.Concat([]*tensor.Tensor{cache.K[layer], k}, 2); err != nil {
@@ -506,17 +548,49 @@ func (m *Gemma4) runBlock(blk *gemma4Block, x, pleI *tensor.Tensor, B, T int, po
 			}
 			totalT = kvPrior + T
 			cache.K[layer], cache.V[layer] = k, v
-			if window > 0 && totalT > window {
-				if cache.K[layer], err = trimKV(k, totalT-window, window); err != nil {
-					return nil, err
-				}
-				if cache.V[layer], err = trimKV(v, totalT-window, window); err != nil {
-					return nil, err
-				}
-			}
 		}
-		shared[layer] = &kvState{k: k, v: v, kvPrior: kvPrior, totalT: totalT}
+		if ctx == nil {
+			shared[layer] = &kvState{k: k, v: v, kvPrior: kvPrior, totalT: totalT}
+		}
 	}
+	if ctx == nil {
+		if ctx, err = m.attend(q, k, v, B, T, totalT, kvPrior, window, g, dev); err != nil {
+			return nil, err
+		}
+	}
+	if ctx, err = autograd.Reshape(ctx, B, NH, T, HD); err != nil {
+		return nil, err
+	}
+	if ctx, err = autograd.Permute(ctx, 0, 2, 1, 3); err != nil {
+		return nil, err
+	}
+	if ctx, err = autograd.Contiguous(ctx); err != nil {
+		return nil, err
+	}
+	if ctx, err = autograd.Reshape(ctx, B, T, NH*HD); err != nil {
+		return nil, err
+	}
+	o, err := blk.OProj.Forward(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if o, err = blk.PostAttnNorm.Forward(o); err != nil {
+		return nil, err
+	}
+	if x, err = ops.Add(x, o); err != nil {
+		return nil, err
+	}
+
+	return blk.ffn(x, pleI)
+}
+
+// attend is the prefill attention core: q (B, NH, T, HD) against k, v
+// (B, KH, totalT, HD) repeated over the GQA group and masked, as
+// (B·NH, T, HD); scaling is 1 (q_norm carries it).
+func (m *Gemma4) attend(q, k, v *tensor.Tensor, B, T, totalT, kvPrior, window, g int, dev device.Device) (*tensor.Tensor, error) {
+	NH, KH := m.Cfg.NumHeads, k.Dim(1)
+	HD := q.Dim(3)
+	var err error
 	if k, err = repeatKV(k, g, B, KH, totalT, HD); err != nil {
 		return nil, err
 	}
@@ -553,34 +627,7 @@ func (m *Gemma4) runBlock(blk *gemma4Block, x, pleI *tensor.Tensor, B, T int, po
 	if err != nil {
 		return nil, err
 	}
-	ctx, err := autograd.MatMul(attn, v)
-	if err != nil {
-		return nil, err
-	}
-	if ctx, err = autograd.Reshape(ctx, B, NH, T, HD); err != nil {
-		return nil, err
-	}
-	if ctx, err = autograd.Permute(ctx, 0, 2, 1, 3); err != nil {
-		return nil, err
-	}
-	if ctx, err = autograd.Contiguous(ctx); err != nil {
-		return nil, err
-	}
-	if ctx, err = autograd.Reshape(ctx, B, T, NH*HD); err != nil {
-		return nil, err
-	}
-	o, err := blk.OProj.Forward(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if o, err = blk.PostAttnNorm.Forward(o); err != nil {
-		return nil, err
-	}
-	if x, err = ops.Add(x, o); err != nil {
-		return nil, err
-	}
-
-	return blk.ffn(x, pleI)
+	return autograd.MatMul(attn, v)
 }
 
 // ffn is the second half of a block: the gated-GELU MLP, the per-layer

@@ -80,11 +80,10 @@ func gemma4Consistency(t *testing.T, shared, ple, window int, partial float64) {
 			}
 			continue
 		}
-		if window > 0 && m.Cfg.isSliding(l) && k.Dim(2) > cfg.SlidingWindow {
-			t.Fatalf("layer %d holds %d keys, window %d", l, k.Dim(2), cfg.SlidingWindow)
-		}
-		if !m.Cfg.isSliding(l) && k.Dim(2) != len(ids) {
-			t.Fatalf("global layer %d holds %d keys", l, k.Dim(2))
+		// Every layer keeps every position (the window is applied by the
+		// mask and the decode kernel, not by trimming the cache).
+		if k.Dim(2) != len(ids) {
+			t.Fatalf("layer %d holds %d keys, want %d", l, k.Dim(2), len(ids))
 		}
 	}
 	maxd := 0.0

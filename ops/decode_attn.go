@@ -170,8 +170,11 @@ func DecodeAttention(q, kBuf, vBuf, pos *tensor.Tensor, scale float64, window in
 }
 
 // decodeAttnKernelOK mirrors the CUDA kernel's limits (head dim a multiple
-// of 32 up to 256, GQA group up to 16); other shapes compose.
-func decodeAttnKernelOK(hd, g int) bool { return hd%32 == 0 && hd <= 256 && g >= 1 && g <= 16 }
+// of 32, GQA group up to 16, query rows and scores within 48 KB of shared
+// memory); other shapes compose.
+func decodeAttnKernelOK(hd, g int) bool {
+	return hd%32 == 0 && g >= 1 && g <= 16 && g*(hd+1+32)*4 <= 48*1024
+}
 
 // CanIncrementI64 reports whether IncrementI64 runs on dev.
 func CanIncrementI64(dev device.Device) bool {

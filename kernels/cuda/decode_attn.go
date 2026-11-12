@@ -23,16 +23,18 @@ func init() {
 
 // decodeAttnKeys is DA_KEYS in decode_attn.cu: keys per split-K block.
 const (
-	decodeAttnKeys = 32
-	decodeAttnMaxG = 16
-	decodeAttnMaxD = 256
+	decodeAttnKeys   = 32
+	decodeAttnMaxG   = 16
+	decodeAttnShared = 48 * 1024 // dynamic shared memory without opt-in
 )
 
 // DecodeAttnSupported reports whether the CUDA decode-attention kernel
-// handles a head dim and GQA group (ops falls back to the composed path
-// otherwise).
+// handles a head dim and GQA group: a multiple of 32, a group of at most
+// 16, and the padded query rows plus scores within the default shared
+// memory (Gemma 4's 512-wide global heads fit). ops falls back to the
+// composed path otherwise.
 func DecodeAttnSupported(headDim, group int) bool {
-	return headDim%32 == 0 && headDim <= decodeAttnMaxD && group >= 1 && group <= decodeAttnMaxG
+	return headDim%32 == 0 && group >= 1 && group <= decodeAttnMaxG && group*(headDim+1+decodeAttnKeys)*4 <= decodeAttnShared
 }
 
 func devPtr(t *tensor.Tensor) uintptr {
