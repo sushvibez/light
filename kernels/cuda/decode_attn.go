@@ -23,7 +23,7 @@ func init() {
 
 // decodeAttnKeys is DA_KEYS in decode_attn.cu: keys per split-K block.
 const (
-	decodeAttnKeys = 128
+	decodeAttnKeys = 32
 	decodeAttnMaxG = 16
 	decodeAttnMaxD = 256
 )
@@ -104,7 +104,7 @@ func decodeAttnLauncher(ctx *registry.Context) error {
 		unsafe.Pointer(&qP), unsafe.Pointer(&kP), unsafe.Pointer(&vP), unsafe.Pointer(&pP), unsafe.Pointer(&posP),
 		unsafe.Pointer(&nh32), unsafe.Pointer(&kh32), unsafe.Pointer(&cap32), unsafe.Pointer(&d32), unsafe.Pointer(&scale),
 	}
-	shared := uint32((g*D + g*decodeAttnKeys + 33) * 4)
+	shared := uint32((g*(D+1) + g*decodeAttnKeys) * 4)
 	if err := cudart.LaunchKernel(f1, uint32(B*KH), uint32(splits), 1, 128, 1, 1, shared, 0, args); err != nil {
 		return err
 	}

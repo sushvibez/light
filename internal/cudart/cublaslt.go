@@ -67,6 +67,7 @@ func GetLtHandle(ordinal int) (*LtHandle, error) {
 // multiple of 16 bytes, all pointers 16-byte aligned.
 func MatmulFP8RowMajor(lt *LtHandle, m, n, k int, a, b, c uintptr, aScale, bScale uintptr, cType DataType) error {
 	tally(&counters.Gemms)
+	span := gpuSpanBegin(fmt.Sprintf("gemm lt %dx%dx%d", m, n, k))
 	if k%16 != 0 {
 		return fmt.Errorf("cublasLt fp8: K=%d must be a multiple of 16", k)
 	}
@@ -151,6 +152,7 @@ func MatmulFP8RowMajor(lt *LtHandle, m, n, k int, a, b, c uintptr, aScale, bScal
 		unsafe.Pointer(c), cDesc,
 		unsafe.Pointer(c), cDesc,
 		&heur.algo, unsafe.Pointer(lt.workspace), ws, C.cudaStream_t(unsafe.Pointer(current.Load())))
+	span.end()
 	if rc != C.CUBLAS_STATUS_SUCCESS {
 		return fmt.Errorf("cublasLtMatmul(FP8→%v): status %d", cType, int(rc))
 	}

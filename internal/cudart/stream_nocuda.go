@@ -22,3 +22,12 @@ func MemcpyHtoDAsyncOn(uintptr, uintptr, uintptr, uintptr) error { return errNoC
 func MallocHost(uintptr) (uintptr, error)                        { return 0, errNoCUDA }
 func FreeHost(uintptr) error                                     { return errNoCUDA }
 func DeviceSynchronize() error                                   { return errNoCUDA }
+
+type GPUTime struct {
+	Count  int
+	Micros float64
+}
+
+func StartGPUTrace()                             {}
+func StopGPUTrace() (map[string]GPUTime, error)  { return nil, errNoCUDA }
+func GPUTraceTop(map[string]GPUTime, int) string { return "" }

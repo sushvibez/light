@@ -120,6 +120,7 @@ func SgemmRowMajorTransB(h *BlasHandle, m, n, k int, a, b, c uintptr) error {
 //	Atype=Btype=BF16, Ctype=F32, computeType=F32.
 func GemmExBF16RowMajorTransB(h *BlasHandle, m, n, k int, a, b, c uintptr) error {
 	tally(&counters.Gemms)
+	span := gpuSpanBegin(fmt.Sprintf("gemm %s %dx%dx%d", gemmLabel("bf16"), m, n, k))
 	alpha := C.float(1.0)
 	beta := C.float(0.0)
 	rc := C.cublasGemmEx(
@@ -134,6 +135,7 @@ func GemmExBF16RowMajorTransB(h *BlasHandle, m, n, k int, a, b, c uintptr) error
 		C.CUBLAS_COMPUTE_32F,
 		C.CUBLAS_GEMM_DEFAULT,
 	)
+	span.end()
 	if rc != C.CUBLAS_STATUS_SUCCESS {
 		return fmt.Errorf("cublasGemmEx(BF16,BF16→F32,T,N): status %d", int(rc))
 	}
@@ -147,6 +149,7 @@ func GemmExBF16RowMajorTransB(h *BlasHandle, m, n, k int, a, b, c uintptr) error
 // inference path for nn.Linear.
 func GemmExBF16OutBF16RowMajorTransB(h *BlasHandle, m, n, k int, a, b, c uintptr) error {
 	tally(&counters.Gemms)
+	span := gpuSpanBegin(fmt.Sprintf("gemm %s %dx%dx%d", gemmLabel("bf16"), m, n, k))
 	alpha := C.float(1.0)
 	beta := C.float(0.0)
 	rc := C.cublasGemmEx(
@@ -161,6 +164,7 @@ func GemmExBF16OutBF16RowMajorTransB(h *BlasHandle, m, n, k int, a, b, c uintptr
 		C.CUBLAS_COMPUTE_32F,
 		C.CUBLAS_GEMM_DEFAULT,
 	)
+	span.end()
 	if rc != C.CUBLAS_STATUS_SUCCESS {
 		return fmt.Errorf("cublasGemmEx(BF16,BF16→BF16,T,N): status %d", int(rc))
 	}
@@ -176,6 +180,7 @@ func GemmExBF16OutBF16RowMajorTransB(h *BlasHandle, m, n, k int, a, b, c uintptr
 //	C[i] = A[i] @ B[i]
 func GemmExBF16BatchedRowMajor(h *BlasHandle, m, n, k int, a, b, c uintptr, count int) error {
 	tally(&counters.Gemms)
+	span := gpuSpanBegin(fmt.Sprintf("gemm %s %dx%dx%d", gemmLabel("bf16"), m, n, k))
 	alpha := C.float(1.0)
 	beta := C.float(0.0)
 	rc := C.cublasGemmStridedBatchedEx(
@@ -191,6 +196,7 @@ func GemmExBF16BatchedRowMajor(h *BlasHandle, m, n, k int, a, b, c uintptr, coun
 		C.CUBLAS_COMPUTE_32F,
 		C.CUBLAS_GEMM_DEFAULT,
 	)
+	span.end()
 	if rc != C.CUBLAS_STATUS_SUCCESS {
 		return fmt.Errorf("cublasGemmStridedBatchedEx(BF16): status %d", int(rc))
 	}
@@ -229,6 +235,7 @@ func SgemmStridedBatchedRowMajor(h *BlasHandle, m, n, k int, a, b, c uintptr, co
 // and C[i] = A[i] @ bT[i]ᵀ. Saves materialising kᵀ on every attention step.
 func GemmExBF16BatchedRowMajorTransB(h *BlasHandle, m, n, k int, a, bT, c uintptr, count int) error {
 	tally(&counters.Gemms)
+	span := gpuSpanBegin(fmt.Sprintf("gemm %s %dx%dx%d", gemmLabel("bf16"), m, n, k))
 	alpha := C.float(1.0)
 	beta := C.float(0.0)
 	rc := C.cublasGemmStridedBatchedEx(
@@ -244,6 +251,7 @@ func GemmExBF16BatchedRowMajorTransB(h *BlasHandle, m, n, k int, a, bT, c uintpt
 		C.CUBLAS_COMPUTE_32F,
 		C.CUBLAS_GEMM_DEFAULT,
 	)
+	span.end()
 	if rc != C.CUBLAS_STATUS_SUCCESS {
 		return fmt.Errorf("cublasGemmStridedBatchedEx(bf16, transB): status %d", int(rc))
 	}
@@ -254,6 +262,7 @@ func GemmExBF16BatchedRowMajorTransB(h *BlasHandle, m, n, k int, a, bT, c uintpt
 // GemmExBF16BatchedRowMajorTransB.
 func SgemmStridedBatchedRowMajorTransB(h *BlasHandle, m, n, k int, a, bT, c uintptr, count int) error {
 	tally(&counters.Gemms)
+	span := gpuSpanBegin(fmt.Sprintf("gemm %s %dx%dx%d", gemmLabel("f32"), m, n, k))
 	alpha := C.float(1.0)
 	beta := C.float(0.0)
 	rc := C.cublasSgemmStridedBatched(
@@ -267,6 +276,7 @@ func SgemmStridedBatchedRowMajorTransB(h *BlasHandle, m, n, k int, a, bT, c uint
 		(*C.float)(unsafe.Pointer(c)), C.int(n), C.longlong(m*n),
 		C.int(count),
 	)
+	span.end()
 	if rc != C.CUBLAS_STATUS_SUCCESS {
 		return fmt.Errorf("cublasSgemmStridedBatched(transB): status %d", int(rc))
 	}
@@ -329,6 +339,7 @@ func (d DataType) Size() int {
 //	A: (M, K), C: (M, N) — row-major contiguous on device.
 func GemmExRowMajor(h *BlasHandle, m, n, k int, a, b, c uintptr, aType, bType, cType DataType, transB bool) error {
 	tally(&counters.Gemms)
+	span := gpuSpanBegin(fmt.Sprintf("gemm %s %dx%dx%d", gemmLabel(aType), m, n, k))
 	alpha := C.float(1.0)
 	beta := C.float(0.0)
 	opB, ldb := C.cublasOperation_t(C.CUBLAS_OP_N), C.int(n)
@@ -347,6 +358,7 @@ func GemmExRowMajor(h *BlasHandle, m, n, k int, a, b, c uintptr, aType, bType, c
 		C.CUBLAS_COMPUTE_32F,
 		C.CUBLAS_GEMM_DEFAULT,
 	)
+	span.end()
 	if rc != C.CUBLAS_STATUS_SUCCESS {
 		return fmt.Errorf("cublasGemmEx(%v×%v→%v, transB=%v): status %d", aType, bType, cType, transB, int(rc))
 	}
@@ -359,6 +371,7 @@ func GemmExRowMajor(h *BlasHandle, m, n, k int, a, b, c uintptr, aType, bType, c
 // int8 leading dimensions (K here) to be multiples of 4.
 func GemmInt8RowMajorTransB(h *BlasHandle, m, n, k int, a, b, c uintptr) error {
 	tally(&counters.Gemms)
+	span := gpuSpanBegin(fmt.Sprintf("gemm %s %dx%dx%d", gemmLabel("f32"), m, n, k))
 	alpha := C.int(1)
 	beta := C.int(0)
 	rc := C.cublasGemmEx(
@@ -373,6 +386,7 @@ func GemmInt8RowMajorTransB(h *BlasHandle, m, n, k int, a, b, c uintptr) error {
 		C.CUBLAS_COMPUTE_32I,
 		C.CUBLAS_GEMM_DEFAULT,
 	)
+	span.end()
 	if rc != C.CUBLAS_STATUS_SUCCESS {
 		return fmt.Errorf("cublasGemmEx(int8×int8→int32, m=%d n=%d k=%d): status %d", m, n, k, int(rc))
 	}
@@ -386,6 +400,7 @@ func GemmInt8RowMajorTransB(h *BlasHandle, m, n, k int, a, b, c uintptr) error {
 //	A: (count, M, K), B: (count, K, N), C: (count, M, N)
 func GemmStridedBatchedExRowMajor(h *BlasHandle, m, n, k int, a, b, c uintptr, dt DataType, count int) error {
 	tally(&counters.Gemms)
+	span := gpuSpanBegin(fmt.Sprintf("gemm %s %dx%dx%d", gemmLabel(dt), m, n, k))
 	alpha := C.float(1.0)
 	beta := C.float(0.0)
 	rc := C.cublasGemmStridedBatchedEx(
@@ -401,6 +416,7 @@ func GemmStridedBatchedExRowMajor(h *BlasHandle, m, n, k int, a, b, c uintptr, d
 		C.CUBLAS_COMPUTE_32F,
 		C.CUBLAS_GEMM_DEFAULT,
 	)
+	span.end()
 	if rc != C.CUBLAS_STATUS_SUCCESS {
 		return fmt.Errorf("cublasGemmStridedBatchedEx(%v): status %d", dt, int(rc))
 	}
@@ -439,6 +455,7 @@ type BatchedOperand struct {
 // through cublasGemmStridedBatchedEx with F32 accumulation.
 func GemmStridedBatched(h *BlasHandle, m, n, k int, a, b BatchedOperand, c uintptr, dt DataType, count int) error {
 	tally(&counters.Gemms)
+	span := gpuSpanBegin(fmt.Sprintf("gemm %s %dx%dx%d", gemmLabel(dt), m, n, k))
 	// cuBLAS is column-major: Cᵀ (n×m) = op(Bᵀ) · op(Aᵀ). A row-major
 	// (rows, cols) block is the column-major (cols, rows) block with the
 	// same leading dimension, so an operand stored untransposed is op N
@@ -478,8 +495,20 @@ func GemmStridedBatched(h *BlasHandle, m, n, k int, a, b BatchedOperand, c uintp
 			C.CUBLAS_GEMM_DEFAULT,
 		)
 	}
+	span.end()
 	if rc != C.CUBLAS_STATUS_SUCCESS {
 		return fmt.Errorf("cublasGemmStridedBatched(%v, transA=%v, transB=%v): status %d", dt, a.Trans, b.Trans, int(rc))
 	}
 	return nil
+}
+
+// gemmLabel names a GEMM's storage type for GPU-time attribution.
+func gemmLabel(dt any) string {
+	switch v := dt.(type) {
+	case DataType:
+		return v.String()
+	case string:
+		return v
+	}
+	return "?"
 }

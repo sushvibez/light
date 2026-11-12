@@ -127,6 +127,24 @@ func TestDecodeStepProfile(t *testing.T) {
 		}
 		// The same step as a captured graph: one upload and one launch per
 		// token, the argmax and its read-back as in the engine.
+		if os.Getenv("LIGHT_PROFILE_GPU") != "" {
+			// Event pairs around every launch over 4 eager steps (the GPU
+			// is the bottleneck in eager mode too, so a span is its
+			// kernel's time, not a gap). Captured events cannot be timed.
+			cudart.StartGPUTrace()
+			for i := 0; i < 4; i++ {
+				row = lastLogits(t, m, []int64{next}, cache, dev)
+				next = int64(argmaxRow(row))
+			}
+			gt, err := cudart.StopGPUTrace()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for k, v := range gt {
+				gt[k] = cudart.GPUTime{Count: v.Count / 4, Micros: v.Micros / 4}
+			}
+			t.Logf("  GPU time per step:%s", cudart.GPUTraceTop(gt, 40))
+		}
 		g, err := NewDecodeGraph(m, cache, dev, cache.Len+steps+8)
 		if err != nil {
 			t.Logf("  graph: %v", err)
