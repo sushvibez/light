@@ -176,17 +176,8 @@ func (m *ZImageTransformer) block(b *zImageBlock, x, adaln, cos, sin *tensor.Ten
 			return nil, err
 		}
 	}
-	scale := func(t, s *tensor.Tensor) (*tensor.Tensor, error) {
-		if s == nil {
-			return t, nil
-		}
-		return ops.Mul(t, s)
-	}
-	n, err := b.AttnNorm1.Forward(x)
+	n, err := normScaled(b.AttnNorm1, x, scaleA)
 	if err != nil {
-		return nil, err
-	}
-	if n, err = scale(n, scaleA); err != nil {
 		return nil, err
 	}
 	q, k, v, err := b.Attn.qkv(n, H, Dh)
@@ -200,19 +191,13 @@ func (m *ZImageTransformer) block(b *zImageBlock, x, adaln, cos, sin *tensor.Ten
 	if a, err = b.Out.Forward(a); err != nil {
 		return nil, err
 	}
-	if a, err = b.AttnNorm2.Forward(a); err != nil {
-		return nil, err
-	}
-	if a, err = scale(a, gateA); err != nil {
+	if a, err = normScaled(b.AttnNorm2, a, gateA); err != nil {
 		return nil, err
 	}
 	if x, err = ops.Add(x, a); err != nil {
 		return nil, err
 	}
-	if n, err = b.FFNNorm1.Forward(x); err != nil {
-		return nil, err
-	}
-	if n, err = scale(n, scaleM); err != nil {
+	if n, err = normScaled(b.FFNNorm1, x, scaleM); err != nil {
 		return nil, err
 	}
 	// W1 and W3 read the same input: on 16-bit-compute layers round it once.
@@ -244,13 +229,37 @@ func (m *ZImageTransformer) block(b *zImageBlock, x, adaln, cos, sin *tensor.Ten
 	if err != nil {
 		return nil, err
 	}
-	if f, err = b.FFNNorm2.Forward(f); err != nil {
-		return nil, err
-	}
-	if f, err = scale(f, gateM); err != nil {
+	if f, err = normScaled(b.FFNNorm2, f, gateM); err != nil {
 		return nil, err
 	}
 	return ops.Add(x, f)
+}
+
+// normScaled is norm(x) · s for a (B, 1, D) modulation s (nil: none).
+// With one s for every token (B = 1, inference) it folds s into the norm
+// weight, RMSNorm(x)·(w ⊙ s): a D-element multiply instead of a broadcast
+// one over the whole activation.
+func normScaled(norm *nn.RMSNorm, x, s *tensor.Tensor) (*tensor.Tensor, error) {
+	if s == nil {
+		return norm.Forward(x)
+	}
+	D := norm.Weight.NumElements()
+	if s.NumElements() == D && !x.RequiresGrad() && !s.RequiresGrad() && !norm.Weight.RequiresGrad() {
+		sv, err := s.Reshape(D)
+		if err != nil {
+			return nil, err
+		}
+		w, err := ops.Mul(norm.Weight, sv)
+		if err != nil {
+			return nil, err
+		}
+		return ops.RMSNorm(x, w, norm.Eps)
+	}
+	y, err := norm.Forward(x)
+	if err != nil {
+		return nil, err
+	}
+	return ops.Mul(y, s)
 }
 
 // padRows pads (n, D) rows to a multiple of 32 by repeating the last row;
