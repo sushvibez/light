@@ -210,7 +210,7 @@ for g in "${SEL[@]}"; do
 		# encode, each step, VAE decode, the device synchronised at each mark.
 		[ -x "$WORK/light-bin" ] || go build -o "$WORK/light-bin" ./cmd/light || { SUMMARY+=("$g FAIL build"); continue; }
 		say "zperf kernels"
-		go test -count=1 -run 'FlashAttentionBF16|ForwardMixed16' -bench 'FlashAttentionBF16' -benchtime 10x -v ./ops ./nn 2>&1 | grep -E '^(=== RUN|\s*--- |ok|FAIL|panic|Benchmark)|_test\.go:[0-9]+:'
+		go test -count=1 -run 'FlashAttentionBF16|ForwardMixed16|SiLUMulBF16' -bench 'FlashAttentionBF16' -benchtime 10x -v ./ops ./nn 2>&1 | grep -E '^(=== RUN|\s*--- |ok|FAIL|panic|Benchmark)|_test\.go:[0-9]+:'
 		ZI=Tongyi-MAI/Z-Image-Turbo
 		fetch $ZI
 		say "zperf"

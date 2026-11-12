@@ -215,19 +215,30 @@ func (m *ZImageTransformer) block(b *zImageBlock, x, adaln, cos, sin *tensor.Ten
 	if err != nil {
 		return nil, err
 	}
-	if g, err = ops.SiLU(g); err != nil {
-		return nil, err
-	}
 	u, err := fwd(b.W3)
 	if err != nil {
 		return nil, err
 	}
-	if g, err = ops.Mul(g, u); err != nil {
-		return nil, err
-	}
-	f, err := b.W2.Forward(g)
-	if err != nil {
-		return nil, err
+	var f *tensor.Tensor
+	if nr != nil && b.W2.Mixed16 && b.W2.W.DType() == dtype.BF16 {
+		// 16-bit compute: silu(g)·u lands in BF16 for w2 in one kernel.
+		h, err := ops.SiLUMulBF16(g, u)
+		if err != nil {
+			return nil, err
+		}
+		if f, err = b.W2.ForwardMixed16(h); err != nil {
+			return nil, err
+		}
+	} else {
+		if g, err = ops.SiLU(g); err != nil {
+			return nil, err
+		}
+		if g, err = ops.Mul(g, u); err != nil {
+			return nil, err
+		}
+		if f, err = b.W2.Forward(g); err != nil {
+			return nil, err
+		}
 	}
 	if f, err = normScaled(b.FFNNorm2, f, gateM); err != nil {
 		return nil, err
