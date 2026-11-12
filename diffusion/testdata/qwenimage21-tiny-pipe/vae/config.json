@@ -1,0 +1,49 @@
+{
+  "_class_name": "AutoencoderKLQwenImage21",
+  "_diffusers_version": "0.42.1",
+  "attn_scales": [],
+  "base_dim": 4,
+  "decoder_base_dim": 6,
+  "dim_mult": [
+    1,
+    2,
+    2,
+    2,
+    2
+  ],
+  "dropout": 0.0,
+  "in_channels": 4,
+  "is_residual": true,
+  "latents_mean": [
+    0.09906509518623352,
+    0.03348703309893608,
+    0.11497286707162857,
+    -0.05497860535979271,
+    -0.010461806319653988,
+    0.20104174315929413,
+    -0.07885684072971344,
+    -0.012457835488021374
+  ],
+  "latents_std": [
+    1.1260955333709717,
+    1.00229012966156,
+    1.1774617433547974,
+    1.0514582395553589,
+    1.0981497764587402,
+    1.1323899030685425,
+    1.1937862634658813,
+    1.0471206903457642
+  ],
+  "num_res_blocks": 1,
+  "out_channels": 4,
+  "patch_size": null,
+  "scale_factor_spatial": 16,
+  "scale_factor_temporal": 8,
+  "temperal_downsample": [
+    false,
+    true,
+    true,
+    true
+  ],
+  "z_dim": 8
+}

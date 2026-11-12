@@ -128,9 +128,10 @@ Light already has. Sizes are BF16 safetensors.
 6. **Spark-X2.6-4B**: done 2026-11-11 (CPU; tiny on WebGPU).
 7. **Wan2.1-T2V-1.3B**, then **Wan2.2-TI2V-5B** (text / image to video;
    Apache-2.0; UMT5 encoder): the video DiT + 3D VAE path.
-8. **Qwen-Image-2.1 / Turbo** (most-downloaded text-to-image; 7B DiT +
-   Qwen3-VL-8B encoder, ~32 GB: Q8_0 / desktop / Colab; needs Qwen3-VL
-   deepstack).
+8. **Qwen-Image-2.1 / Turbo**: text-to-image done (tiny-verified; 7B DiT +
+   Qwen3-VL-8B text, 14 + 17.5 GB BF16: Colab). Next: a real run, editing
+   (condition images in the text stream, VAE encoder, Qwen3-VL vision), the
+   prefix KV cache.
 9. Quick non-image wins: Kokoro-82M (TTS), Qwen3-Embedding-0.6B,
    Depth-Anything-V2, BiRefNet / RMBG-2.0 (background removal), Florence-2.
 10. **LTX-2.5** (queued): 76 GB DiT + 24 GB encoder; Colab only, after Wan

@@ -331,11 +331,14 @@ type Llama struct {
 	keyValid int
 	// padPos >= 0 (with keyValid) gives the padding tokens that fixed RoPE
 	// position instead of their index (FLUX 3's Qwen3-VL text encoder).
-	padPos    int64
-	posValid  int
-	posPad    int64
-	maskDev   device.Device
-	maskCache *tensor.Tensor
+	padPos   int64
+	posValid int
+	posPad   int64
+	// noFinalNorm makes HiddenStates return the last layer's output before
+	// the final norm (HiddenStatesPreNorm).
+	noFinalNorm bool
+	maskDev     device.Device
+	maskCache   *tensor.Tensor
 
 	// Block-diffusion decoding state for the current ForwardDiffusion call
 	// (SDAR): diffBlock > 0 selects the block-bidirectional mask, diffStore
@@ -629,6 +632,15 @@ func (m *Llama) HiddenStates(tokens *tensor.Tensor, layers []int, valid int) ([]
 	return m.HiddenStatesPadPos(tokens, layers, valid, -1)
 }
 
+// HiddenStatesPreNorm is HiddenStates whose last-layer entry is taken
+// before the final norm (the "un-normalised" last hidden state Qwen-Image
+// 2.1's transformer was trained on).
+func (m *Llama) HiddenStatesPreNorm(tokens *tensor.Tensor, layers []int) ([]*tensor.Tensor, error) {
+	m.noFinalNorm = true
+	defer func() { m.noFinalNorm = false }()
+	return m.HiddenStatesPadPos(tokens, layers, 0, -1)
+}
+
 // HiddenStatesPadPos is HiddenStates with the padding tokens (positions >=
 // valid) all at RoPE position padPos when padPos >= 0, as an HF forward
 // with explicit position_ids that masks_fill the padding does.
@@ -672,7 +684,7 @@ func (m *Llama) HiddenStatesPadPos(tokens *tensor.Tensor, layers []int, valid in
 		if h, err = m.runBlock(blk, h, B, T, 0, dev, nil, i); err != nil {
 			return nil, err
 		}
-		if i+1 == len(m.Blocks) {
+		if i+1 == len(m.Blocks) && !m.noFinalNorm {
 			if h, err = m.FinalNorm.Forward(h); err != nil {
 				return nil, err
 			}

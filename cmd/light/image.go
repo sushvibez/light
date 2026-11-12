@@ -38,7 +38,7 @@ func cmdImage(args []string) error {
 	var refs stringList
 	fs.Var(&refs, "image", "FLUX.2 klein / FLUX 3: reference image for editing (repeatable); Z-Image / FLUX.1 / SD 1.5: init image for image-to-image. The output size defaults to the (first) image's")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: light image [flags] <org/repo> <prompt>\n\nPipelines: Flux2KleinPipeline (FLUX.2 klein) and Flux2Pipeline (FLUX.2 [dev]), text-to-image and editing; ZImagePipeline (Z-Image / Turbo), FluxPipeline (FLUX.1), StableDiffusionPipeline (SD 1.5, DDIM), FLUX 3 Image Klein (modular; give a full scene caption).\n\nflags:")
+		fmt.Fprintln(os.Stderr, "usage: light image [flags] <org/repo> <prompt>\n\nPipelines: Flux2KleinPipeline (FLUX.2 klein) and Flux2Pipeline (FLUX.2 [dev]), text-to-image and editing; ZImagePipeline (Z-Image / Turbo), FluxPipeline (FLUX.1), StableDiffusionPipeline (SD 1.5, DDIM), QwenImage21Pipeline (Qwen-Image 2.1, RGBA), FLUX 3 Image Klein (modular; give a full scene caption).\n\nflags:")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -188,6 +188,22 @@ func cmdImage(args []string) error {
 		}
 		fmt.Fprintf(os.Stderr, "generated in %.1f s\n", time.Since(t1).Seconds())
 		img = diffusion.Image{Pixels: res.Image}
+	case "QwenImage21Pipeline":
+		if len(refs) > 0 {
+			return fmt.Errorf("%s: reference images are not supported for Qwen-Image 2.1 yet", repo)
+		}
+		p, err := diffusion.LoadQwenImage21(repo, d, diffusion.QwenImage21LoadOptions{Storage16: s16, EncoderDevice: ed, Sequential: !*keep})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "loaded %s in %.1f s\n", repo, time.Since(t0).Seconds())
+		t1 := time.Now()
+		res, err := p.Generate(diffusion.QwenImage21Options{Prompt: prompt, Width: *width, Height: *height, Steps: *steps, Seed: *seed})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "generated in %.1f s\n", time.Since(t1).Seconds())
+		img = diffusion.Image{Pixels: res.Image}
 	case "StableDiffusionPipeline":
 		i2i, err := initImage()
 		if err != nil {
@@ -228,7 +244,7 @@ func cmdImage(args []string) error {
 		}
 		img = diffusion.Image{Pixels: chw}
 	default:
-		return fmt.Errorf("%s: pipeline %q not supported (Flux2KleinPipeline, ZImagePipeline, FluxPipeline, StableDiffusionPipeline, FLUX 3 modular)", repo, mi.Class)
+		return fmt.Errorf("%s: pipeline %q not supported (Flux2KleinPipeline, ZImagePipeline, FluxPipeline, StableDiffusionPipeline, QwenImage21Pipeline, FLUX 3 modular)", repo, mi.Class)
 	}
 	if err := img.SavePNG(*out); err != nil {
 		return err
