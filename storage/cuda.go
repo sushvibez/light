@@ -232,14 +232,7 @@ func (p *cudaCachingPool) release(ord int, ptr uintptr, class int) {
 	p.order = append(p.order, key)
 	p.cached += class
 	var evict []uintptr
-	// Past the cap, evict down to three quarters of it in one go: every
-	// cudaFree waits for the device, but only the first of a batch finds
-	// work queued, so batches beat a block per release (~30 ms each on a
-	// Z-Image step, where the host runs that far ahead of the GPU).
 	limit := poolCap()
-	if p.cached > limit {
-		limit = limit / 4 * 3
-	}
 	for p.cached > limit && len(p.order) > 0 {
 		k := p.order[0]
 		p.order = p.order[1:]
