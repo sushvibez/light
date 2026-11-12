@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"light/device"
+	"light/internal/cudart"
 	"light/tensor"
 )
 
@@ -50,4 +51,26 @@ func waitFor(t *tensor.Tensor) {
 		}
 	}
 	_, _ = t.To(device.CPU())
+}
+
+// gpuProfileStep is the denoising step LIGHT_PROFILE_GPU traces (the
+// second: the first warms caches and allocations).
+const gpuProfileStep = 1
+
+// stepProfile brackets step i with the CUDA per-kernel GPU-time trace when
+// LIGHT_PROFILE_GPU is set, printing the top kernels after it; it returns
+// the function to call once the step is done.
+func stepProfile(i int, dev device.Device) func() {
+	if i != gpuProfileStep || os.Getenv("LIGHT_PROFILE_GPU") == "" || !device.IsCUDA(dev) {
+		return func() {}
+	}
+	cudart.StartGPUTrace()
+	return func() {
+		t, err := cudart.StopGPUTrace()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "gpu trace: %v\n", err)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "gpu trace, step %d:\n%s\n", i, cudart.GPUTraceTop(t, 40))
+	}
 }

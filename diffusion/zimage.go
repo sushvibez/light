@@ -287,6 +287,7 @@ func (p *ZImage) Generate(o ZImageOptions) (*ZImageResult, error) {
 	for i := first; i < o.Steps; i++ {
 		t := sigmas[i] * float32(p.Scheduler.NumTrainTimesteps)
 		tm := (1000 - t) / 1000
+		endProfile := stepProfile(i, p.Dev)
 		v, err := p.Transformer.Forward(x, cap, tm)
 		if err != nil {
 			return nil, fmt.Errorf("z-image step %d: %w", i, err)
@@ -316,6 +317,7 @@ func (p *ZImage) Generate(o ZImageOptions) (*ZImageResult, error) {
 		if x, err = ops.Add(x, v); err != nil {
 			return nil, err
 		}
+		endProfile()
 		pt.mark(fmt.Sprintf("step %d", i), x)
 	}
 	if p.opts.Sequential {
