@@ -87,6 +87,13 @@ func LoadCLIPTokenizer(vocabReader, mergesReader io.Reader) (*CLIPTokenizer, err
 // padded with EOS. The output starts with BOS, contains the BPE pieces of
 // the prompt (truncated if too long), and ends with EOS + EOS-padding.
 func (t *CLIPTokenizer) Encode(text string, maxLen int) []int32 {
+	return t.EncodeWithPad(text, maxLen, t.eos)
+}
+
+// EncodeWithPad is Encode with an explicit padding id: SDXL's second
+// tokenizer pads with "!" (id 0) rather than EOS, and the UNet
+// cross-attends to the padded positions, so the id matters.
+func (t *CLIPTokenizer) EncodeWithPad(text string, maxLen int, pad int32) []int32 {
 	out := []int32{t.bos}
 	// Whitespace-collapse + lowercase mirrors HF's `whitespace_clean`.
 	text = collapseWhitespace(strings.ToLower(strings.TrimSpace(text)))
@@ -108,7 +115,7 @@ func (t *CLIPTokenizer) Encode(text string, maxLen int) []int32 {
 	}
 	out = append(out, t.eos)
 	for len(out) < maxLen {
-		out = append(out, t.eos)
+		out = append(out, pad)
 	}
 	if len(out) > maxLen {
 		out = out[:maxLen]

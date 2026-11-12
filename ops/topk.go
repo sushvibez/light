@@ -27,6 +27,29 @@ func TopK(a *tensor.Tensor, k int, largest bool) (*tensor.Tensor, *tensor.Tensor
 	if err != nil {
 		return nil, nil, err
 	}
+	if device.IsCUDA(a.Device()) && a.DType() == dtype.F32 && k <= cudaTopKMaxFused {
+		// Single-block kernel: the k best entries per row without sorting
+		// the row (a sampler's top-k over a 250k vocabulary).
+		outDims := append([]int{}, a.Shape().Dims()...)
+		outDims[len(outDims)-1] = k
+		vals, err := tensor.Empty(dtype.F32, outDims, a.Device())
+		if err != nil {
+			return nil, nil, err
+		}
+		idx, err := tensor.Empty(dtype.I64, outDims, a.Device())
+		if err != nil {
+			return nil, nil, err
+		}
+		kernelFn, err := registry.Lookup(registry.Key{Op: "topk", Dev: device.KindCUDA, DType: dtype.F32})
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := kernelFn(&registry.Context{Inputs: []*tensor.Tensor{a}, Output: vals,
+			Attrs: map[string]any{"k": k, "largest": largest, "idx": idx}}); err != nil {
+			return nil, nil, err
+		}
+		return vals, idx, nil
+	}
 	if device.IsCUDA(a.Device()) {
 		// Device path: full row sort (bitonic kernel) then narrow to k.
 		vals, idx, err := Sort(a, largest)
@@ -83,3 +106,7 @@ func TopK(a *tensor.Tensor, k int, largest bool) (*tensor.Tensor, *tensor.Tensor
 	}
 	return vals, idx, nil
 }
+
+// cudaTopKMaxFused mirrors kernels/cuda.TopKMaxFused (ops cannot import the
+// kernel package).
+const cudaTopKMaxFused = 64

@@ -15,6 +15,8 @@ import (
 func init() {
 	registry.Register(registry.Key{Op: "rope", Dev: device.KindCUDA, DType: dtype.F32}, ropeF32Launcher)
 	registry.Register(registry.Key{Op: "rope", Dev: device.KindCUDA, DType: dtype.BF16}, ropeBF16Launcher)
+	registry.Register(registry.Key{Op: "rope_partial", Dev: device.KindCUDA, DType: dtype.F32}, ropePartialLauncher("rope_partial_f32"))
+	registry.Register(registry.Key{Op: "rope_partial", Dev: device.KindCUDA, DType: dtype.BF16}, ropePartialLauncher("rope_partial_bf16"))
 	for _, dt := range []dtype.DType{dtype.F32, dtype.F64, dtype.BF16} {
 		sfx := map[dtype.DType]string{dtype.F32: "f32", dtype.F64: "f64", dtype.BF16: "bf16"}[dt]
 		registry.Register(registry.Key{Op: "rope_i", Dev: device.KindCUDA, DType: dt}, ropeILauncher("rope_i_"+sfx, dt))
@@ -203,5 +205,37 @@ func ropeILauncher(name string, dt dtype.DType) registry.Kernel {
 			return err
 		}
 		return nil
+	}
+}
+
+// ropePartialLauncher runs ops.RoPEPartial: rope_partial_{f32,bf16} rotate
+// the first `rot` dims of each head and copy the rest, one launch.
+//
+//	Inputs: x (..., seqLen, headDim), positions (seqLen,) I64
+//	Attrs:  base float64, rot int
+func ropePartialLauncher(kname string) registry.Kernel {
+	return func(ctx *registry.Context) error {
+		x, positions, out := ctx.Inputs[0], ctx.Inputs[1], ctx.Output
+		base := float32(ctx.Attrs["base"].(float64))
+		rot := uint64(ctx.Attrs["rot"].(int))
+		if positions.DType() != dtype.I64 {
+			return fmt.Errorf("cuda %s: positions must be I64", kname)
+		}
+		headDim := uint64(x.Dim(-1))
+		seqLen := uint64(x.Dim(-2))
+		rows := uint64(x.NumElements()) / headDim
+		if err := cudart.SetDevice(out.Device().Ordinal()); err != nil {
+			return err
+		}
+		fn, err := GetKernel(kname)
+		if err != nil {
+			return err
+		}
+		xPtr, posPtr, outPtr := x.Storage().CUDAPtr(), positions.Storage().CUDAPtr(), out.Storage().CUDAPtr()
+		args := []unsafe.Pointer{
+			unsafe.Pointer(&xPtr), unsafe.Pointer(&posPtr), unsafe.Pointer(&outPtr),
+			unsafe.Pointer(&rows), unsafe.Pointer(&seqLen), unsafe.Pointer(&headDim), unsafe.Pointer(&rot), unsafe.Pointer(&base),
+		}
+		return Launch1D(fn, rows*(headDim/2), args)
 	}
 }

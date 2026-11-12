@@ -55,7 +55,14 @@ func (t *Tensor) Dim(i int) int { return t.shape.Dim(i) }
 // IsContiguous reports whether the tensor's memory layout is row-major
 // contiguous with no broadcasting.
 func (t *Tensor) IsContiguous() bool {
-	return shape.IsContiguous(t.shape, t.strides)
+	if shape.IsContiguous(t.shape, t.strides) {
+		return true
+	}
+	// A dense block with permuted size-1 axes (a single decode token's
+	// (B, 1, H, D) → (B, H, 1, D) head transpose) needs no copy either, as
+	// long as it is exactly its storage: kernels take a contiguous tensor's
+	// data as the whole buffer from offset 0.
+	return t.offset == 0 && t.storage.Len() == t.shape.NumElements() && shape.IsDense(t.shape, t.strides)
 }
 
 // Offset returns the element offset into the backing storage.
@@ -108,6 +115,18 @@ func newTensor(s *storage.Storage, sh shape.Shape, st shape.Strides, offset int)
 func Zeros(dt dtype.DType, dims []int, dev device.Device) (*Tensor, error) {
 	sh := shape.New(dims...)
 	s, err := allocStorage(dt, sh.NumElements(), dev)
+	if err != nil {
+		return nil, err
+	}
+	return newTensor(s, sh, shape.DefaultStrides(sh), 0), nil
+}
+
+// Empty allocates a tensor whose contents are unspecified: the output
+// buffer of an op that writes every element. On CUDA this skips the
+// cudaMemset that Zeros issues; on other devices it is Zeros.
+func Empty(dt dtype.DType, dims []int, dev device.Device) (*Tensor, error) {
+	sh := shape.New(dims...)
+	s, err := allocStorageUninit(dt, sh.NumElements(), dev)
 	if err != nil {
 		return nil, err
 	}

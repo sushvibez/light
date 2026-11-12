@@ -319,6 +319,7 @@ type Llama struct {
 	LMHead     *nn.Linear // (V, D); shares storage with TokenEmb when TieEmbed.
 
 	scale      *tensor.Tensor // (1,) F32 = 1/sqrt(HeadDim) on dev
+	scaleVal   float32        // the same value as the forward applies it (BF16-rounded with BF16 weights)
 	scaleDev   device.Device
 	maskTotal  int
 	maskPrior  int
@@ -372,9 +373,13 @@ func (m *Llama) resetRoPETables() {
 // during autoregressive generation. Allocate with NewKVCache(cfg.NumLayers)
 // and pass to Llama.ForwardWithCache. Cache grows by T_new on each call.
 //
-// Layout: K[i] and V[i] both have shape (B, KH, kvLen, HD). Storage is grown
-// via concat each step — simple but O(N²) memcpy across N tokens. Good enough
-// to validate correctness; an in-place ring-buffer is a future optimisation.
+// Layout: K[i] and V[i] both have shape (B, KH, kvLen, HD). Layers that
+// go through appendKV (Llama-family and Qwen3.5 full attention) keep them
+// as narrow views of fixed-capacity buffers kBuf[i] / vBuf[i] of shape (B,
+// KH, cap, HD): each step writes its T new positions in place and the
+// buffer doubles when full, so decode does no concat and no allocation
+// per step. Other models still grow K[i] / V[i] by concat; appendKV
+// notices a K[i] that is not a view of its buffer and re-seeds from it.
 //
 // Len is the absolute number of tokens seen (drives RoPE positions). With
 // sliding-window attention a layer keeps only its last `window` entries, so
@@ -389,6 +394,9 @@ type KVCache struct {
 	Conv []*tensor.Tensor
 	Rec  []*tensor.Tensor
 	Len  int
+	// kBuf / vBuf back K / V with spare capacity along the sequence axis
+	// (see appendKV). Reset keeps them so the next prompt reuses the memory.
+	kBuf, vBuf []*tensor.Tensor
 	// ring marks K / V as fixed-size ring buffers (Moshi's one-frame decode
 	// path) rather than position-ordered concatenations.
 	ring bool
@@ -401,7 +409,103 @@ func NewKVCache(numLayers int) *KVCache {
 		V:    make([]*tensor.Tensor, numLayers),
 		Conv: make([]*tensor.Tensor, numLayers),
 		Rec:  make([]*tensor.Tensor, numLayers),
+		kBuf: make([]*tensor.Tensor, numLayers),
+		vBuf: make([]*tensor.Tensor, numLayers),
 	}
+}
+
+// kvCapacityStep is the sequence-axis granularity of the capacity buffers:
+// a buffer is sized to the next multiple above what the step needs and
+// doubles when it runs out.
+const kvCapacityStep = 256
+
+// appendKV stores k, v (B, KH, T, HD) after the layer's cached positions
+// and returns the full (B, KH, kvLen+T, HD) key and value views, which it
+// also leaves in K[layer] / V[layer]. The write is one pitched copy per
+// tensor into the capacity buffer; the views keep the buffer's strides, so
+// attention folds them with foldBatchHeads and reads them in place.
+func (c *KVCache) appendKV(layer int, k, v *tensor.Tensor) (*tensor.Tensor, *tensor.Tensor, error) {
+	if len(c.kBuf) != len(c.K) { // cache built by hand, not NewKVCache
+		c.kBuf = make([]*tensor.Tensor, len(c.K))
+		c.vBuf = make([]*tensor.Tensor, len(c.K))
+	}
+	B, KH, T, HD := k.Dim(0), k.Dim(1), k.Dim(2), k.Dim(3)
+	prior := 0
+	if c.K[layer] != nil {
+		prior = c.K[layer].Dim(2)
+	}
+	need := prior + T
+	buf, vbuf := c.kBuf[layer], c.vBuf[layer]
+	fits := buf != nil && buf.Dim(0) == B && buf.Dim(1) == KH && buf.Dim(3) == HD && buf.Dim(2) >= need &&
+		buf.DType() == k.DType() && buf.Device().SameAs(k.Device()) &&
+		(c.K[layer] == nil || c.K[layer].Storage() == buf.Storage())
+	if !fits {
+		capacity := (need/kvCapacityStep + 1) * kvCapacityStep
+		if buf != nil && buf.Dim(2)*2 > capacity {
+			capacity = buf.Dim(2) * 2
+		}
+		var err error
+		if buf, err = tensor.Empty(k.DType(), []int{B, KH, capacity, HD}, k.Device()); err != nil {
+			return nil, nil, err
+		}
+		if vbuf, err = tensor.Empty(v.DType(), []int{B, KH, capacity, HD}, v.Device()); err != nil {
+			return nil, nil, err
+		}
+		if prior > 0 { // carry the positions already cached (rare: growth)
+			if err := assignNarrow(buf, 0, prior, c.K[layer]); err != nil {
+				return nil, nil, err
+			}
+			if err := assignNarrow(vbuf, 0, prior, c.V[layer]); err != nil {
+				return nil, nil, err
+			}
+		}
+		c.kBuf[layer], c.vBuf[layer] = buf, vbuf
+	}
+	if err := assignNarrow(buf, prior, T, k); err != nil {
+		return nil, nil, err
+	}
+	if err := assignNarrow(vbuf, prior, T, v); err != nil {
+		return nil, nil, err
+	}
+	kAll, err := buf.Narrow(2, 0, need)
+	if err != nil {
+		return nil, nil, err
+	}
+	vAll, err := vbuf.Narrow(2, 0, need)
+	if err != nil {
+		return nil, nil, err
+	}
+	c.K[layer], c.V[layer] = kAll, vAll
+	return kAll, vAll, nil
+}
+
+// assignNarrow writes src into positions [start, start+n) of buf's
+// sequence axis in place.
+func assignNarrow(buf *tensor.Tensor, start, n int, src *tensor.Tensor) error {
+	dst, err := buf.Narrow(2, start, n)
+	if err != nil {
+		return err
+	}
+	return dst.Assign(src)
+}
+
+// foldBatchHeads views x (B, KH, L, HD) as (B·KH, L, HD). A contiguous x
+// reshapes; a KV-cache view keeps its buffer strides so the batched matmul
+// reads it in place.
+func foldBatchHeads(x *tensor.Tensor) (*tensor.Tensor, error) {
+	B, KH, L, HD := x.Dim(0), x.Dim(1), x.Dim(2), x.Dim(3)
+	if x.IsContiguous() && x.Offset() == 0 {
+		return autograd.Reshape(x, B*KH, L, HD)
+	}
+	st := x.Strides().Slice()
+	if st[0] != KH*st[1] {
+		c, err := x.Contiguous()
+		if err != nil {
+			return nil, err
+		}
+		return autograd.Reshape(c, B*KH, L, HD)
+	}
+	return x.AsStrided([]int{B * KH, L, HD}, []int{st[1], st[2], st[3]}, x.Offset())
 }
 
 // Truncate drops every cached position from n on (speculative decoding
@@ -427,6 +531,15 @@ func (c *KVCache) Truncate(n int) error {
 			return fmt.Errorf("KVCache.Truncate: layer %d holds %d positions of %d (sliding window)", i, k.Dim(2), c.Len)
 		}
 		var err error
+		if i < len(c.kBuf) && c.kBuf[i] != nil && k.Storage() == c.kBuf[i].Storage() {
+			if c.K[i], err = c.kBuf[i].Narrow(2, 0, n); err != nil {
+				return err
+			}
+			if c.V[i], err = c.vBuf[i].Narrow(2, 0, n); err != nil {
+				return err
+			}
+			continue
+		}
 		if c.K[i], err = narrowContig(k, 2, 0, n); err != nil {
 			return err
 		}
@@ -438,8 +551,9 @@ func (c *KVCache) Truncate(n int) error {
 	return nil
 }
 
-// Reset empties the cache (frees stored K/V and linear-attention state).
-// Call between independent prompts to reuse the same cache struct.
+// Reset empties the cache (drops stored K/V and linear-attention state;
+// the capacity buffers stay allocated for the next prompt). Call between
+// independent prompts to reuse the same cache struct.
 func (c *KVCache) Reset() {
 	for i := range c.K {
 		c.K[i] = nil
@@ -543,9 +657,12 @@ func NewLlama(cfg LlamaConfig, dev device.Device) (*Llama, error) {
 			return nil, err
 		}
 	}
+	if cfg.WeightDType == dtype.BF16 {
+		scaleVal = bf16RoundF32(scaleVal)
+	}
 	return &Llama{
 		Cfg: cfg, TokenEmb: tokEmb, Blocks: blocks, FinalNorm: fn, FinalLN: finalLN, LMHead: head,
-		scale: scaleT, scaleDev: dev,
+		scale: scaleT, scaleVal: scaleVal, scaleDev: dev,
 	}, nil
 }
 
@@ -837,7 +954,17 @@ func (m *Llama) runBlock(blk *llamaBlock, x *tensor.Tensor, B, T, prior int, dev
 	window := cfg.slidingWindowFor(layerIdx)
 	totalT := T
 	kvPrior := 0
-	if cache != nil {
+	if cache != nil && window == 0 && m.diffBlock == 0 && !k.RequiresGrad() {
+		// Fixed-capacity cache: the new k / v go in place after the cached
+		// positions and attention reads the buffer through strided views.
+		if cache.K[layerIdx] != nil {
+			kvPrior = cache.K[layerIdx].Dim(2)
+		}
+		if k, v, err = cache.appendKV(layerIdx, k, v); err != nil {
+			return nil, err
+		}
+		totalT = kvPrior + T
+	} else if cache != nil {
 		if cache.K[layerIdx] != nil {
 			kvPrior = cache.K[layerIdx].Dim(2)
 			k, err = ops.Concat([]*tensor.Tensor{cache.K[layerIdx], k}, 2)
@@ -870,27 +997,23 @@ func (m *Llama) runBlock(blk *llamaBlock, x *tensor.Tensor, B, T, prior int, dev
 		}
 	}
 
-	// GQA: expand K, V to NH heads.
+	// GQA without materialising repeated K / V: query heads kh·g .. kh·g+g−1
+	// share KV head kh, so folding the group into the row axis, q (B, NH, T,
+	// HD) → (B·KH, g·T, HD), lets one batched matmul per KV head serve all
+	// its query heads. Scores come out as (B·KH, g·T, S), which is the same
+	// memory as (B·NH, T, S) (row j·T + t of group kh is head kh·g + j), so
+	// the mask, softmax and the value product are unchanged. This removes
+	// 2·g concat copies of the whole cache per layer and step.
 attend:
-	k, err = repeatKV(k, g, B, KH, totalT, HD)
+	q, err = autograd.Reshape(q, B*KH, g*T, HD)
 	if err != nil {
 		return nil, err
 	}
-	v, err = repeatKV(v, g, B, KH, totalT, HD)
+	k, err = foldBatchHeads(k)
 	if err != nil {
 		return nil, err
 	}
-
-	// Collapse the leading B*NH so the batched matmul stays rank-3.
-	q, err = autograd.Reshape(q, B*NH, T, HD)
-	if err != nil {
-		return nil, err
-	}
-	k, err = autograd.Reshape(k, B*NH, totalT, HD)
-	if err != nil {
-		return nil, err
-	}
-	v, err = autograd.Reshape(v, B*NH, totalT, HD)
+	v, err = foldBatchHeads(v)
 	if err != nil {
 		return nil, err
 	}
@@ -899,15 +1022,29 @@ attend:
 	if err != nil {
 		return nil, err
 	}
-	kTC, err := autograd.Contiguous(kT)
+	kTC := kT
+	if dev.Kind() != device.KindCUDA {
+		// The CUDA batched GEMM reads the transposed view in place
+		// (cublas op T); other backends want a contiguous kᵀ.
+		if kTC, err = autograd.Contiguous(kT); err != nil {
+			return nil, err
+		}
+	}
+	scores, err := autograd.MatMul(q, kTC) // (B*KH, g*T, totalT)
 	if err != nil {
 		return nil, err
 	}
-	scores, err := autograd.MatMul(q, kTC) // (B*NH, T, totalT)
+	scores, err = autograd.Reshape(scores, B*NH, T, totalT)
 	if err != nil {
 		return nil, err
 	}
-	scores, err = autograd.Mul(scores, m.scale)
+	if scores.RequiresGrad() {
+		scores, err = autograd.Mul(scores, m.scale)
+	} else {
+		// One launch with the scale as an argument: the broadcast multiply
+		// is a strided kernel plus a metadata upload per layer.
+		scores, err = ops.Affine(scores, float64(m.scaleVal), 0)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -928,7 +1065,11 @@ attend:
 	if err != nil {
 		return nil, err
 	}
-	ctx, err := autograd.MatMul(attn, v) // (B*NH, T, HD)
+	attn, err = autograd.Reshape(attn, B*KH, g*T, totalT)
+	if err != nil {
+		return nil, err
+	}
+	ctx, err := autograd.MatMul(attn, v) // (B*KH, g*T, HD) == (B*NH, T, HD)
 	if err != nil {
 		return nil, err
 	}
@@ -1317,4 +1458,12 @@ func (m *Llama) positionsFor(S, offset int, dev device.Device) (*tensor.Tensor, 
 	m.posOff = offset
 	m.posDev = dev
 	return pos, nil
+}
+
+// bf16RoundF32 rounds v to the nearest BF16 (ties to even) and back, the
+// value a BF16 tensor of v holds.
+func bf16RoundF32(v float32) float32 {
+	bits := math.Float32bits(v)
+	bits += 0x7FFF + (bits>>16)&1
+	return math.Float32frombits(bits &^ 0xFFFF)
 }

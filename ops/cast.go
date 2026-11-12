@@ -13,7 +13,7 @@ func Cast(a *tensor.Tensor, to dtype.DType) (*tensor.Tensor, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err := tensor.Zeros(to, src.Shape().Dims(), src.Device())
+	out, err := tensor.Empty(to, src.Shape().Dims(), src.Device())
 	if err != nil {
 		return nil, err
 	}

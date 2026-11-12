@@ -55,6 +55,7 @@ func castLauncher(ctx *registry.Context) error {
 	from, to := a.DType(), out.DType()
 	if from == to {
 		// Same-dtype cast: just memcpy.
+		cudart.TallyCastCopy()
 		bytes := uintptr(a.NumElements()) * uintptr(from.Size())
 		return cudart.MemcpyDtoD(out.Storage().CUDAPtr(), a.Storage().CUDAPtr(), bytes)
 	}

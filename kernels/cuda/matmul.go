@@ -124,7 +124,6 @@ func matmulPrep(a, b *tensor.Tensor) (*tensor.Tensor, *tensor.Tensor, error) {
 func init() {
 	registry.Register(registry.Key{Op: "matmul", Dev: device.KindCUDA, DType: dtype.F16}, gemmExLauncher(cudart.DataF16))
 	registry.Register(registry.Key{Op: "matmul", Dev: device.KindCUDA, DType: dtype.BF16}, gemmExLauncher(cudart.DataBF16))
-	registry.Register(registry.Key{Op: "matmul_batched", Dev: device.KindCUDA, DType: dtype.F16}, batchedGemmExLauncher(cudart.DataF16))
 	// F16×F16→F16 under the mixed key so nn.Linear / ops.MatMulMixed treat
 	// F16 weights exactly like BF16 ones.
 	registry.Register(registry.Key{Op: "matmul_mixed", Dev: device.KindCUDA, DType: dtype.F16}, gemmExLauncher(cudart.DataF16))
@@ -185,29 +184,6 @@ func gemmEx2D(a, b, out *tensor.Tensor, aType, bType, cType cudart.DataType) err
 func gemmExLauncher(dt cudart.DataType) registry.Kernel {
 	return func(ctx *registry.Context) error {
 		return gemmEx2D(ctx.Inputs[0], ctx.Inputs[1], ctx.Output, dt, dt, dt)
-	}
-}
-
-func batchedGemmExLauncher(dt cudart.DataType) registry.Kernel {
-	return func(ctx *registry.Context) error {
-		a, b, out := ctx.Inputs[0], ctx.Inputs[1], ctx.Output
-		a, b, err := batchedMatmulPrep(a, b)
-		if err != nil {
-			return err
-		}
-		ord := out.Device().Ordinal()
-		if err := cudart.SetDevice(ord); err != nil {
-			return err
-		}
-		h, err := cudart.GetBlasHandle(ord)
-		if err != nil {
-			return err
-		}
-		if err := cudart.GemmStridedBatchedExRowMajor(h, a.Dim(1), b.Dim(2), a.Dim(2),
-			a.Storage().CUDAPtr(), b.Storage().CUDAPtr(), out.Storage().CUDAPtr(), dt, a.Dim(0)); err != nil {
-			return err
-		}
-		return nil
 	}
 }
 

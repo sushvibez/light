@@ -53,7 +53,7 @@ func RoPE(x *tensor.Tensor, positions *tensor.Tensor, base float64) (*tensor.Ten
 	if err != nil {
 		return nil, err
 	}
-	out, err := tensor.Zeros(x.DType(), x.Shape().Dims(), x.Device())
+	out, err := tensor.Empty(x.DType(), x.Shape().Dims(), x.Device())
 	if err != nil {
 		return nil, err
 	}
@@ -65,6 +65,65 @@ func RoPE(x *tensor.Tensor, positions *tensor.Tensor, base float64) (*tensor.Ten
 		Inputs: []*tensor.Tensor{src, posC},
 		Output: out,
 		Attrs:  map[string]any{"base": base},
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// RoPEPartial is RoPE over the first rot dims of each head, the remaining
+// headDim − rot dims passed through (Qwen3.5 / Qwen3-Next's partial rotary,
+// transformers' apply_rotary_pos_emb on x[..., :rot]). rot must be even and
+// ≤ headDim; rot == headDim is RoPE. One launch on CUDA; elsewhere a narrow,
+// RoPE and a concat.
+func RoPEPartial(x, positions *tensor.Tensor, base float64, rot int) (*tensor.Tensor, error) {
+	if x.Rank() < 2 {
+		return nil, fmt.Errorf("RoPEPartial: x rank must be >= 2 (got %d)", x.Rank())
+	}
+	headDim := x.Dim(-1)
+	if rot <= 0 || rot%2 != 0 || rot > headDim {
+		return nil, fmt.Errorf("RoPEPartial: rotary dim %d must be even and within the head dim %d", rot, headDim)
+	}
+	if rot == headDim {
+		return RoPE(x, positions, base)
+	}
+	k, err := registry.Lookup(registry.Key{Op: "rope_partial", Dev: x.Device().Kind(), DType: x.DType()})
+	if err != nil {
+		r, err := x.Narrow(-1, 0, rot)
+		if err != nil {
+			return nil, err
+		}
+		if r, err = r.Contiguous(); err != nil {
+			return nil, err
+		}
+		if r, err = RoPE(r, positions, base); err != nil {
+			return nil, err
+		}
+		pass, err := x.Narrow(-1, rot, headDim-rot)
+		if err != nil {
+			return nil, err
+		}
+		return Concat([]*tensor.Tensor{r, pass}, -1)
+	}
+	if positions.DType() != dtype.I64 || positions.Rank() != 1 || positions.Dim(0) != x.Dim(-2) {
+		return nil, fmt.Errorf("RoPEPartial: positions must be (seqLen,) I64")
+	}
+	src, err := ensureContig(x)
+	if err != nil {
+		return nil, err
+	}
+	posC, err := ensureContig(positions)
+	if err != nil {
+		return nil, err
+	}
+	out, err := tensor.Empty(x.DType(), x.Shape().Dims(), x.Device())
+	if err != nil {
+		return nil, err
+	}
+	if err := k(&registry.Context{
+		Inputs: []*tensor.Tensor{src, posC},
+		Output: out,
+		Attrs:  map[string]any{"base": base, "rot": rot},
 	}); err != nil {
 		return nil, err
 	}
@@ -112,7 +171,7 @@ func RoPEWithInvFreq(x, positions, invFreq *tensor.Tensor) (*tensor.Tensor, erro
 	if err != nil {
 		return nil, err
 	}
-	out, err := tensor.Zeros(x.DType(), x.Shape().Dims(), x.Device())
+	out, err := tensor.Empty(x.DType(), x.Shape().Dims(), x.Device())
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +215,7 @@ func RoPEInterleaved(x, positions *tensor.Tensor, base float64) (*tensor.Tensor,
 	if err != nil {
 		return nil, err
 	}
-	out, err := tensor.Zeros(x.DType(), x.Shape().Dims(), x.Device())
+	out, err := tensor.Empty(x.DType(), x.Shape().Dims(), x.Device())
 	if err != nil {
 		return nil, err
 	}

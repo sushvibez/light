@@ -33,7 +33,7 @@ func IndexSelect(src, indices *tensor.Tensor) (*tensor.Tensor, error) {
 	}
 	// Output shape: replace first dim of src with len(indices).
 	outDims := append([]int{indices.Dim(0)}, src.Shape().Dims()[1:]...)
-	out, err := tensor.Zeros(src.DType(), outDims, src.Device())
+	out, err := tensor.Empty(src.DType(), outDims, src.Device())
 	if err != nil {
 		return nil, err
 	}

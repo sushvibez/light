@@ -11,6 +11,7 @@ import "C"
 import (
 	"fmt"
 	"runtime"
+	"strings"
 	"unsafe"
 )
 
@@ -73,7 +74,11 @@ type Module struct {
 // Function is a specific kernel entry point within a Module.
 type Function struct {
 	handle C.CUfunction
+	name   string
 }
+
+// Name is the kernel's symbol.
+func (f *Function) Name() string { return f.name }
 
 // ModuleLoadData loads PTX text (must be null-terminated; we append \0 here).
 // Uses cuModuleLoadDataEx so we can pass JIT options if/when we need them.
@@ -122,7 +127,7 @@ func (m *Module) GetFunction(name string) (*Function, error) {
 	if rc != C.CUDA_SUCCESS {
 		return nil, driverError(rc, fmt.Sprintf("cuModuleGetFunction(%q)", name))
 	}
-	return &Function{handle: fn}, nil
+	return &Function{handle: fn, name: name}, nil
 }
 
 // LaunchKernel invokes fn with the given grid/block geometry.
@@ -141,6 +146,13 @@ func LaunchKernel(
 	stream uintptr,
 	args []unsafe.Pointer,
 ) error {
+	tally(&counters.Launches)
+	if tracing.Load() {
+		traceEvent("launch " + fn.name)
+		if strings.HasPrefix(fn.name, "copy_strided") || strings.HasPrefix(fn.name, "cast_") || strings.Contains(fn.name, "_strided_") {
+			traceCaller(fn.name + " by")
+		}
+	}
 	runtime.LockOSThread() // ensureContext and the launch on one thread
 	defer runtime.UnlockOSThread()
 	if err := ensureContext(); err != nil {

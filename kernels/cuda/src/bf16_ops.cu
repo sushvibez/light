@@ -409,3 +409,37 @@ extern "C" __global__ void rope_i_bf16(const __nv_bfloat16 *x, const long long *
   out[off] = f_to_bf16(x0 * c - x1 * sn);
   out[off + 1] = f_to_bf16(x0 * sn + x1 * c);
 }
+
+// rope_partial_bf16: RoPE over the first rotDim dims of each head, the rest
+// copied (ops.RoPEPartial). Same pairing and angles as rope_bf16 with rotDim
+// in place of headDim. One thread per pair: pairs below rotDim/2 rotate,
+// the others copy two of the pass-through dims.
+extern "C" __global__ void rope_partial_bf16(
+    const __nv_bfloat16 *x, const long long *positions, __nv_bfloat16 *out,
+    unsigned long rows, unsigned long seqLen, unsigned long headDim, unsigned long rotDim, float base) {
+  unsigned long tid = (unsigned long)blockIdx.x * blockDim.x + threadIdx.x;
+  unsigned long halfDim = headDim / 2;
+  if (tid >= rows * halfDim) return;
+  unsigned long row = tid / halfDim;
+  unsigned long pair = tid % halfDim;
+  unsigned long halfRot = rotDim / 2;
+  unsigned long rowOff = row * headDim;
+  if (pair >= halfRot) {
+    unsigned long i0 = rowOff + rotDim + (pair - halfRot);
+    unsigned long i1 = i0 + (headDim - rotDim) / 2;
+    out[i0] = x[i0];
+    out[i1] = x[i1];
+    return;
+  }
+  unsigned long s = row % seqLen;
+  float pos = (float)positions[s];
+  float i = (float)(pair * 2);
+  float theta = pos * powf(base, -i / (float)rotDim);
+  float c = cosf(theta);
+  float sn = sinf(theta);
+  unsigned long base_off = rowOff + pair;
+  float x0 = bf16_to_f(x[base_off]);
+  float x1 = bf16_to_f(x[base_off + halfRot]);
+  out[base_off] = f_to_bf16(x0 * c - x1 * sn);
+  out[base_off + halfRot] = f_to_bf16(x0 * sn + x1 * c);
+}

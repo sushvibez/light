@@ -94,6 +94,7 @@ status are in the commits (and, up to 2026-11-09, the
 | Model | File | Status | Notes |
 |-------|------|--------|-------|
 | **Stable Diffusion 1.5** | `models/sd*.go` | Done — pretrained | CLIP + UNet + VAE + DDIM; text-to-image and img2img match diffusers within 2e-4 (CPU, LIGHT_HEAVY_TESTS). `light image`; BF16 on RTX 5060 Ti |
+| **SDXL base** | `models/sdxl.go`, `sdxl_load.go` (UNet / CLIP generalised in `sd_unet.go`, `sd_clip.go`) | ✅ Verified 2026-11-09 | CLIP-L + OpenCLIP bigG (penultimate states, projected pooled), 3-level UNet with 1/2/10 transformer depth, text-time add-embedding, SDXL VAE; both encoders match diffusers to 1e-4, UNet step within 1.1 % (BF16 vs fp16); 1024² in 34 s / 30 DDIM steps on the RTX 5060 Ti (10.3 GB). `LoadSDXLFromHF`; `examples/43_sdxl_txt2img`; `scripts/verify/ref_sdxl.py` |
 | **Flux (FLUX.1 schnell / dev)** | `models/flux.go`, `diffusion/flux.go` | ✅ Tiny-verified 2026-11-09 | MMDiT + T5 + CLIP pooled + flow-match Euler + 16-ch VAE; diffusers' FluxPipeline within 3.3e-6, FluxImg2ImgPipeline within 6.4e-6 (CPU, WebGPU). Real 12B weights not run yet |
 | **FLUX.2 [dev]** | `diffusion/flux2.go` (Flux2Pipeline) | ✅ Tiny-verified 2026-11-11 | Mistral-Small-3 encoder with BFL's system message, guidance embedding; tiny pipeline within 7.2e-6 (CPU, WebGPU). Real weights: 64 GB DiT + 48 GB encoder, H100 / G4 |
 | **FLUX.2 klein** | `models/flux2.go`, `diffusion/flux2.go` | ✅ Tiny-verified 2026-11-09 | Qwen3 encoder + FLUX.2 DiT; text-to-image within 7.4e-6, multi-reference editing within 8.9e-6 (CPU, WebGPU) |
@@ -255,6 +256,7 @@ are listed in ROADMAP.md.
 - [x] Dequant Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q8_0 / Q8_1 / Q2_K–Q8_K (CPU + CUDA parity; WebGPU Q4_0 / Q5_0 / Q8_0 / Q4_K / Q6_K)
 - [x] Quantize Q4_0 / Q5_0 / Q8_0 (`quant.Quantize`, ggml reference rounding; round-trip tested) — 2026-10-28
 - [x] Int8 per-column weight quant (`quant.QuantizeInt8PerColumn`) + int8 × F32 matmul
+- [x] **INT8 W8A8 GEMM** (`ops.MatMulW8A8`, 2026-11-09): activations quantised per row to int8 on the device, int8 × int8 → int32 through `cublasGemmEx(CUBLAS_COMPUTE_32I)` (tensor-core IMMA), row × column scale epilogue; Go reference on other devices (bit-exact int32 path); 88–93 TOPS at M ≥ 512 vs 41–44 TFLOPS for BF16 cuBLAS on the RTX 5060 Ti
 - [x] **GGUF quantized inference**: `ops.MatMulQ` (fused dequant-matmul CUDA kernels for Q4_0 / Q5_0 / Q8_0 / Q4_K / Q5_K / Q6_K; dequant+matmul fallback for the rest), `nn.Linear` accepts quantized weights, `models.LoadLlamaGGUF` (Q/K un-permute for llama arch, `rope_freqs` factors). Qwen2-0.5B Q8_0 / Q4_K_M and Llama-3.2-1B Q4_K_M match transformers greedy; logits within quant noise
 - [x] **Quantized CPU kernels** (2026-11-08): GGUF `matmul_q` for Q4_0 / Q5_0 / Q8_0 / Q4_K / Q6_K and GPTQ / AWQ `int4_gemv` keep weights quantized; AVX2 row decoders (`kernels/cpu/qdecode_amd64.s`, bit-identical to the Go decoders, 5–9× faster per row) feed 48-row tiles into `simd.MatTB`; GGUF tied heads stay quantized (`MatMulQFusedOn`)
 - [x] Quantized embedding lookup: `IndexSelect` on every GGUF block format and the narrow fixed-width dtypes (byte-row gather, CPU + CUDA + WebGPU); `nn.Embedding` with a quantized table dequantizes only the gathered rows; `LoadLlamaGGUF` keeps `token_embd` quantized (tied head via `ops.MatMulQFused`) — 2026-10-29
@@ -603,6 +605,10 @@ The user-requested list on all three backends. Laptop: CLI defaults (`w16`), "Wh
 | Phi-4-mini-instruct | 2.2 | 2.8 | 215 / 35 |
 | granite-4.0-micro | 2.1 | 4.0 | 258 / 25 |
 | Ministral-3-3B-Instruct-2512 | 1.5 | 3.7 | 987 (567-token prompt) / 35 |
+
+CUDA decode after the per-token overhead pass (2026-11-09, `desktop/cuda`: uninitialised op outputs, no repeat_kv, in-place kᵀ, device-side argmax / top-k sampling, allocation-pressure GC): Qwen3.5-0.8B 120, Qwen3.5-2B 86, Coder-3B 54, gemma-3-1b 93, gemma-4-E2B 57, Llama-3.2-3B 60, DeepSeek-R1-1.5B 87, Phi-4-mini 47, granite-4.0-micro 41, Ministral-3-3B 49 tok/s; Llama-3.2-1B 144.
+
+GGUF decode on CUDA (2026-11-09, `desktop/cuda`: lane-cooperative M = 1 kernels for Q4_K / Q5_K / Q6_K, dequant + cuBLAS for prompts of ≥ 8 rows, prefill timed after a device sync): Qwen2-0.5B Q4_K_M 145 tok/s (was 49), Q8_0 153 (61), Llama-3.2-1B Q4_K_M 222 (14; its BF16 runs 147); prefill 1.1–1.8k tok/s.
 
 ### Colab L4 / A100
 

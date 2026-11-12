@@ -5,6 +5,7 @@ package storage
 import (
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"light/device"
@@ -30,6 +31,19 @@ func NewCUDAFromPointer(dev device.Device, dt dtype.DType, nelems int, bytes int
 // given CUDA device. The release callback (invoked when refcount reaches
 // zero) re-selects the right device and calls cudaFree.
 func NewCUDA(dev device.Device, dt dtype.DType, nelems int) (*Storage, error) {
+	return newCUDA(dev, dt, nelems, true)
+}
+
+// NewCUDAUninit allocates device memory without zeroing it, for op outputs
+// that every kernel writes completely. On a decode step of a small model the
+// cudaMemset of each fresh output was the single largest group of driver
+// calls (454 of ~1100 per token on Llama-3.2-1B), each a tiny kernel of its
+// own.
+func NewCUDAUninit(dev device.Device, dt dtype.DType, nelems int) (*Storage, error) {
+	return newCUDA(dev, dt, nelems, false)
+}
+
+func newCUDA(dev device.Device, dt dtype.DType, nelems int, zero bool) (*Storage, error) {
 	if dev.Kind() != device.KindCUDA {
 		panic("storage.NewCUDA: device is not CUDA")
 	}
@@ -43,7 +57,7 @@ func NewCUDA(dev device.Device, dt dtype.DType, nelems int) (*Storage, error) {
 		return nil, err
 	}
 	// Zero-initialize to match NewCPU semantics.
-	if bytes > 0 {
+	if zero && bytes > 0 {
 		if err := cudart.Memset(ptr, 0, uintptr(bytes)); err != nil {
 			cudaPool.release(ord, ptr, class)
 			return nil, err
@@ -86,10 +100,15 @@ type cudaCachingPool struct {
 	free   map[poolKey][]uintptr
 	cached int // bytes held in free lists
 	order  []poolKey
+	fresh  atomic.Int64 // bytes of cudaMalloc since the last forced GC
 }
 
 // PoolCapBytes is the most device memory the allocator keeps cached.
 var PoolCapBytes = 2 << 30
+
+// FreshBytesPerGC is how much device memory may be cudaMalloc'd between
+// forced garbage collections (0 disables them); see cudaCachingPool.alloc.
+var FreshBytesPerGC int64 = 1 << 30
 
 // sizeClass rounds a byte count to its class: 512-byte steps below 1 MB,
 // 1 MB steps above, so nearly-equal activations share blocks.
@@ -115,6 +134,16 @@ func (p *cudaCachingPool) alloc(ord, bytes int) (uintptr, int, error) {
 		return ptr, class, nil
 	}
 	p.mu.Unlock()
+	// Fresh device memory. Buffers come back to the pool only through GC
+	// cleanups, and a long prefill allocates gigabytes of short-lived
+	// activations without growing the Go heap enough to trigger one, so
+	// every FreshBytesPerGC of misses forces a collection: it bounds the
+	// peak at roughly the live set plus that budget (a 543-token Ministral
+	// prefill held 5 GB of dead activations otherwise).
+	if FreshBytesPerGC > 0 && p.fresh.Add(int64(class)) >= FreshBytesPerGC {
+		p.fresh.Store(0)
+		runtime.GC()
+	}
 	ptr, err := cudart.Malloc(uintptr(class))
 	// Out of memory: drop the cache and retry; then collect, since the device
 	// blocks of dead tensors are freed only by GC cleanups (which run on

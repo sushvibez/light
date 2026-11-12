@@ -24,3 +24,12 @@ func allocStorage(dt dtype.DType, nelems int, dev device.Device) (*storage.Stora
 		return nil, fmt.Errorf("tensor.allocStorage: unsupported device %v", dev)
 	}
 }
+
+// allocStorageUninit is allocStorage without the zero fill where the backend
+// supports that (CUDA); other backends zero as usual.
+func allocStorageUninit(dt dtype.DType, nelems int, dev device.Device) (*storage.Storage, error) {
+	if dev.Kind() == device.KindCUDA {
+		return allocCUDAStorageUninit(dt, nelems, dev)
+	}
+	return allocStorage(dt, nelems, dev)
+}

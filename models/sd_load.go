@@ -78,11 +78,23 @@ func LoadSD15FromHFWithDType(repo string, wdt dtype.DType, dev device.Device) (*
 }
 
 func loadComponentSafetensors(repo, subdir string, dev device.Device) (map[string]*tensor.Tensor, error) {
+	return loadComponentSafetensorsVariant(repo, subdir, "", dev)
+}
+
+// loadComponentSafetensorsVariant reads a diffusers component checkpoint;
+// variant "fp16" picks `model.fp16.safetensors` /
+// `diffusion_pytorch_model.fp16.safetensors` (SDXL ships both variants, the
+// fp16 one is half the download).
+func loadComponentSafetensorsVariant(repo, subdir, variant string, dev device.Device) (map[string]*tensor.Tensor, error) {
 	// Try the subdir's `model.safetensors` (CLIP) or
 	// `diffusion_pytorch_model.safetensors` (UNet/VAE) — whichever exists.
+	suffix := ".safetensors"
+	if variant != "" {
+		suffix = "." + variant + ".safetensors"
+	}
 	candidates := []string{
-		subdir + "/diffusion_pytorch_model.safetensors",
-		subdir + "/model.safetensors",
+		subdir + "/diffusion_pytorch_model" + suffix,
+		subdir + "/model" + suffix,
 	}
 	var path string
 	for _, c := range candidates {
@@ -114,11 +126,14 @@ func loadCLIPTextSD15(repo string, dev device.Device) (*CLIPText, error) {
 	if err != nil {
 		return nil, err
 	}
-	return te, loadCLIPTextWeights(te, weights)
+	if err := loadCLIPTextWeights(te, weights); err != nil {
+		return nil, err
+	}
+	return te, nil
 }
 
-// loadCLIPTextWeights fills a CLIPText from a transformers CLIPTextModel
-// state dict.
+// loadCLIPTextWeights fills te from an HF CLIPTextModel(WithProjection)
+// checkpoint.
 func loadCLIPTextWeights(te *CLIPText, weights map[string]*tensor.Tensor) error {
 	prefix := "text_model."
 	if err := copyExactCast(te.TokenEmb.Weight, weights, prefix+"embeddings.token_embedding.weight"); err != nil {
@@ -183,6 +198,11 @@ func loadCLIPTextWeights(te *CLIPText, weights map[string]*tensor.Tensor) error 
 	}
 	if err := copyExactCast(te.FinalNorm.Beta, weights, prefix+"final_layer_norm.bias"); err != nil {
 		return err
+	}
+	if te.TextProj != nil {
+		if err := copyExactCast(te.TextProj.W, weights, "text_projection.weight"); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -249,9 +269,10 @@ func loadTransformer2D(t *transformer2DModel, w map[string]*tensor.Tensor, prefi
 	if err := copyExactCast(t.ProjIn.B, w, prefix+"proj_in.bias"); err != nil {
 		return err
 	}
-	bp := prefix + "transformer_blocks.0."
-	if err := loadBasicTransformerBlock(t.Block, w, bp); err != nil {
-		return err
+	for j, blk := range t.Blocks {
+		if err := loadBasicTransformerBlock(blk, w, prefix+"transformer_blocks."+strconv.Itoa(j)+"."); err != nil {
+			return err
+		}
 	}
 	if err := copyExactCast(t.ProjOut.W, w, prefix+"proj_out.weight"); err != nil {
 		return err
@@ -338,6 +359,12 @@ func loadSDUNetSD15(repo string, wdt dtype.DType, dev device.Device) (*SDUNet, e
 	}
 	cfg := SDUNetSD15()
 	cfg.WeightDType = wdt
+	return loadSDUNetWeights(cfg, weights, dev)
+}
+
+// loadSDUNetWeights builds a UNet for cfg and fills it from a diffusers
+// UNet2DConditionModel checkpoint (SD 1.x and SDXL share the key layout).
+func loadSDUNetWeights(cfg SDUNetConfig, weights map[string]*tensor.Tensor, dev device.Device) (*SDUNet, error) {
 	m, err := NewSDUNet(cfg, dev)
 	if err != nil {
 		return nil, err
@@ -361,6 +388,17 @@ func loadSDUNetSD15(repo string, wdt dtype.DType, dev device.Device) (*SDUNet, e
 	}
 	if err := copyExactCast(m.TimeEmbed2.B, weights, "time_embedding.linear_2.bias"); err != nil {
 		return nil, err
+	}
+	if m.AddEmbed1 != nil {
+		for _, kv := range []struct {
+			dst  *tensor.Tensor
+			name string
+		}{{m.AddEmbed1.W, "add_embedding.linear_1.weight"}, {m.AddEmbed1.B, "add_embedding.linear_1.bias"},
+			{m.AddEmbed2.W, "add_embedding.linear_2.weight"}, {m.AddEmbed2.B, "add_embedding.linear_2.bias"}} {
+			if err := copyExactCast(kv.dst, weights, kv.name); err != nil {
+				return nil, err
+			}
+		}
 	}
 	// Down blocks
 	for i, db := range m.DownBlocks {
@@ -467,7 +505,13 @@ func loadSDUNetSD15(repo string, wdt dtype.DType, dev device.Device) (*SDUNet, e
 // loadSDVAESD15 loads the SD 1.5 VAE decoder and, when the checkpoint has
 // one, its encoder (for image-to-image).
 func loadSDVAESD15(repo string, wdt dtype.DType, dev device.Device) (*VAEDecoder, *VAEEncoder, error) {
-	weights, err := loadComponentSafetensors(repo, "vae", dev)
+	return loadSDVAEVariant(repo, "", wdt, dev)
+}
+
+// loadSDVAEVariant is loadSDVAESD15 for a safetensors variant ("fp16" for
+// SDXL's VAE).
+func loadSDVAEVariant(repo, variant string, wdt dtype.DType, dev device.Device) (*VAEDecoder, *VAEEncoder, error) {
+	weights, err := loadComponentSafetensorsVariant(repo, "vae", variant, dev)
 	if err != nil {
 		return nil, nil, err
 	}

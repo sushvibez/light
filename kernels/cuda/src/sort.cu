@@ -94,3 +94,106 @@ SORT_INSTANCE(f32, float, CUDART_INF_F, -CUDART_INF_F)
 SORT_INSTANCE(f64, double, CUDART_INF, -CUDART_INF)
 SORT_INSTANCE(i32, int, INT_MAX, INT_MIN)
 SORT_INSTANCE(i64, long long, LLONG_MAX, LLONG_MIN)
+
+// ------------------- Row-wise argmax and small top-k -------------------
+//
+// argmax_row_f32: one 256-thread block per row, tree reduction; ties go to
+// the lowest index (the CPU kernel's first-max rule). Replaces the one
+// thread-per-row scan, which took ~1 ms on a 250k-entry logits row.
+//
+// topk_row_f32: the k (≤ 64) largest (or smallest) entries of each row with
+// their indices, descending (ascending) and ties by index, in one block per
+// row: every thread keeps a sorted list of the best k entries among the
+// columns it strides over, then k rounds of a block-wide "best head" pick
+// merge the 256 lists. For k = 40 on a 250k row this is ~50 µs where the
+// bitonic full-row sort was 171 launches. Sampling a token needs only this.
+
+#define ARG_THREADS 256
+#define TOPK_MAX 64
+
+__device__ __forceinline__ bool arg_better(float va, long long ia, float vb, long long ib) {
+  // "a beats b": larger value, or equal value and lower index.
+  return va > vb || (va == vb && ia < ib);
+}
+
+extern "C" __global__ void argmax_row_f32(const float *a, long long *out, long long rows,
+                                          long long cols) {
+  __shared__ float sv[ARG_THREADS];
+  __shared__ long long si[ARG_THREADS];
+  long long row = blockIdx.x;
+  if (row >= rows) return;
+  const float *r = a + row * cols;
+  float bv = -CUDART_INF_F;
+  long long bi = LLONG_MAX;
+  for (long long j = threadIdx.x; j < cols; j += ARG_THREADS) {
+    float v = r[j];
+    if (arg_better(v, j, bv, bi)) { bv = v; bi = j; }
+  }
+  sv[threadIdx.x] = bv;
+  si[threadIdx.x] = bi;
+  __syncthreads();
+  for (int s = ARG_THREADS / 2; s > 0; s >>= 1) {
+    if (threadIdx.x < s) {
+      float ov = sv[threadIdx.x + s];
+      long long oi = si[threadIdx.x + s];
+      if (arg_better(ov, oi, sv[threadIdx.x], si[threadIdx.x])) {
+        sv[threadIdx.x] = ov;
+        si[threadIdx.x] = oi;
+      }
+    }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) out[row] = (si[0] == LLONG_MAX) ? 0 : si[0];
+}
+
+extern "C" __global__ void topk_row_f32(const float *a, float *vals, long long *idx, long long rows,
+                                        long long cols, int k, int largest) {
+  __shared__ float sv[ARG_THREADS];
+  __shared__ long long si[ARG_THREADS];
+  __shared__ int st[ARG_THREADS];
+  long long row = blockIdx.x;
+  if (row >= rows || k <= 0) return;
+  const float *r = a + row * cols;
+  float lv[TOPK_MAX];
+  long long li[TOPK_MAX];
+  int n = 0;
+  float sign = largest ? 1.f : -1.f;
+  for (long long j = threadIdx.x; j < cols; j += ARG_THREADS) {
+    float v = sign * r[j];
+    if (n == k && !arg_better(v, j, lv[n - 1], li[n - 1])) continue;
+    int p = (n < k) ? n : n - 1; // slot to fill (drop the tail when full)
+    while (p > 0 && arg_better(v, j, lv[p - 1], li[p - 1])) {
+      lv[p] = lv[p - 1];
+      li[p] = li[p - 1];
+      p--;
+    }
+    lv[p] = v;
+    li[p] = j;
+    if (n < k) n++;
+  }
+  int ptr = 0;
+  for (int round = 0; round < k; round++) {
+    sv[threadIdx.x] = ptr < n ? lv[ptr] : -CUDART_INF_F;
+    si[threadIdx.x] = ptr < n ? li[ptr] : LLONG_MAX;
+    st[threadIdx.x] = threadIdx.x;
+    __syncthreads();
+    for (int s = ARG_THREADS / 2; s > 0; s >>= 1) {
+      if (threadIdx.x < s) {
+        float ov = sv[threadIdx.x + s];
+        long long oi = si[threadIdx.x + s];
+        if (arg_better(ov, oi, sv[threadIdx.x], si[threadIdx.x])) {
+          sv[threadIdx.x] = ov;
+          si[threadIdx.x] = oi;
+          st[threadIdx.x] = st[threadIdx.x + s];
+        }
+      }
+      __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+      vals[row * k + round] = sign * sv[0];
+      idx[row * k + round] = si[0];
+    }
+    if (threadIdx.x == st[0]) ptr++;
+    __syncthreads();
+  }
+}

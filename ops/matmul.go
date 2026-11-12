@@ -41,7 +41,7 @@ func MatMulMixed(a, b *tensor.Tensor) (*tensor.Tensor, error) {
 	default:
 		return nil, fmt.Errorf("matmul_mixed: unsupported dtype combo (a=%v, b=%v)", a.DType(), b.DType())
 	}
-	out, err := tensor.Zeros(outDT, []int{a.Dim(0), b.Dim(1)}, a.Device())
+	out, err := tensor.Empty(outDT, []int{a.Dim(0), b.Dim(1)}, a.Device())
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +73,7 @@ func MatMul(a, b *tensor.Tensor) (*tensor.Tensor, error) {
 		if a.Dim(1) != b.Dim(0) {
 			return nil, fmt.Errorf("matmul: inner dim mismatch (%d vs %d)", a.Dim(1), b.Dim(0))
 		}
-		out, err := tensor.Zeros(a.DType(), []int{a.Dim(0), b.Dim(1)}, a.Device())
+		out, err := tensor.Empty(a.DType(), []int{a.Dim(0), b.Dim(1)}, a.Device())
 		if err != nil {
 			return nil, err
 		}
@@ -89,7 +89,7 @@ func MatMul(a, b *tensor.Tensor) (*tensor.Tensor, error) {
 		if a.Dim(2) != b.Dim(1) {
 			return nil, fmt.Errorf("matmul: inner dim mismatch (%d vs %d)", a.Dim(2), b.Dim(1))
 		}
-		out, err := tensor.Zeros(a.DType(), []int{a.Dim(0), a.Dim(1), b.Dim(2)}, a.Device())
+		out, err := tensor.Empty(a.DType(), []int{a.Dim(0), a.Dim(1), b.Dim(2)}, a.Device())
 		if err != nil {
 			return nil, err
 		}
@@ -127,7 +127,7 @@ func MatMulF8(a, b *tensor.Tensor, aScale, bScale float32, outDT dtype.DType) (*
 	if err != nil {
 		return nil, err
 	}
-	out, err := tensor.Zeros(outDT, []int{a.Dim(0), b.Dim(1)}, a.Device())
+	out, err := tensor.Empty(outDT, []int{a.Dim(0), b.Dim(1)}, a.Device())
 	if err != nil {
 		return nil, err
 	}

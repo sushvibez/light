@@ -375,16 +375,26 @@ func (m *Model) Generate(ctx context.Context, msgs []Message, opts GenOpts, onTo
 	}
 	cache := models.NewKVCache(m.LM.NumLayers())
 	defer cache.Reset()
-	forward := func(tokens []int64) ([]float32, error) { return m.step(tokens, cache) }
+	// forward returns the last position's logits as a (1, V) tensor, on the
+	// device for the text path so sampling can stay there (sampleDevice).
+	forward := func(tokens []int64) (*tensor.Tensor, error) { return m.stepLast(tokens, cache) }
 	prompt := toI64(ids)
 	images := hasImages(msgs)
 	if images {
 		if m.Diffusion {
 			return "", Stats{}, errors.New("engine: diffusion LMs do not take images")
 		}
-		var err error
-		if forward, prompt, err = m.multimodal(msgs, ids, cache); err != nil {
+		mm, p, err := m.multimodal(msgs, ids, cache)
+		if err != nil {
 			return "", Stats{}, err
+		}
+		prompt = p
+		forward = func(tokens []int64) (*tensor.Tensor, error) {
+			row, err := mm(tokens)
+			if err != nil {
+				return nil, err
+			}
+			return tensor.New(row, []int{1, len(row)}, device.CPU())
 		}
 	}
 	maxPos := m.LM.MaxContext()
@@ -409,6 +419,12 @@ func (m *Model) Generate(ctx context.Context, msgs []Message, opts GenOpts, onTo
 	if err != nil {
 		return "", st, fmt.Errorf("prefill: %w", err)
 	}
+	// Launches are asynchronous: wait for the prompt's GPU work so PrefillMS
+	// is the prefill and not its issue time (and the first decode token does
+	// not inherit it).
+	if err := m.sync(); err != nil {
+		return "", st, fmt.Errorf("prefill: %w", err)
+	}
 	st.PrefillMS = float64(time.Since(t0).Microseconds()) / 1000
 	if !device.IsCPU(m.Dev) {
 		runtime.GC() // the prefill's activations and full-sequence logits
@@ -425,7 +441,10 @@ func (m *Model) Generate(ctx context.Context, msgs []Message, opts GenOpts, onTo
 			st.Stop = "cancel"
 			break
 		}
-		next := models.SampleLogits(row, sample)
+		next, err := m.sampleDevice(row, sample)
+		if err != nil {
+			return out.String(), st, fmt.Errorf("sample step %d: %w", step, err)
+		}
 		if m.eos[int64(next)] {
 			st.Stop = "eos"
 			break

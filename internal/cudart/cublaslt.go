@@ -66,6 +66,7 @@ func GetLtHandle(ordinal int) (*LtHandle, error) {
 // Constraints from cuBLASLt: K must be a multiple of 16, N·sizeof(C) a
 // multiple of 16 bytes, all pointers 16-byte aligned.
 func MatmulFP8RowMajor(lt *LtHandle, m, n, k int, a, b, c uintptr, aScale, bScale uintptr, cType DataType) error {
+	tally(&counters.Gemms)
 	if k%16 != 0 {
 		return fmt.Errorf("cublasLt fp8: K=%d must be a multiple of 16", k)
 	}

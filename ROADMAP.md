@@ -15,13 +15,13 @@ GPTQ / AWQ) is complete as of 2026-11-08 except for the items below.
 
 ## 1. Remaining inference roadmap
 
-1. **SDXL base** — same primitives as SD 1.5 (CLIP, UNet2DCondition, VAE,
+1. **SDXL base** (desktop) — same primitives as SD 1.5 (CLIP, UNet2DCondition, VAE,
    DDIM), with dual text encoders and a bigger UNet.
 2. **Flux on real weights / SD3** — the Flux pipeline (`diffusion.LoadFlux`) is
    verified end to end on a tiny checkpoint; FLUX.1-schnell (12B) still needs
    a real run (Colab, or w16 on a 32 GB host) and a CLI entry point. SD3
    (MMDiT with CLIP-L + CLIP-G + T5) reuses most of it.
-3. **INT8 W8A8 GEMM** — `cublasGemmEx(CUBLAS_COMPUTE_32I)` for
+3. **INT8 W8A8 GEMM** (desktop) — `cublasGemmEx(CUBLAS_COMPUTE_32I)` for
    SmoothQuant-style int8 weights × int8 activations; today int8 is
    per-column weights × F32 activations only (`ops.MatMulInt8`).
 
@@ -172,7 +172,7 @@ Light already has. Sizes are BF16 safetensors.
 
 - **CUDA graphs / per-token overhead** (desktop) for small models (launch overhead on
   the decode hot path); multi-stream CUDA.
-- **Faster GGUF decode kernel**: `matmul_q` v1 (warp per column, byte loads)
+- **Faster GGUF decode kernel** (desktop): `matmul_q` v1 (warp per column, byte loads)
   decodes Qwen2-0.5B at ~17 tok/s vs 31 tok/s F32 cuBLAS — vectorised block
   loads, MMVQ-style int8 dot with Q8 activations, and an MMQ tile path for
   prefill.

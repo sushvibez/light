@@ -14,7 +14,7 @@ func Softmax(a *tensor.Tensor, axis int) (*tensor.Tensor, error) {
 	if err != nil {
 		return nil, fmt.Errorf("softmax: %w", err)
 	}
-	out, err := tensor.Zeros(a.DType(), a.Shape().Dims(), a.Device())
+	out, err := tensor.Empty(a.DType(), a.Shape().Dims(), a.Device())
 	if err != nil {
 		return nil, err
 	}

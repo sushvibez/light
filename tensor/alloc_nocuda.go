@@ -11,3 +11,7 @@ import (
 func allocCUDAStorage(dt dtype.DType, nelems int, dev device.Device) (*storage.Storage, error) {
 	return nil, errNoCUDA
 }
+
+func allocCUDAStorageUninit(dt dtype.DType, nelems int, dev device.Device) (*storage.Storage, error) {
+	return nil, errNoCUDA
+}
