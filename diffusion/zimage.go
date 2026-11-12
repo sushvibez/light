@@ -217,15 +217,18 @@ func (p *ZImage) Generate(o ZImageOptions) (*ZImageResult, error) {
 	if o.Height == 0 {
 		o.Height = 1024
 	}
+	pt := newPhaseTimer()
 	if p.TextEncoder == nil {
 		if err := p.loadEncoder(); err != nil {
 			return nil, err
 		}
+		pt.mark("load encoder", nil)
 	}
 	cap, ids, err := p.encode(o.Prompt, o.MaxSeqLen)
 	if err != nil {
 		return nil, err
 	}
+	pt.mark("encode", cap)
 	var neg *tensor.Tensor
 	if o.Guidance > 0 {
 		if neg, _, err = p.encode(o.NegativePrompt, o.MaxSeqLen); err != nil {
@@ -236,10 +239,12 @@ func (p *ZImage) Generate(o ZImageOptions) (*ZImageResult, error) {
 		p.TextEncoder = nil
 		releaseMemory()
 	}
+	pt.mark("free encoder", nil)
 	if p.Transformer == nil {
 		if err := p.loadTransformer(); err != nil {
 			return nil, err
 		}
+		pt.mark("load transformer", nil)
 	}
 	C := p.inC
 	h := 2 * (o.Height / (p.vaeScale * 2))
@@ -311,11 +316,13 @@ func (p *ZImage) Generate(o ZImageOptions) (*ZImageResult, error) {
 		if x, err = ops.Add(x, v); err != nil {
 			return nil, err
 		}
+		pt.mark(fmt.Sprintf("step %d", i), x)
 	}
 	if p.opts.Sequential {
 		p.Transformer = nil
 		releaseMemory()
 	}
+	pt.mark("free transformer", nil)
 	z, err := x.Reshape(1, C, h, w)
 	if err != nil {
 		return nil, err
@@ -335,5 +342,6 @@ func (p *ZImage) Generate(o ZImageOptions) (*ZImageResult, error) {
 	if img, err = toUnitRange(img); err != nil {
 		return nil, err
 	}
+	pt.mark("vae decode", img)
 	return &ZImageResult{Image: img, Caption: cap, IDs: ids, Sigmas: sigmas}, nil
 }

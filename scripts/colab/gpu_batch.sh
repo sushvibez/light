@@ -205,6 +205,16 @@ for g in "${SEL[@]}"; do
 		fi
 		nvidia-smi --query-gpu=name,memory.used,memory.total --format=csv,noheader
 		;;
+	zperf)
+		# Z-Image-Turbo 1024^2 with per-phase timings (LIGHT_TIMINGS): load,
+		# encode, each step, VAE decode, the device synchronised at each mark.
+		[ -x "$WORK/light-bin" ] || go build -o "$WORK/light-bin" ./cmd/light || { SUMMARY+=("$g FAIL build"); continue; }
+		ZI=Tongyi-MAI/Z-Image-Turbo
+		fetch $ZI
+		say "zperf"
+		LIGHT_TIMINGS=1 "$WORK/light-bin" image -device gpu -o "$LOGS/zperf.png" -width 1024 -height 1024 -seed 11 $ZI 			"A cozy reading nook by a large window on a rainy evening, warm lamp light, a ginger cat curled on a knitted blanket, shelves of old books, photorealistic" 2>&1 | tee "$LOGS/zperf.log"
+		SUMMARY+=("zperf $(grep -c '^timing' "$LOGS/zperf.log") phases, $(grep -oE 'generated in [0-9.]+ s' "$LOGS/zperf.log")")
+		;;
 	examples)
 		# Example images for scratch/examples: 1024^2 generations kept in
 		# $LOGS/examples/<model>/ (run with colab run --keep, then colab download).
