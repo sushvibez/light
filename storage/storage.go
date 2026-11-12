@@ -3,6 +3,7 @@ package storage
 import (
 	"runtime"
 	"sync/atomic"
+	"time"
 
 	"light/device"
 	"light/dtype"
@@ -125,4 +126,10 @@ func Track[T any](s *Storage, obj *T) {
 // the cleanup runs.
 func storageReleaseCleanup(s *Storage) {
 	s.Release()
+}
+
+// PoolStats are the CUDA caching allocator's slow paths (CUDAPoolStats).
+type PoolStats struct {
+	ForcedGCs, OOMRetries, Evictions int64
+	GCTime, EvictTime                time.Duration
 }

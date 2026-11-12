@@ -26,8 +26,9 @@ type phaseTimer struct {
 // hostCounts are the host-side events of a phase that can stall the GPU
 // queue: driver calls, allocator slow paths and Go collections.
 type hostCounts struct {
-	cu                    cudart.Counters
-	gcs, forced, oom, evi int64
+	cu   cudart.Counters
+	gcs  int64
+	pool storage.PoolStats
 }
 
 func readHostCounts() hostCounts {
@@ -36,7 +37,7 @@ func readHostCounts() hostCounts {
 	var h hostCounts
 	h.cu = cudart.ReadCounters()
 	h.gcs = int64(s[0].Value.Uint64())
-	h.forced, h.oom, h.evi = storage.CUDAPoolStats()
+	h.pool = storage.CUDAPoolStats()
 	return h
 }
 
@@ -59,9 +60,11 @@ func (pt *phaseTimer) mark(phase string, sync *tensor.Tensor) {
 	now := time.Now()
 	h := readHostCounts()
 	d := h.cu.Sub(pt.host.cu)
-	fmt.Fprintf(os.Stderr, "timing %-18s %7.2f s  (total %.1f s)  launch %d gemm %d malloc %d free %d memset %d dtoh %d htod %d sync %d | gc %d (forced %d) oom-retry %d evict %d\n",
+	p, q := h.pool, pt.host.pool
+	fmt.Fprintf(os.Stderr, "timing %-18s %7.2f s  (total %.1f s)  launch %d gemm %d malloc %d free %d memset %d dtoh %d htod %d dtod %d sync %d | gc %d (forced %d, %.0f ms) oom-retry %d evict %d (%.0f ms)\n",
 		phase, now.Sub(pt.t).Seconds(), now.Sub(pt.total).Seconds(), d.Launches, d.Gemms, d.Mallocs, d.Frees, d.Memsets,
-		d.DtoH, d.HtoD, d.Syncs, h.gcs-pt.host.gcs, h.forced-pt.host.forced, h.oom-pt.host.oom, h.evi-pt.host.evi)
+		d.DtoH, d.HtoD, d.DtoD, d.Syncs, h.gcs-pt.host.gcs, p.ForcedGCs-q.ForcedGCs, (p.GCTime-q.GCTime).Seconds()*1e3,
+		p.OOMRetries-q.OOMRetries, p.Evictions-q.Evictions, (p.EvictTime-q.EvictTime).Seconds()*1e3)
 	pt.t, pt.host = now, h
 }
 

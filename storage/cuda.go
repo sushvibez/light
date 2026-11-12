@@ -183,8 +183,7 @@ func (p *cudaCachingPool) alloc(ord, bytes int) (uintptr, int, error) {
 	if FreshBytesPerGC > 0 && p.handed.Add(int64(class)) >= int64(poolCap()/2) {
 		p.handed.Store(0)
 		p.fresh.Store(0)
-		poolStats.forcedGCs.Add(1)
-		runtime.GC()
+		forcedGC()
 	}
 	p.mu.Lock()
 	if l := p.free[key]; len(l) > 0 {
@@ -204,8 +203,7 @@ func (p *cudaCachingPool) alloc(ord, bytes int) (uintptr, int, error) {
 	if FreshBytesPerGC > 0 && p.fresh.Add(int64(class)) >= FreshBytesPerGC {
 		p.fresh.Store(0)
 		p.handed.Store(0)
-		poolStats.forcedGCs.Add(1)
-		runtime.GC()
+		forcedGC()
 	}
 	ptr, err := cudart.Malloc(uintptr(class))
 	// Out of memory: drop the cache and retry; then collect, since the device
@@ -247,9 +245,13 @@ func (p *cudaCachingPool) release(ord int, ptr uintptr, class int) {
 		p.cached -= k.class
 	}
 	p.mu.Unlock()
-	poolStats.evictions.Add(int64(len(evict)))
-	for _, e := range evict {
-		_ = cudart.Free(e)
+	if len(evict) > 0 {
+		t0 := time.Now()
+		for _, e := range evict {
+			_ = cudart.Free(e)
+		}
+		poolStats.evictions.Add(int64(len(evict)))
+		poolStats.evictNanos.Add(int64(time.Since(t0)))
 	}
 }
 
@@ -271,14 +273,29 @@ func (p *cudaCachingPool) Drain() {
 }
 
 // poolStats counts the caching allocator's slow paths (CUDAPoolStats).
-var poolStats struct{ forcedGCs, oomRetries, evictions atomic.Int64 }
+var poolStats struct {
+	forcedGCs, oomRetries, evictions atomic.Int64
+	gcNanos, evictNanos              atomic.Int64
+}
 
-// CUDAPoolStats reports how often the caching allocator forced a GC after
-// FreshBytesPerGC of misses, retried a failed cudaMalloc (each retry drains
-// the cache; later ones also collect and wait), and evicted a cached block
-// past the cap (a cudaFree each), since the process started.
-func CUDAPoolStats() (forcedGCs, oomRetries, evictions int64) {
-	return poolStats.forcedGCs.Load(), poolStats.oomRetries.Load(), poolStats.evictions.Load()
+// forcedGC is the allocator's collection, timed.
+func forcedGC() {
+	t0 := time.Now()
+	runtime.GC()
+	poolStats.forcedGCs.Add(1)
+	poolStats.gcNanos.Add(int64(time.Since(t0)))
+}
+
+// CUDAPoolStats reports the caching allocator's slow paths since the
+// process started: forced collections, retries of a failed cudaMalloc
+// (each drains the cache; later ones also collect and wait), and blocks
+// evicted past the cap (a cudaFree each), with the wall time the forced
+// collections and the evictions blocked their caller.
+func CUDAPoolStats() PoolStats {
+	return PoolStats{
+		ForcedGCs: poolStats.forcedGCs.Load(), OOMRetries: poolStats.oomRetries.Load(), Evictions: poolStats.evictions.Load(),
+		GCTime: time.Duration(poolStats.gcNanos.Load()), EvictTime: time.Duration(poolStats.evictNanos.Load()),
+	}
 }
 
 // DrainCUDAPool frees the allocator's cached device blocks.
