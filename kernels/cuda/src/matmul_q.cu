@@ -290,6 +290,12 @@ __device__ __forceinline__ void q4k_scale_min_w(int j, const unsigned char *scal
   m = (float)mm;
 }
 
+// Decode mat-vec, one warp per output row. A warp takes four 256-value
+// blocks per iteration: lane g·8+sub handles block b+g, 16 bytes (32
+// nibbles) of its quant data at chunk p = sub/2, offset (sub&1)·16, so a
+// lane has 16-byte loads in flight instead of 4-byte ones. (Hoisting two
+// iterations' loads ahead of the arithmetic measured slower: register
+// pressure; so did unrolling.)
 extern "C" __global__ void matmul_q4_k_f32_mv(const float *__restrict__ x,
                                               const unsigned char *__restrict__ w,
                                               float *__restrict__ out, int N, int K) {
@@ -298,29 +304,39 @@ extern "C" __global__ void matmul_q4_k_f32_mv(const float *__restrict__ x,
   if (n >= N) return;
   int nblocks = K >> 8;
   const unsigned char *row = w + (size_t)n * nblocks * 144;
-  int p = lane >> 3, ll = (lane & 7) << 2;
+  int g = lane >> 3, sub = lane & 7, p = sub >> 1, off = (sub & 1) << 4;
   float acc = 0.f;
-  for (int b = 0; b < nblocks; b++) {
-    const unsigned char *blk = row + b * 144;
-    unsigned int hdr = __ldg((const unsigned int *)blk);
-    float d = half_bits((unsigned short)(hdr & 0xffffu));
-    float dmin = half_bits((unsigned short)(hdr >> 16));
-    const unsigned char *scales = blk + 4;
-    float sc0, m0, sc1, m1;
-    q4k_scale_min_w(2 * p, scales, sc0, m0);
-    q4k_scale_min_w(2 * p + 1, scales, sc1, m1);
-    unsigned int q = __ldg((const unsigned int *)(blk + 16 + p * 32 + ll));
-    const float *xb = x + b * 256 + p * 64 + ll;
-    float4 x0 = *(const float4 *)xb;
-    float4 x1 = *(const float4 *)(xb + 32);
-    float lo = (float)(q & 0xF) * x0.x + (float)((q >> 8) & 0xF) * x0.y +
-               (float)((q >> 16) & 0xF) * x0.z + (float)((q >> 24) & 0xF) * x0.w;
-    float hi = (float)((q >> 4) & 0xF) * x1.x + (float)((q >> 12) & 0xF) * x1.y +
-               (float)((q >> 20) & 0xF) * x1.z + (float)(q >> 28) * x1.w;
-    float sx0 = x0.x + x0.y + x0.z + x0.w, sx1 = x1.x + x1.y + x1.z + x1.w;
-    acc += d * (sc0 * lo + sc1 * hi) - dmin * (m0 * sx0 + m1 * sx1);
+  for (int b0 = 0; b0 < nblocks; b0 += 4) {
+    int b = b0 + g;
+    if (b < nblocks) {
+      const unsigned char *blk = row + b * 144;
+      unsigned int hdr = __ldg((const unsigned int *)blk);
+      float d = half_bits((unsigned short)(hdr & 0xffffu));
+      float dmin = half_bits((unsigned short)(hdr >> 16));
+      const unsigned char *scales = blk + 4;
+      float sc0, m0, sc1, m1;
+      q4k_scale_min_w(2 * p, scales, sc0, m0);
+      q4k_scale_min_w(2 * p + 1, scales, sc1, m1);
+      uint4 q = __ldg((const uint4 *)(blk + 16 + p * 32 + off));
+      const float *xb = x + b * 256 + p * 64 + off;
+      unsigned int qq[4] = {q.x, q.y, q.z, q.w};
+      float lo = 0.f, hi = 0.f, sx0 = 0.f, sx1 = 0.f;
+#pragma unroll
+      for (int i = 0; i < 4; i++) {
+        float4 xl = *(const float4 *)(xb + 4 * i);
+        float4 xh = *(const float4 *)(xb + 32 + 4 * i);
+        unsigned int v = qq[i];
+        lo += (float)(v & 0xF) * xl.x + (float)((v >> 8) & 0xF) * xl.y + (float)((v >> 16) & 0xF) * xl.z +
+              (float)((v >> 24) & 0xF) * xl.w;
+        hi += (float)((v >> 4) & 0xF) * xh.x + (float)((v >> 12) & 0xF) * xh.y + (float)((v >> 20) & 0xF) * xh.z +
+              (float)(v >> 28) * xh.w;
+        sx0 += xl.x + xl.y + xl.z + xl.w;
+        sx1 += xh.x + xh.y + xh.z + xh.w;
+      }
+      acc += d * (sc0 * lo + sc1 * hi) - dmin * (m0 * sx0 + m1 * sx1);
+    }
   }
-  for (int off = 16; off > 0; off >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, off);
+  for (int off2 = 16; off2 > 0; off2 >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, off2);
   if (lane == 0) out[n] = acc;
 }
 
@@ -367,6 +383,10 @@ extern "C" __global__ void matmul_q5_k_f32_mv(const float *__restrict__ x,
   if (lane == 0) out[n] = acc;
 }
 
+// Q6_K decode mat-vec: two 256-value blocks per warp iteration (lane
+// g·16+m handles block b+g); lane m covers four consecutive values j0 =
+// 4·(m&7) of half m/8 with 2-byte loads (a block is 210 bytes, so only
+// 2-byte alignment holds). Was one block per iteration with byte loads.
 extern "C" __global__ void matmul_q6_k_f32_mv(const float *__restrict__ x,
                                               const unsigned char *__restrict__ w,
                                               float *__restrict__ out, int N, int K) {
@@ -375,26 +395,35 @@ extern "C" __global__ void matmul_q6_k_f32_mv(const float *__restrict__ x,
   if (n >= N) return;
   int nblocks = K >> 8;
   const unsigned char *row = w + (size_t)n * nblocks * 210;
-  int is = lane >> 4;
+  int g = lane >> 4, m = lane & 15, half = m >> 3, mm = m & 7, j0 = mm << 2, is = mm >> 2;
   float acc = 0.f;
-  for (int b = 0; b < nblocks; b++) {
-    const unsigned char *blk = row + b * 210;
-    float d = half_le(blk + 208);
-    const signed char *sc = (const signed char *)(blk + 192);
-    const float *xb = x + b * 256;
+  for (int b0 = 0; b0 < nblocks; b0 += 2) {
+    int b = b0 + g;
+    if (b < nblocks) {
+      const unsigned char *blk = row + b * 210;
+      float d = half_le(blk + 208);
+      const signed char *s = (const signed char *)(blk + 192) + half * 8;
+      const unsigned char *ql = blk + half * 64 + j0;
+      const unsigned char *qh = blk + 128 + half * 32 + j0;
+      const float *xh = x + b * 256 + half * 128 + j0;
+      unsigned a = (unsigned)__ldg((const unsigned short *)ql) | ((unsigned)__ldg((const unsigned short *)(ql + 2)) << 16);
+      unsigned c = (unsigned)__ldg((const unsigned short *)(ql + 32)) | ((unsigned)__ldg((const unsigned short *)(ql + 34)) << 16);
+      unsigned h = (unsigned)__ldg((const unsigned short *)qh) | ((unsigned)__ldg((const unsigned short *)(qh + 2)) << 16);
+      float s0 = (float)s[0 + is], s1 = (float)s[2 + is], s2 = (float)s[4 + is], s3 = (float)s[6 + is];
+      float4 x0 = *(const float4 *)xh, x1 = *(const float4 *)(xh + 32), x2 = *(const float4 *)(xh + 64),
+             x3 = *(const float4 *)(xh + 96);
+      float xs0[4] = {x0.x, x0.y, x0.z, x0.w}, xs1[4] = {x1.x, x1.y, x1.z, x1.w}, xs2[4] = {x2.x, x2.y, x2.z, x2.w},
+            xs3[4] = {x3.x, x3.y, x3.z, x3.w};
+      float t0 = 0.f, t1 = 0.f, t2 = 0.f, t3 = 0.f;
 #pragma unroll
-    for (int half = 0; half < 2; half++) {
-      const unsigned char *ql = blk + half * 64;
-      const unsigned char *qh = blk + 128 + half * 32;
-      const signed char *s = sc + half * 8;
-      const float *xh = xb + half * 128;
-      unsigned a = ql[lane], c = ql[lane + 32], h = qh[lane];
-      float q0 = (float)(int)(((a & 0x0F) | (((h >> 0) & 3u) << 4)) - 32);
-      float q1 = (float)(int)(((c & 0x0F) | (((h >> 2) & 3u) << 4)) - 32);
-      float q2 = (float)(int)(((a >> 4) | (((h >> 4) & 3u) << 4)) - 32);
-      float q3 = (float)(int)(((c >> 4) | (((h >> 6) & 3u) << 4)) - 32);
-      acc += d * ((float)s[0 + is] * q0 * xh[lane] + (float)s[2 + is] * q1 * xh[32 + lane] +
-                  (float)s[4 + is] * q2 * xh[64 + lane] + (float)s[6 + is] * q3 * xh[96 + lane]);
+      for (int i = 0; i < 4; i++) {
+        unsigned ai = (a >> (8 * i)) & 0xFF, ci = (c >> (8 * i)) & 0xFF, hi = (h >> (8 * i)) & 0xFF;
+        t0 += (float)(int)(((ai & 0x0F) | ((hi & 3u) << 4)) - 32) * xs0[i];
+        t1 += (float)(int)(((ci & 0x0F) | (((hi >> 2) & 3u) << 4)) - 32) * xs1[i];
+        t2 += (float)(int)(((ai >> 4) | (((hi >> 4) & 3u) << 4)) - 32) * xs2[i];
+        t3 += (float)(int)(((ci >> 4) | (((hi >> 6) & 3u) << 4)) - 32) * xs3[i];
+      }
+      acc += d * (s0 * t0 + s1 * t1 + s2 * t2 + s3 * t3);
     }
   }
   for (int off = 16; off > 0; off >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, off);
