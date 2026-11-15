@@ -3,9 +3,11 @@ package training
 import (
 	"fmt"
 	"math"
+	"unsafe"
 
 	"light/device"
 	"light/dtype"
+	"light/internal/parallel"
 	"light/ops"
 	"light/tensor"
 )
@@ -39,6 +41,8 @@ type AdamW struct {
 	// correction uses it rather than a global step, so a parameter that
 	// skipped steps (no gradient) starts its correction at t = 1.
 	steps []int
+
+	forceGeneric bool // tests: always take the tensor-op path
 }
 
 // AdamWOptions controls hyperparameters. Defaults match PyTorch's
@@ -162,6 +166,12 @@ func (o *AdamW) Step() error {
 		biasCorr1 := 1 - float32(math.Pow(float64(o.beta1), t))
 		biasCorr2 := 1 - float32(math.Pow(float64(o.beta2), t))
 
+		decay := 1 - o.lr*o.wd
+		if !o.forceGeneric && o.stepCPU(i, g, biasCorr1, biasCorr2, decay) {
+			p.SetGradFn(nil, 0)
+			continue
+		}
+
 		dev := p.Device()
 		sc, err := scalarsOnDevice(dev, o.beta1, o.beta2, 1-o.beta1, 1-o.beta2,
 			biasCorr1, biasCorr2, o.eps, o.lr)
@@ -233,7 +243,7 @@ func (o *AdamW) Step() error {
 
 		// Weight decay: p ← p - lr*wd*p  ⇒ p ← p * (1 - lr*wd)
 		if o.wd != 0 {
-			decayT, err := scalarOnDevice(1-o.lr*o.wd, dev)
+			decayT, err := scalarOnDevice(decay, dev)
 			if err != nil {
 				return err
 			}
@@ -263,5 +273,57 @@ func (o *AdamW) Step() error {
 	return nil
 }
 
-// Ensure device import stays meaningful.
-var _ = device.CPU
+// stepCPU is Step's update for parameter i fused into one pass, when p, its
+// gradient and both moments are contiguous F32 CPU tensors of one shape;
+// it reports false (nothing written) otherwise. Each element goes through
+// the same float32 operations, in the same order and with the same
+// rounding, as the tensor-op path (the float32() conversions keep the
+// compiler from fusing a multiply-add), so results are bit-identical; it
+// just skips the eleven parameter-sized intermediates and eight scalar
+// tensors.
+func (o *AdamW) stepCPU(i int, g *tensor.Tensor, bc1, bc2, decay float32) bool {
+	p := o.params[i]
+	ps, ok1 := cpuF32(p)
+	gs, ok2 := cpuF32(g)
+	ms, ok3 := cpuF32(o.m[i])
+	vs, ok4 := cpuF32(o.v[i])
+	if !ok1 || !ok2 || !ok3 || !ok4 || !g.Shape().Equal(p.Shape()) {
+		return false
+	}
+	// In-place writes, as CopyFrom: invalidate saved autograd values.
+	p.Storage().BumpVersion()
+	o.m[i].Storage().BumpVersion()
+	o.v[i].Storage().BumpVersion()
+	b1, b2, omb1, omb2 := o.beta1, o.beta2, 1-o.beta1, 1-o.beta2
+	eps, lr, wd := o.eps, o.lr, o.wd != 0
+	parallel.For(len(ps), parallel.Grain, func(lo, hi int) {
+		for j := lo; j < hi; j++ {
+			gj := gs[j]
+			m := float32(ms[j]*b1) + float32(gj*omb1)
+			v := float32(vs[j]*b2) + float32(float32(gj*gj)*omb2)
+			ms[j], vs[j] = m, v
+			den := float32(math.Sqrt(float64(v/bc2))) + eps
+			step := (m / bc1) / den
+			pj := ps[j]
+			if wd {
+				pj = float32(pj * decay)
+			}
+			ps[j] = pj - float32(step*lr)
+		}
+	})
+	return true
+}
+
+// cpuF32 returns t's elements as a mutable slice when t is a contiguous,
+// zero-offset F32 tensor on the CPU.
+func cpuF32(t *tensor.Tensor) ([]float32, bool) {
+	if !device.IsCPU(t.Device()) || t.DType() != dtype.F32 || !t.IsContiguous() || t.Offset() != 0 {
+		return nil, false
+	}
+	n := t.NumElements()
+	if n == 0 {
+		return nil, true
+	}
+	buf := t.Storage().CPUBytes()
+	return unsafe.Slice((*float32)(unsafe.Pointer(unsafe.SliceData(buf))), n), true
+}
