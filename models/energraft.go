@@ -307,9 +307,13 @@ func (m *Energraft) energy(a *agOps, emb *tensor.Tensor, ctx *energraftContext) 
 	return a.add(orig, res)
 }
 
-// Refine runs the energy updates from the initial candidate state (1, V)
-// against the cached prompt c and returns the state after each update.
+// Refine runs the energy updates (steps ≤ 0: the release's energy_steps)
+// from the initial candidate state (1, V) against the cached prompt c and
+// returns the state after each update.
 func (m *Energraft) Refine(c *KVCache, state *tensor.Tensor, steps int) ([]*tensor.Tensor, error) {
+	if steps <= 0 {
+		steps = m.Cfg.EnergySteps
+	}
 	if steps < 1 {
 		return nil, fmt.Errorf("energraft: at least one energy update")
 	}
