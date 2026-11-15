@@ -21,7 +21,6 @@ import (
 	"light/dtype"
 	"light/hub"
 	"light/models"
-	"light/nn"
 	"light/tensor"
 	"light/tokenizer"
 )
@@ -171,7 +170,7 @@ func Load(spec Spec) (*Model, error) {
 	var lm models.CausalLM
 	switch {
 	case spec.GGUF != "":
-		lm, err = models.LoadChatModelGGUF(spec.GGUF, dev)
+		err = loadWeights(false, 0, func() (err error) { lm, err = models.LoadChatModelGGUF(spec.GGUF, dev); return })
 	default:
 		wdt := dtype.F32
 		if strings.EqualFold(spec.DType, "bf16") && !w16 {
@@ -187,11 +186,7 @@ func Load(spec Spec) (*Model, error) {
 				lm, err = models.LoadChatModelFromHF(spec.Repo, device.CPU(), dtype.F32)
 				return err
 			}
-			if ok {
-				err = nn.WithWeightStorage16(dt16, load)
-			} else {
-				err = load()
-			}
+			err = loadWeights(ok, dt16, load)
 			if err == nil {
 				_, err = models.MoveToDeviceQ8(lm, dev)
 			}
@@ -199,7 +194,7 @@ func Load(spec Spec) (*Model, error) {
 			// The weights are allocated at 16 bits as the loader builds the
 			// model, so no F32 copy of them exists; StoreWeights16 then
 			// narrows any a loader built another way.
-			err = nn.WithWeightStorage16(store16, func() error {
+			err = loadWeights(true, store16, func() error {
 				var err error
 				lm, err = models.LoadChatModelFromHF(spec.Repo, dev, dtype.F32)
 				return err
@@ -208,7 +203,7 @@ func Load(spec Spec) (*Model, error) {
 				_, err = models.StoreWeights16(lm, store16)
 			}
 		} else {
-			lm, err = models.LoadChatModelFromHF(spec.Repo, dev, wdt)
+			err = loadWeights(false, 0, func() (err error) { lm, err = models.LoadChatModelFromHF(spec.Repo, dev, wdt); return })
 		}
 	}
 	if err != nil {

@@ -74,7 +74,7 @@ func LoadTranscriber(spec Spec) (*Transcriber, error) {
 	tr := &Transcriber{Spec: spec, Tok: tok}
 	switch modelType {
 	case "whisper":
-		if tr.Model, err = models.LoadWhisperFromHF(spec.Repo, dev); err != nil {
+		if err = loadWeights(false, 0, func() (err error) { tr.Model, err = models.LoadWhisperFromHF(spec.Repo, dev); return }); err != nil {
 			return nil, err
 		}
 		if tr.Filters, err = models.LoadWhisperMelFilters(spec.Repo); err != nil {
@@ -86,7 +86,7 @@ func LoadTranscriber(spec Spec) (*Transcriber, error) {
 		if strings.EqualFold(spec.DType, "f32") {
 			dt = dtype.F32
 		}
-		if tr.Qwen, err = models.LoadQwen3ASRFromHF(spec.Repo, dev, dt); err != nil {
+		if err = loadWeights(false, 0, func() (err error) { tr.Qwen, err = models.LoadQwen3ASRFromHF(spec.Repo, dev, dt); return }); err != nil {
 			return nil, err
 		}
 		tr.Filters = audio.MelFilterBank(tr.Qwen.Cfg.NumMelBins, audio.WhisperNFFT, audio.WhisperSampleRate, 0, 8000)

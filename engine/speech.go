@@ -83,11 +83,16 @@ func LoadSpeech(spec Spec) (*Speech, error) {
 	if err != nil {
 		return nil, err
 	}
-	mimi, err := models.LoadMimiFromHF(MimiRepo, dev)
-	if err != nil {
-		return nil, fmt.Errorf("engine: Mimi codec: %w", err)
-	}
-	m, err := models.LoadMoshiGGUF(path, dev)
+	var mimi *models.Mimi
+	var m *models.Moshi
+	err = loadWeights(false, 0, func() error {
+		var err error
+		if mimi, err = models.LoadMimiFromHF(MimiRepo, dev); err != nil {
+			return fmt.Errorf("engine: Mimi codec: %w", err)
+		}
+		m, err = models.LoadMoshiGGUF(path, dev)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}

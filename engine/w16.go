@@ -7,6 +7,7 @@ import (
 
 	"light/dtype"
 	"light/hub"
+	"light/nn"
 )
 
 // w16StorageDType picks the 16-bit weight storage for dtype "w16": the
@@ -57,4 +58,17 @@ func checkpointDType(repo string) string {
 		}
 	}
 	return ""
+}
+
+// loadWeights runs a model loader under nn's weight-storage lock: with
+// 16-bit storage at dt when w16, else with the dtypes the loader asks for.
+// Every engine load goes through here, so loads started concurrently on
+// request goroutines (a chat model, its vision tower, Whisper, the
+// embedder, Moshi) are serialized and none sees another's 16-bit option
+// (nn.WithWeightStorage16 is process-global).
+func loadWeights(w16 bool, dt dtype.DType, load func() error) error {
+	if w16 {
+		return nn.WithWeightStorage16(dt, load)
+	}
+	return nn.WithDefaultWeightStorage(load)
 }
