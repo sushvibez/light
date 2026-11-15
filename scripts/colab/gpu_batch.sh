@@ -224,7 +224,8 @@ for g in "${SEL[@]}"; do
 		# TRELLIS stage 1 (image -> sparse structure) on real weights:
 		# TRELLIS's own code writes the reference (~2.3 GB of downloads),
 		# then Light's CUDA build compares.
-		python3 scripts/colab/trellis_ss_check.py /content/trellis_work 2>&1 | tee "$LOGS/$STAMP-trellis-ref.log" | tail -8
+		# torch brings its own cuDNN: not the one LD_LIBRARY_PATH points cgo at.
+		env -u LD_LIBRARY_PATH python3 scripts/colab/trellis_ss_check.py /content/trellis_work 2>&1 | tee "$LOGS/$STAMP-trellis-ref.log" | tail -8
 		LIGHT_TRELLIS_DIR=/content/trellis_work run trellis ./diffusion 'TrellisReal'
 		;;
 	idol)
