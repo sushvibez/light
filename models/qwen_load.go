@@ -161,7 +161,7 @@ func fetchQwenConfig(repo string) (LlamaConfig, error) {
 	// plus multi-token-prediction layers that the forward pass never runs
 	// (their `model.mtp_layers.*` weights are ignored here).
 	qkvBias := hf.AttentionBias
-	if hf.ModelType == "qwen2" || hf.ModelType == "qwen2_5" || hf.ModelType == "mimo" {
+	if hf.ModelType == "qwen2" || hf.ModelType == "qwen2_5" || hf.ModelType == "mimo" || hf.ModelType == "Dream" {
 		qkvBias = true
 	}
 	return LlamaConfig{
