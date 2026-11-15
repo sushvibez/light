@@ -123,8 +123,8 @@ Light already has. Sizes are BF16 safetensors.
    ~2 TB not runnable here). Then expert streaming (DeepSeek's on-demand
    experts + LRU budget generalised, with next-layer router prefetch: Edge0's
    approach) for every MoE, and Edge0-35B-A3B itself (MLX 4-bit + LoRA).
-3. **Energraft-EBT-Qwen3-1.7B** (energy-based LM: gradient refinement of
-   the next-token candidate through the backbone; uses Light's autograd).
+3. **Energraft-EBT-Qwen3-1.7B**: done (real weights match the release's
+   code on Colab; `light energraft`).
 4. **LLaDA 8B Instruct**, **Dream 7B** (masked-diffusion LMs).
 5. **TRELLIS (image-large, v1)**: image → 3D; sparse 3D convolutions.
 6. **FLUX.2-klein-4B**: done (real weights on CPU and the L4).
