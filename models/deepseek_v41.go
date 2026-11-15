@@ -78,7 +78,7 @@ type DeepseekV41Config struct {
 // routed experts plus a shared expert (SwiGLU clamped at swiglu_limit); and
 // engram n-gram hash lookups gated into the residual streams.
 //
-// Prefill only (no KV cache). Light computes in F32 from the dequantized
+// ForwardWithCache decodes incrementally (DeepseekV41Cache). Light computes in F32 from the dequantized
 // FP8 / FP4 weights; the released kernels' activation fake-quantization
 // (FP8 activations into the GEMMs, FP8 / FP4 KV) is not reproduced. Not
 // ported: the vision encoder and the DSpark speculative heads (mtp.*).
@@ -225,10 +225,13 @@ func (m *DeepseekV41) rope(o *iop, x *tensor.Tensor, pos []int, freqs []float32,
 
 func (m *DeepseekV41) rms(o *iop, x, w *tensor.Tensor) *tensor.Tensor { return m.hc.rms(o, x, w) }
 
-func v41Positions(n, stride int) []int {
+func v41Positions(n, stride int) []int { return v41Span(0, n, stride) }
+
+// v41Span is the positions (start+i)·stride for i < n.
+func v41Span(start, n, stride int) []int {
 	p := make([]int, n)
 	for i := range p {
-		p[i] = i * stride
+		p[i] = (start + i) * stride
 	}
 	return p
 }
@@ -256,42 +259,84 @@ func (o *iop) toHost(t *tensor.Tensor) []float32 {
 	return tensor.MustSlice[float32](c)
 }
 
-// compress pools ratio consecutive tokens of x (B, S, D) into one latent
-// (B, S/ratio, head_dim) with a softmax gate (a plain projection at ratio
-// 1), RMS-normed, before RoPE. Nil when no group is complete.
-func (m *DeepseekV41) compress(o *iop, ly *v41Layer, x *tensor.Tensor) *tensor.Tensor {
+// compress pools ratio consecutive tokens into one latent (B, C, head_dim)
+// with a softmax gate (a plain projection at ratio 1), RMS-normed, before
+// RoPE: the groups x (B, S, D) - after P earlier tokens, whose incomplete
+// group's projections kc holds - completes, and the index of the first.
+// Nil when none completes.
+func (m *DeepseekV41) compress(o *iop, ly *v41Layer, x *tensor.Tensor, kc *v41LayerCache, P int) (*tensor.Tensor, int) {
 	B, S, hd, r := x.Dim(0), x.Dim(1), m.Cfg.HeadDim, ly.Ratio
-	C := S / r
-	if C == 0 || o.err != nil {
-		return nil
+	if o.err != nil {
+		return nil, 0
 	}
 	if r == 1 {
-		return m.rms(o, o.lin(ly.CWkv, x), ly.CNormW)
+		return m.rms(o, o.lin(ly.CWkv, x), ly.CNormW), P
+	}
+	kv, g := o.lin(ly.CWkv, x), o.lin(ly.CWgate, x)
+	if kc != nil && kc.pendKV != nil {
+		kv, g = o.cat(1, kc.pendKV, kv), o.cat(1, kc.pendGate, g)
+	}
+	if o.err != nil {
+		return nil, 0
+	}
+	n := kv.Dim(1)
+	C0, C := (P+S-n)/r, n/r
+	if kc != nil {
+		kc.pendKV, kc.pendGate = nil, nil
+		if rest := n - C*r; rest > 0 {
+			kc.pendKV, kc.pendGate = o.narrow(kv, 1, C*r, rest), o.narrow(g, 1, C*r, rest)
+		}
+	}
+	if C == 0 {
+		return nil, C0
 	}
 	group := func(t *tensor.Tensor) *tensor.Tensor {
 		g := o.reshape(o.narrow(t, 1, 0, C*r), B, C, r, hd)
 		return o.reshape(o.perm(g, 0, 1, 3, 2), B, C, hd, r)
 	}
-	kv, sc := group(o.lin(ly.CWkv, x)), group(o.lin(ly.CWgate, x))
+	kv, sc := group(kv), group(g)
 	p := o.do(func() (*tensor.Tensor, error) { return ops.Softmax(sc, 3) })
 	pooled := o.sum(o.mul(kv, p), 3)
-	return m.rms(o, o.reshape(pooled, B, C, hd), ly.CNormW)
+	return m.rms(o, o.reshape(pooled, B, C, hd), ly.CNormW), C0
+}
+
+// v41Append is old ++ new along the sequence (either may be nil).
+func v41Append(o *iop, old, new *tensor.Tensor) *tensor.Tensor {
+	switch {
+	case old == nil:
+		return new
+	case new == nil:
+		return old
+	}
+	return o.cat(1, old, new)
 }
 
 // indexer scores the compressed positions for every query and keeps the
 // best index_topk visible ones (two-level after the candidate source).
-// latent is this layer's own (pre-RoPE) latent when it is a kv source.
-func (m *DeepseekV41) indexer(o *iop, ly *v41Layer, x, qr, latent *tensor.Tensor, st *v41Shared) [][]int {
+// latent is this layer's own (pre-RoPE) newly complete latents from
+// compressed position C0 on when it is a kv source; x holds the tokens
+// after P earlier ones.
+func (m *DeepseekV41) indexer(o *iop, ly *v41Layer, x, qr, latent *tensor.Tensor, C0 int, st *v41Shared, kc *v41LayerCache, P int) [][]int {
 	if o.err != nil {
 		return nil
 	}
 	cfg := m.Cfg
 	B, S, r := x.Dim(0), x.Dim(1), ly.Ratio
-	nh, dh, C := cfg.IndexNHeads, cfg.IndexHeadDim, S/ly.Ratio
+	nh, dh, C := cfg.IndexNHeads, cfg.IndexHeadDim, (P+S)/ly.Ratio
 	freqs := m.ropeFreqs(true)
 	if ly.IWk != nil { // owns the index keys
-		ik := m.rms(o, o.lin(ly.IWk, latent), ly.IKNormW)
-		st.indexK = m.rope(o, ik, v41Positions(C, r), freqs, false)
+		var ik *tensor.Tensor
+		if latent != nil {
+			ik = m.rms(o, o.lin(ly.IWk, latent), ly.IKNormW)
+			ik = m.rope(o, ik, v41Span(C0, latent.Dim(1), r), freqs, false)
+		}
+		if kc != nil {
+			ik = v41Append(o, kc.indexK, ik)
+			kc.indexK = ik
+		}
+		if ik != nil {
+			st.indexK = ik
+		}
 	}
 	if o.err != nil {
 		return nil
@@ -300,7 +345,7 @@ func (m *DeepseekV41) indexer(o *iop, ly *v41Layer, x, qr, latent *tensor.Tensor
 		o.err = fmt.Errorf("deepseek_v41 layer %d: no index keys for %d compressed positions", ly.ID, C)
 		return nil
 	}
-	q := m.rope(o, o.reshape(o.lin(ly.IWqB, qr), B, S, nh, dh), v41Positions(S, 1), freqs, false)
+	q := m.rope(o, o.reshape(o.lin(ly.IWqB, qr), B, S, nh, dh), v41Span(P, S, 1), freqs, false)
 	w := o.affine(o.lin(ly.IWeights, x), 1/math.Sqrt(float64(dh))/math.Sqrt(float64(nh)), 0)
 	kT := o.do(func() (*tensor.Tensor, error) {
 		t, err := st.indexK.Transpose(1, 2)
@@ -329,7 +374,7 @@ func (m *DeepseekV41) indexer(o *iop, ly *v41Layer, x, qr, latent *tensor.Tensor
 	order := make([]int, C)
 	for q := range B * S {
 		row := v[q*C : (q+1)*C]
-		clen := (q%S + 1) / r
+		clen := (P + q%S + 1) / r
 		for t := clen; t < C; t++ {
 			row[t] = ninf
 		}
@@ -389,8 +434,8 @@ func (m *DeepseekV41) candidates(row []float32, clen int, keep []bool) {
 }
 
 // attention is one layer's attention on x (B, S, D), the normed sublayer
-// input.
-func (m *DeepseekV41) attention(o *iop, ly *v41Layer, x *tensor.Tensor, st *v41Shared) *tensor.Tensor {
+// input, for the tokens after P earlier ones (kc: their state, or nil).
+func (m *DeepseekV41) attention(o *iop, ly *v41Layer, x *tensor.Tensor, st *v41Shared, kc *v41LayerCache, P int) *tensor.Tensor {
 	if o.err != nil {
 		return nil
 	}
@@ -398,25 +443,51 @@ func (m *DeepseekV41) attention(o *iop, ly *v41Layer, x *tensor.Tensor, st *v41S
 	B, S := x.Dim(0), x.Dim(1)
 	H, hd := cfg.NumHeads, cfg.HeadDim
 	freqs := m.ropeFreqs(ly.Ratio > 0)
-	pos := v41Positions(S, 1)
+	pos := v41Span(P, S, 1)
 	qr := m.rms(o, o.lin(ly.WqA, x), ly.QNormW)
 	q := m.rope(o, o.reshape(o.lin(ly.WqB, qr), B, S, H, hd), pos, freqs, false)
 	keys := m.rope(o, m.rms(o, o.lin(ly.Wkv, x), ly.KVNormW), pos, freqs, false)
+	K0 := P // the position of keys' first row
+	if kc != nil {
+		if kc.keys != nil {
+			keys, K0 = o.cat(1, kc.keys, keys), kc.start
+		}
+		// Later queries see only the last sliding_window - 1 of these.
+		kc.keys = nil
+		if keep := min(P+S-K0, cfg.SlidingWindow-1); keep > 0 && o.err == nil {
+			kc.keys, kc.start = o.narrow(keys, 1, P+S-K0-keep, keep), P+S-keep
+		}
+	}
+	if o.err != nil {
+		return nil
+	}
+	W := keys.Dim(1)
 	C := 0
 	if r := ly.Ratio; r > 0 {
-		C = S / r
+		C = (P + S) / r
 		var latent *tensor.Tensor
+		C0 := 0
 		if ly.KVSource {
-			latent = m.compress(o, ly, x)
+			latent, C0 = m.compress(o, ly, x, kc, P)
 		}
 		if ly.IndexSource {
 			st.idxs, st.idxRatio = make([][]int, B*S), r
 			if C > 0 {
-				st.idxs = m.indexer(o, ly, x, qr, latent, st)
+				st.idxs = m.indexer(o, ly, x, qr, latent, C0, st, kc, P)
 			}
 		}
-		if ly.KVSource && latent != nil {
-			st.compKV = m.rope(o, latent, v41Positions(C, r), freqs, false)
+		if ly.KVSource {
+			var ckv *tensor.Tensor
+			if latent != nil {
+				ckv = m.rope(o, latent, v41Span(C0, latent.Dim(1), r), freqs, false)
+			}
+			if kc != nil {
+				ckv = v41Append(o, kc.compKV, ckv)
+				kc.compKV = ckv
+			}
+			if ckv != nil {
+				st.compKV = ckv
+			}
 		}
 		if o.err != nil {
 			return nil
@@ -433,7 +504,7 @@ func (m *DeepseekV41) attention(o *iop, ly *v41Layer, x *tensor.Tensor, st *v41S
 			keys = o.cat(1, keys, st.compKV)
 		}
 	}
-	T := S + C
+	T := W + C
 	ninf := float32(math.Inf(-1))
 	mv := make([]float32, B*S*T)
 	for i := range mv {
@@ -442,12 +513,12 @@ func (m *DeepseekV41) attention(o *iop, ly *v41Layer, x *tensor.Tensor, st *v41S
 	for b := range B {
 		for s := range S {
 			row := mv[(b*S+s)*T : (b*S+s+1)*T]
-			for j := max(0, s-cfg.SlidingWindow+1); j <= s; j++ {
-				row[j] = 0
+			for p := max(K0, P+s-cfg.SlidingWindow+1); p <= P+s; p++ {
+				row[p-K0] = 0
 			}
 			if C > 0 {
 				for _, t := range st.idxs[b*S+s] {
-					row[S+t] = 0
+					row[W+t] = 0
 				}
 			}
 		}
@@ -641,8 +712,39 @@ func (m *DeepseekV41) hcPre(o *iop, streams, pre *tensor.Tensor) *tensor.Tensor 
 	return o.sum(o.mul(streams, pre), 2)
 }
 
+// DeepseekV41Cache is the decode state: per layer the last
+// sliding_window - 1 keys, a kv source's compressed KV, index keys and the
+// projections of its incomplete group, plus the token history (engram
+// n-grams).
+type DeepseekV41Cache struct {
+	pos    int
+	tokens [][]int64 // per batch row
+	layers []v41LayerCache
+}
+
+type v41LayerCache struct {
+	keys             *tensor.Tensor // (B, n, hd) at positions start..
+	start            int
+	pendKV, pendGate *tensor.Tensor
+	compKV, indexK   *tensor.Tensor
+}
+
+// NewCache returns an empty decode cache.
+func (m *DeepseekV41) NewCache() *DeepseekV41Cache {
+	return &DeepseekV41Cache{layers: make([]v41LayerCache, len(m.Layers))}
+}
+
+// Pos is the number of tokens the cache has seen.
+func (c *DeepseekV41Cache) Pos() int { return c.pos }
+
 // Forward returns the logits (B, S, V) of every position for tokens (B, S).
 func (m *DeepseekV41) Forward(tokens *tensor.Tensor) (*tensor.Tensor, error) {
+	return m.ForwardWithCache(tokens, nil)
+}
+
+// ForwardWithCache returns the logits (B, S, V) of tokens (B, S) following
+// the cache's (nil: none), and extends the cache with them.
+func (m *DeepseekV41) ForwardWithCache(tokens *tensor.Tensor, cache *DeepseekV41Cache) (*tensor.Tensor, error) {
 	o := &iop{}
 	cfg := m.Cfg
 	if tokens.Rank() != 2 {
@@ -650,8 +752,15 @@ func (m *DeepseekV41) Forward(tokens *tensor.Tensor) (*tensor.Tensor, error) {
 	}
 	B, S := tokens.Dim(0), tokens.Dim(1)
 	D, N := cfg.HiddenSize, cfg.HCMult
+	P := 0
+	if cache != nil {
+		P = cache.pos
+		if P > 0 && len(cache.tokens) != B {
+			return nil, fmt.Errorf("deepseek_v41: batch %d, the cache holds %d", B, len(cache.tokens))
+		}
+	}
 	var hashes [][]int64
-	if m.engram != nil {
+	if m.engram != nil || cache != nil {
 		t64, err := ops.Cast(tokens, dtype.I64)
 		if err == nil {
 			t64, err = t64.To(device.CPU())
@@ -662,8 +771,35 @@ func (m *DeepseekV41) Forward(tokens *tensor.Tensor) (*tensor.Tensor, error) {
 		if err != nil {
 			return nil, err
 		}
-		if hashes, err = m.engram.hashIDs(tensor.MustSlice[int64](t64), B, S); err != nil {
-			return nil, err
+		ids := tensor.MustSlice[int64](t64)
+		T := S
+		if cache != nil { // the n-grams reach back into the history
+			if P == 0 {
+				cache.tokens = make([][]int64, B)
+			}
+			for b := range B {
+				cache.tokens[b] = append(cache.tokens[b], ids[b*S:(b+1)*S]...)
+			}
+			T = P + S
+			ids = make([]int64, 0, B*T)
+			for b := range B {
+				ids = append(ids, cache.tokens[b]...)
+			}
+		}
+		if m.engram != nil {
+			if hashes, err = m.engram.hashIDs(ids, B, T); err != nil {
+				return nil, err
+			}
+			if T > S { // keep the new positions' rows
+				for li, h := range hashes {
+					cols := len(h) / (B * T)
+					nh := make([]int64, 0, B*S*cols)
+					for b := range B {
+						nh = append(nh, h[(b*T+P)*cols:(b+1)*T*cols]...)
+					}
+					hashes[li] = nh
+				}
+			}
 		}
 	}
 	flatTok := o.do(func() (*tensor.Tensor, error) { return tokens.Reshape(B * S) })
@@ -681,7 +817,7 @@ func (m *DeepseekV41) Forward(tokens *tensor.Tensor) (*tensor.Tensor, error) {
 		return tensor.New(v, []int{B, S, N, 1}, m.dev)
 	})
 	st := &v41Shared{}
-	for _, ly := range m.Layers {
+	for li, ly := range m.Layers {
 		if ly.EngramIdx >= 0 {
 			streams = m.engramApply(o, ly, streams, hashes[ly.EngramIdx])
 		}
@@ -690,7 +826,11 @@ func (m *DeepseekV41) Forward(tokens *tensor.Tensor) (*tensor.Tensor, error) {
 		// input this attention's.
 		attnPre, post, combT := m.hc.hcWeights(o, &ly.AttnHC, streams)
 		x := m.rms(o, m.hcPre(o, streams, preMix), ly.AttnNormW)
-		x = m.attention(o, ly, x, st)
+		var kc *v41LayerCache
+		if cache != nil {
+			kc = &cache.layers[li]
+		}
+		x = m.attention(o, ly, x, st, kc, P)
 		streams = m.hc.hcCombine(o, x, streams, post, combT)
 		ffnPre, post, combT := m.hc.hcWeights(o, &ly.FFNHC, streams)
 		x = m.rms(o, m.hcPre(o, streams, attnPre), ly.FFNNormW)
@@ -702,5 +842,8 @@ func (m *DeepseekV41) Forward(tokens *tensor.Tensor) (*tensor.Tensor, error) {
 		}
 	}
 	logits := o.lin(m.Head, m.rms(o, m.hcPre(o, streams, preMix), m.NormW))
+	if o.err == nil && cache != nil {
+		cache.pos += S
+	}
 	return logits, o.err
 }

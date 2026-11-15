@@ -97,3 +97,79 @@ func TestDeepseekV41NumpyIntegers(t *testing.T) {
 		}
 	}
 }
+
+// Prefill, then single tokens and a short chunk through DeepseekV41Cache
+// reproduce the full prompt's logits: the sliding window rolls past its 4
+// keys, ratio-2 groups complete across steps, the indexers and candidate
+// blocks see the cached compressed positions and the engram n-grams reach
+// back into the history.
+func TestDeepseekV41CacheMatchesFullForward(t *testing.T) {
+	raw, err := os.ReadFile("testdata/deepseek-v41-tiny.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ref struct{ IDs [][]int64 }
+	if err := json.Unmarshal(raw, &ref); err != nil {
+		t.Fatal(err)
+	}
+	B, S := len(ref.IDs), len(ref.IDs[0])
+	devs := []device.Device{device.CPU()}
+	if g, err := device.WebGPU(0); err == nil {
+		devs = append(devs, g)
+	}
+	for _, dev := range devs {
+		t.Run(fmt.Sprint(dev), func(t *testing.T) {
+			m, err := LoadDeepseekV41("testdata/deepseek-v41-tiny", dev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			span := func(a, n int) *tensor.Tensor {
+				var ids []int64
+				for _, r := range ref.IDs {
+					ids = append(ids, r[a:a+n]...)
+				}
+				x, err := tensor.New(ids, []int{B, n}, dev)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return x
+			}
+			full, err := m.Forward(span(0, S))
+			if err != nil {
+				t.Fatal(err)
+			}
+			fc, _ := full.To(device.CPU())
+			want := tensor.MustSlice[float32](fc)
+			V := len(want) / (B * S)
+			c := m.NewCache()
+			md := 0.0
+			for _, step := range [][2]int{{0, 7}, {7, 1}, {8, 1}, {9, 3}, {12, 1}, {13, 1}, {14, 1}, {15, 5}} {
+				out, err := m.ForwardWithCache(span(step[0], step[1]), c)
+				if err != nil {
+					t.Fatal(err)
+				}
+				oc, _ := out.To(device.CPU())
+				got := tensor.MustSlice[float32](oc)
+				for b := range B {
+					for s := range step[1] {
+						for v := range V {
+							g := got[(b*step[1]+s)*V+v]
+							w := want[(b*S+step[0]+s)*V+v]
+							md = math.Max(md, math.Abs(float64(g-w)))
+							if g != g {
+								md = math.Inf(1)
+							}
+						}
+					}
+				}
+			}
+			if c.Pos() != S {
+				t.Fatalf("cache at %d, want %d", c.Pos(), S)
+			}
+			t.Logf("cached decode vs full forward: max diff %.3g", md)
+			if !(md <= 1e-4) {
+				t.Errorf("cached logits differ by %.3g", md)
+			}
+		})
+	}
+}
