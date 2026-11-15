@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"image/color"
 	"image/png"
 	"os"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"light/diffusion"
 	"light/engine"
+	"light/splat"
 )
 
 // cmdIdol turns one image of an object into 3D Gaussians (speridlabs/idol).
@@ -27,6 +29,7 @@ func cmdIdol(args []string) error {
 	shift := fs.Float64("shift", 3, "time shift: higher spends more steps at high noise")
 	n := fs.Int("num-gaussians", 262144, "32768 to 1048576, a multiple of 32")
 	f32 := fs.Bool("f32", false, "keep F32 weights (default: 16-bit weight storage, F32 compute)")
+	views := fs.Int("views", 4, "also render this many turntable views from the predicted camera into <name>_views.png (0: none)")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: light idol [flags] <image>\n\nOne image of an object to a 3D Gaussian splat (.ply). The image needs a transparent background (background removal is not ported yet).\n\nflags:")
 		fs.PrintDefaults()
@@ -84,6 +87,25 @@ func cmdIdol(args []string) error {
 		return err
 	}
 	c := res.Camera
+	if *views > 0 {
+		g := res.Gaussians
+		sg := &splat.Gaussians{XYZ: g.XYZ, FeaturesDC: g.FeaturesDC, Scaling: g.Scaling, Rotation: g.Rotation, Opacity: g.Opacity}
+		im := splat.Turntable(sg, splat.Camera{Yaw: c.Yaw, Pitch: c.Pitch, Radius: c.Radius, FOV: c.FOV}, *views, 384, 384,
+			color.NRGBA{255, 255, 255, 255})
+		vp := strings.TrimSuffix(*out, ".ply") + "_views.png"
+		vf, err := os.Create(vp)
+		if err != nil {
+			return err
+		}
+		if err := png.Encode(vf, im); err != nil {
+			vf.Close()
+			return err
+		}
+		if err := vf.Close(); err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "wrote %s\n", vp)
+	}
 	fmt.Fprintf(os.Stderr, "wrote %s and %s\ncamera: yaw %.3f rad, pitch %.3f rad, radius %.3f, fov %.1f deg\n", *out, prev, c.Yaw, c.Pitch, c.Radius, c.FOV)
 	return nil
 }
