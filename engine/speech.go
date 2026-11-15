@@ -117,7 +117,10 @@ func (s *Speech) Converse(samples []float32, rate int, opts ConverseOpts) (*Conv
 		opts.AudioTopK = 250
 	}
 	sr := s.Mimi.Cfg.SampleRate
-	pcm := audio.Resample(samples, rate, sr)
+	pcm, err := audio.Resample(samples, rate, sr)
+	if err != nil {
+		return nil, err
+	}
 	if len(pcm) == 0 {
 		return nil, errors.New("engine: empty audio")
 	}

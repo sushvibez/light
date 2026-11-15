@@ -45,7 +45,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	s16 := audio.Resample(samples, rate, audio.WhisperSampleRate)
+	s16, err := audio.Resample(samples, rate, audio.WhisperSampleRate)
+	if err != nil {
+		log.Fatal(err)
+	}
 	filters, err := models.LoadWhisperMelFilters(*repo)
 	if err != nil {
 		log.Fatal(err)

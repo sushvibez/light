@@ -38,8 +38,13 @@ func LogMel(samples []float32, filters [][]float32) ([]float32, error) {
 func LogMelFrames(samples []float32, filters [][]float32) ([]float32, int, error) {
 	nMels := len(filters)
 	bins := WhisperNFFT/2 + 1
-	if nMels == 0 || len(filters[0]) != bins {
-		return nil, 0, fmt.Errorf("audio.LogMel: filters must be (nMels × %d), got %d × %d", bins, nMels, len(filters[0]))
+	if nMels == 0 {
+		return nil, 0, fmt.Errorf("audio.LogMel: filters must be (nMels × %d), got no rows", bins)
+	}
+	for m, row := range filters {
+		if len(row) != bins {
+			return nil, 0, fmt.Errorf("audio.LogMel: filters must be (nMels × %d), row %d has %d bins", bins, m, len(row))
+		}
 	}
 	n := len(samples)
 	frames := n / WhisperHop

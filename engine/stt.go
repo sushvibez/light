@@ -136,7 +136,10 @@ func (t *Transcriber) Transcribe(samples []float32, rate int, opts models.Transc
 		return t.transcribeQwen(samples, rate, opts)
 	}
 	start := time.Now()
-	s16 := audio.Resample(samples, rate, audio.WhisperSampleRate)
+	s16, err := audio.Resample(samples, rate, audio.WhisperSampleRate)
+	if err != nil {
+		return nil, err
+	}
 	res := &TranscribeResult{AudioSec: float64(len(s16)) / audio.WhisperSampleRate}
 	chunk := audio.WhisperSampleRate * audio.WhisperChunkSec
 	dev := t.Model.Device()
@@ -192,7 +195,10 @@ const qwen3ASRMinSamples = 8000
 // one encoder pass, then greedy decoding of "language <Name><asr_text>…".
 func (t *Transcriber) transcribeQwen(samples []float32, rate int, opts models.TranscribeOpts) (*TranscribeResult, error) {
 	start := time.Now()
-	s16 := audio.Resample(samples, rate, audio.WhisperSampleRate)
+	s16, err := audio.Resample(samples, rate, audio.WhisperSampleRate)
+	if err != nil {
+		return nil, err
+	}
 	res := &TranscribeResult{AudioSec: float64(len(s16)) / audio.WhisperSampleRate, Chunks: 1}
 	if len(s16) < qwen3ASRMinSamples {
 		s16 = append(slices.Clone(s16), make([]float32, qwen3ASRMinSamples-len(s16))...)
