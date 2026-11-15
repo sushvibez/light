@@ -325,33 +325,121 @@ func (b *BPE) applyBPE(piece string) []string {
 	return b.mergeSymbols(tokens)
 }
 
-// mergeSymbols applies the merge table to an initial symbol list.
+// mergeSymbols applies the merge table to an initial symbol list: repeatedly
+// merge the adjacent pair with the lowest rank, the leftmost on ties, until
+// no pair is in the table.
+//
+// Symbols form a doubly linked list over their initial slots (slot order is
+// position order) and candidate pairs sit in a (rank, left slot) min-heap.
+// A merge folds the right symbol into the left slot and pushes the two new
+// neighbour pairs; entries made stale by earlier merges are recognised by
+// the symbol lengths recorded at push time (a slot's symbol only grows, and
+// a dead slot's length is 0). Each step is O(log n) instead of a rescan and
+// slice rebuild.
 func (b *BPE) mergeSymbols(tokens []string) []string {
-	if len(tokens) < 2 {
+	n := len(tokens)
+	if n < 2 {
 		return tokens
 	}
-	for {
-		bestRank := int32(-1)
-		bestIdx := -1
-		for i := 0; i < len(tokens)-1; i++ {
-			if rank, ok := b.merges[mergeKey{tokens[i], tokens[i+1]}]; ok {
-				if bestIdx == -1 || rank < bestRank {
-					bestRank = rank
-					bestIdx = i
-				}
-			}
+	sym := tokens // merged in place; dead slots become ""
+	next := make([]int32, n)
+	prev := make([]int32, n)
+	for i := range n {
+		next[i] = int32(i + 1)
+		prev[i] = int32(i - 1)
+	}
+	next[n-1] = -1
+	h := make(mergeHeap, 0, n)
+	push := func(l int32) {
+		r := next[l]
+		if r < 0 {
+			return
 		}
-		if bestIdx == -1 {
+		if rank, ok := b.merges[mergeKey{sym[l], sym[r]}]; ok {
+			h.push(mergeCand{rank: rank, left: l, lenL: int32(len(sym[l])), lenR: int32(len(sym[r]))})
+		}
+	}
+	for i := range n - 1 {
+		push(int32(i))
+	}
+	for len(h) > 0 {
+		c := h.pop()
+		l := c.left
+		r := next[l]
+		if r < 0 || int32(len(sym[l])) != c.lenL || int32(len(sym[r])) != c.lenR {
+			continue // stale: a side was merged since this pair was pushed
+		}
+		sym[l] += sym[r]
+		sym[r] = ""
+		nr := next[r]
+		next[l] = nr
+		if nr >= 0 {
+			prev[nr] = l
+		}
+		if p := prev[l]; p >= 0 {
+			push(p)
+		}
+		push(l)
+	}
+	out := tokens[:0]
+	for i := int32(0); i >= 0; i = next[i] {
+		out = append(out, sym[i])
+	}
+	return out
+}
+
+// mergeCand is a candidate merge of the symbol at slot left with its right
+// neighbour, with both symbols' lengths when it was pushed.
+type mergeCand struct {
+	rank, left, lenL, lenR int32
+}
+
+// mergeHeap is a binary min-heap on (rank, left): lowest rank first, then
+// the leftmost pair, matching the scan order of a full rescan.
+type mergeHeap []mergeCand
+
+func (c mergeCand) less(d mergeCand) bool {
+	return c.rank < d.rank || (c.rank == d.rank && c.left < d.left)
+}
+
+func (h *mergeHeap) push(c mergeCand) {
+	*h = append(*h, c)
+	s := *h
+	i := len(s) - 1
+	for i > 0 {
+		p := (i - 1) / 2
+		if !s[i].less(s[p]) {
 			break
 		}
-		merged := tokens[bestIdx] + tokens[bestIdx+1]
-		next := make([]string, 0, len(tokens)-1)
-		next = append(next, tokens[:bestIdx]...)
-		next = append(next, merged)
-		next = append(next, tokens[bestIdx+2:]...)
-		tokens = next
+		s[i], s[p] = s[p], s[i]
+		i = p
 	}
-	return tokens
+}
+
+func (h *mergeHeap) pop() mergeCand {
+	s := *h
+	top := s[0]
+	last := len(s) - 1
+	s[0] = s[last]
+	s = s[:last]
+	i := 0
+	for {
+		l := 2*i + 1
+		if l >= len(s) {
+			break
+		}
+		c := l
+		if l+1 < len(s) && s[l+1].less(s[l]) {
+			c = l + 1
+		}
+		if !s[c].less(s[i]) {
+			break
+		}
+		s[i], s[c] = s[c], s[i]
+		i = c
+	}
+	*h = s
+	return top
 }
 
 // Decode converts token IDs back to text. Unknown IDs are skipped.
