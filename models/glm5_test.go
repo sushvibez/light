@@ -16,7 +16,15 @@ import (
 // hyper-connections) against transformers: every position's logits, for a
 // prompt within index_topk (dense attention is exact there).
 func TestGLM5TinyMatchesTransformers(t *testing.T) {
-	raw, err := os.ReadFile("testdata/glm5-tiny.json")
+	for _, name := range []string{"glm5-tiny", "glm5-fp8-tiny"} {
+		t.Run(name, func(t *testing.T) { testGLM5Tiny(t, name) })
+	}
+}
+
+// testGLM5Tiny compares testdata/<name> (glm5-fp8-tiny: block-scaled FP8
+// projections, per-expert layout, against the dequantized model).
+func testGLM5Tiny(t *testing.T, name string) {
+	raw, err := os.ReadFile("testdata/" + name + ".json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +41,10 @@ func TestGLM5TinyMatchesTransformers(t *testing.T) {
 	}
 	for _, dev := range devs {
 		t.Run(fmt.Sprint(dev), func(t *testing.T) {
-			m, err := LoadGLM5("testdata/glm5-tiny", dev)
+			m, err := LoadGLM5("testdata/"+name, dev)
+			if name == "glm5-fp8-tiny" && device.IsCPU(dev) && m != nil && m.Layers[0].Q.WBlockScale == nil { // WebGPU widens at load
+				t.Fatalf("FP8 projections did not load block-scaled")
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -55,7 +66,7 @@ func TestGLM5TinyMatchesTransformers(t *testing.T) {
 				md = math.Max(md, math.Abs(float64(got[i]-ref.Logits[i])))
 			}
 			t.Logf("logits: max diff %.3g over %d", md, len(got))
-			if md > 1e-3 {
+			if !(md <= 1e-3) { // NaN fails too
 				t.Errorf("logits differ by %.3g", md)
 			}
 		})

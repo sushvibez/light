@@ -117,6 +117,10 @@ func LoadGLM5(dir string, dev device.Device) (*GLM5, error) {
 	var top struct {
 		ModelType  string          `json:"model_type"`
 		TextConfig json.RawMessage `json:"text_config"`
+		Quant      *struct {
+			Method    string `json:"quant_method"`
+			BlockSize []int  `json:"weight_block_size"`
+		} `json:"quantization_config"`
 	}
 	if err := json.Unmarshal(raw, &top); err != nil {
 		return nil, err
@@ -158,6 +162,9 @@ func LoadGLM5(dir string, dev device.Device) (*GLM5, error) {
 		return nil, err
 	}
 	l := &idolLoader{hf: hf, dev: dev}
+	if q := top.Quant; q != nil && q.Method == "fp8" && len(q.BlockSize) == 2 {
+		l.fp8Block = [2]int{q.BlockSize[0], q.BlockSize[1]} // FP8 weights stay FP8, block-scaled
+	}
 	prefix := "model.language_model."
 	if _, ok := hf[prefix+"embed_tokens.weight"]; !ok {
 		prefix = "model."

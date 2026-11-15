@@ -603,6 +603,9 @@ type idolLoader struct {
 	hf  map[string]*tensor.Tensor
 	dev device.Device
 	err error
+	// fp8Block, when set, keeps F8E4M3 weights that have a
+	// <name>.weight_scale_inv as block-scaled FP8 (nn.Linear.WBlockScale).
+	fp8Block [2]int
 }
 
 func newIdolLoader(path string) (*idolLoader, error) {
@@ -623,6 +626,49 @@ func (l *idolLoader) linear(name string) *nn.Linear {
 		return nil
 	}
 	_, hasB := l.hf[name+".bias"]
+	if sc, ok := l.hf[name+".weight_scale_inv"]; ok && l.fp8Block[0] > 0 && w.DType() == dtype.F8E4M3 {
+		bs := l.fp8Block
+		ragged := w.Dim(0)%bs[0] != 0 || w.Dim(1)%bs[1] != 0
+		if ragged || hasB || !(device.IsCPU(l.dev) || device.IsCUDA(l.dev)) {
+			// Block-scaled FP8 runs on CPU and CUDA for whole blocks;
+			// otherwise widen on the host now (W = fp8 · scale_inv per block).
+			d, err := dequantFP8BlockHost(w, sc, bs)
+			if err != nil {
+				l.err = err
+				return nil
+			}
+			l.hf[name+".weight"] = d
+			delete(l.hf, name+".weight_scale_inv")
+			return l.linear(name)
+		}
+	}
+	if sc, ok := l.hf[name+".weight_scale_inv"]; ok && l.fp8Block[0] > 0 && w.DType() == dtype.F8E4M3 && !hasB {
+		lin, err := nn.NewLinearPlaceholder(w.Dim(1), w.Dim(0), false, l.dev)
+		if err != nil {
+			l.err = err
+			return nil
+		}
+		wd, err := w.To(l.dev)
+		if err != nil {
+			l.err = err
+			return nil
+		}
+		if sc, err = ops.Cast(sc, dtype.F32); err != nil {
+			l.err = err
+			return nil
+		}
+		if sc, err = sc.To(l.dev); err != nil {
+			l.err = err
+			return nil
+		}
+		if l.err = lin.SetWeight(wd); l.err != nil {
+			return nil
+		}
+		lin.WBlockScale, lin.WBlock = sc, l.fp8Block
+		delete(l.hf, name+".weight")
+		delete(l.hf, name+".weight_scale_inv")
+		return lin
+	}
 	lin, err := nn.NewLinearUninit(w.Dim(1), w.Dim(0), hasB, dtype.F32, l.dev)
 	if err != nil {
 		l.err = err
@@ -632,6 +678,32 @@ func (l *idolLoader) linear(name string) *nn.Linear {
 		l.err = copyExactCast(lin.B, l.hf, name+".bias")
 	}
 	return lin
+}
+
+// dequantFP8BlockHost widens an F8E4M3 weight (N, K) with its per-block
+// scale_inv (⌈N/b0⌉, ⌈K/b1⌉) to F32 on the host, edge blocks included.
+func dequantFP8BlockHost(w, scale *tensor.Tensor, bs [2]int) (*tensor.Tensor, error) {
+	wf, err := ops.Cast(w, dtype.F32)
+	if err != nil {
+		return nil, err
+	}
+	sf, err := ops.Cast(scale, dtype.F32)
+	if err != nil {
+		return nil, err
+	}
+	N, K := w.Dim(0), w.Dim(1)
+	nb, kb := (N+bs[0]-1)/bs[0], (K+bs[1]-1)/bs[1]
+	if sf.NumElements() != nb*kb {
+		return nil, fmt.Errorf("fp8 weight %v: scale has %d elements, want %d x %d", w.Shape(), sf.NumElements(), nb, kb)
+	}
+	wv, sv := tensor.MustSlice[float32](wf), tensor.MustSlice[float32](sf)
+	out := make([]float32, N*K)
+	for i := range N {
+		for j := range K {
+			out[i*K+j] = wv[i*K+j] * sv[(i/bs[0])*kb+j/bs[1]]
+		}
+	}
+	return tensor.New(out, []int{N, K}, device.CPU())
 }
 
 // param uploads a tensor at F32.

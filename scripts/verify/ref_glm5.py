@@ -72,3 +72,75 @@ with torch.no_grad():
 json.dump({"ids": ids[0].tolist(), "logits": [round(x, 6) for x in logits.flatten().tolist()], "vocab": 300},
           open(out_json, "w"))
 print("logits", tuple(logits.shape), "keys", len(sd))
+
+# FP8 variant (models/glm5_test.go's FP8 case): every projection stored as
+# F8E4M3 with an 8 x 8 block weight_scale_inv (DeepSeek / GLM layout,
+# W = fp8 * scale_inv, ragged edge blocks included), experts written per
+# expert as the released checkpoints store them; the reference runs the
+# dequantized weights.
+if len(sys.argv) > 4:
+    fp8_dir, fp8_json = sys.argv[3], sys.argv[4]
+    BS = 8
+
+    def quant(w):
+        N, K = w.shape
+        nb, kb = (N + BS - 1) // BS, (K + BS - 1) // BS
+        sc = torch.zeros(nb, kb)
+        q = torch.zeros(N, K, dtype=torch.float8_e4m3fn)
+        deq = torch.zeros(N, K)
+        for i in range(nb):
+            for j in range(kb):
+                blk = w[i * BS:(i + 1) * BS, j * BS:(j + 1) * BS]
+                s = (blk.abs().max() / 448).clamp(min=1e-12)
+                qb = (blk / s).to(torch.float8_e4m3fn)
+                q[i * BS:(i + 1) * BS, j * BS:(j + 1) * BS] = qb
+                deq[i * BS:(i + 1) * BS, j * BS:(j + 1) * BS] = qb.float() * s
+                sc[i, j] = s
+        return q, sc, deq
+
+    fsd, deq = {}, {}
+    for k, v in model.state_dict().items():
+        full = "model.language_model." + k
+        if k.endswith("mlp.experts.gate_up_proj") or k.endswith("mlp.experts.down_proj"):
+            p, kind = k.rsplit(".", 1)
+            for e in range(v.shape[0]):
+                if kind == "gate_up_proj":
+                    I = v.shape[1] // 2
+                    parts = {"gate_proj": v[e, :I], "up_proj": v[e, I:]}
+                else:
+                    parts = {"down_proj": v[e]}
+                for name, w in parts.items():
+                    q, sc, d = quant(w)
+                    base = f"model.language_model.{p}.{e}.{name}"
+                    fsd[base + ".weight"], fsd[base + ".weight_scale_inv"] = q, sc
+                    deq.setdefault(k, {})[(e, name)] = d
+        elif k.endswith("_proj.weight") and v.dim() == 2 and "indexer" not in k:
+            q, sc, d = quant(v)
+            fsd[full], fsd[full[: -len("weight")] + "weight_scale_inv"] = q, sc
+            deq[k] = d
+        else:
+            fsd[full] = v.contiguous()
+    fsd["lm_head.weight"] = lm_head.weight.detach().contiguous()
+    os.makedirs(fp8_dir, exist_ok=True)
+    save_file(fsd, os.path.join(fp8_dir, "model.safetensors"), metadata={"format": "pt"})
+    json.dump({"architectures": ["Glm5NextForConditionalGeneration"], "model_type": "glm5_next", "text_config": c,
+               "quantization_config": {"quant_method": "fp8", "fmt": "e4m3", "weight_block_size": [BS, BS]}},
+              open(os.path.join(fp8_dir, "config.json"), "w"), indent=2)
+    with torch.no_grad():
+        sd = model.state_dict()
+        for k, d in deq.items():
+            if isinstance(d, dict):
+                t = sd[k]
+                for (e, name), w in d.items():
+                    if name == "gate_proj":
+                        t[e, : w.shape[0]] = w
+                    elif name == "up_proj":
+                        t[e, t.shape[1] // 2:] = w
+                    else:
+                        t[e] = w
+            else:
+                sd[k].copy_(d)
+        logits = lm_head(model(input_ids=ids).last_hidden_state)[0]
+    json.dump({"ids": ids[0].tolist(), "logits": [round(x, 6) for x in logits.flatten().tolist()], "vocab": 300},
+              open(fp8_json, "w"))
+    print("fp8 variant", tuple(logits.shape))
