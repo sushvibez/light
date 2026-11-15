@@ -92,7 +92,8 @@ func DownloadWithProgressContext(ctx context.Context, repo, revision, filename s
 // non-empty dst is kept as is. dst is the caller's explicit choice and is
 // used as given; filename must be a valid repository path. The bytes come
 // from the commit revision resolves to (falling back to the revision itself
-// when the API is unreachable), so a resumed .part never mixes commits.
+// when the API is unreachable). A .part is resumed only when it provably
+// belongs to the same object (see fetchWith), so it never mixes commits.
 func DownloadTo(repo, revision, filename, dst string, progress Progress) error {
 	return DownloadToContext(context.Background(), repo, revision, filename, dst, progress)
 }
@@ -119,7 +120,7 @@ func DownloadToContext(ctx context.Context, repo, revision, filename, dst string
 			return fmt.Errorf("hub.DownloadTo: %w", cerr)
 		}
 	}
-	return fetchLocked(ctx, resolveURL(repo, rev, filename), dst, progress)
+	return fetchLocked(ctx, resolveURL(repo, rev, filename), dst, isCommitSHA(rev), progress)
 }
 
 func setHeaders(req *http.Request) {

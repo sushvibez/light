@@ -143,7 +143,7 @@ func downloadAt(ctx context.Context, repo, revision, filename string, progress P
 		if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
 			return "", "", err
 		}
-		if dlErr := fetchLocked(ctx, resolveURL(repo, revision, filename), legacy, progress); dlErr != nil {
+		if dlErr := fetchLocked(ctx, resolveURL(repo, revision, filename), legacy, false, progress); dlErr != nil {
 			return "", "", fmt.Errorf("resolve sha + fetch failed: sha-resolve: %v; fetch: %w", err, dlErr)
 		}
 		return legacy, "", nil
@@ -168,7 +168,7 @@ func fetchSnapshot(ctx context.Context, repoDir, repo, sha, rel, filename string
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 		return "", err
 	}
-	if err := fetchLocked(ctx, resolveURL(repo, sha, filename), localPath, progress); err != nil {
+	if err := fetchLocked(ctx, resolveURL(repo, sha, filename), localPath, true, progress); err != nil {
 		return "", err
 	}
 	return localPath, nil
@@ -258,7 +258,7 @@ func resolveCommitSHA(ctx context.Context, repo, revision string) (string, error
 // and across processes, see lockDest). It rechecks dst after acquiring the
 // lock, so a caller that waited on another's download returns its result
 // instead of fetching again.
-func fetchLocked(ctx context.Context, url, dst string, progress Progress) error {
+func fetchLocked(ctx context.Context, url, dst string, pinned bool, progress Progress) error {
 	unlock, err := lockDest(ctx, dst)
 	if err != nil {
 		return fmt.Errorf("hub.Download: lock %s: %w", dst, err)
@@ -267,7 +267,7 @@ func fetchLocked(ctx context.Context, url, dst string, progress Progress) error 
 	if st, err := os.Stat(dst); err == nil && st.Size() > 0 {
 		return nil
 	}
-	return fetchWith(ctx, url, dst, progress)
+	return fetchWith(ctx, url, dst, pinned, progress)
 }
 
 // fetchWith streams `url` to `dst` (with `.part` suffix during download),
@@ -276,22 +276,40 @@ func fetchLocked(ctx context.Context, url, dst string, progress Progress) error 
 // Range request (multi-GB checkpoints over flaky links); a server answering
 // 200 instead of 206 restarts it. A 206 must continue exactly at the
 // partial's length and run to the end of the object; anything else, or a
-// .part started from a different URL, is discarded rather than spliced.
-// dst is only published (renamed) once it holds the full advertised length.
-// Callers hold lockDest(dst).
-func fetchWith(ctx context.Context, url, dst string, progress Progress) error {
+// .part whose identity is not established, is discarded rather than
+// spliced. dst is only published (renamed) once it holds the full
+// advertised length. Callers hold lockDest(dst).
+//
+// A partial is only resumed when it provably belongs to the object being
+// fetched. The .part.url sidecar records the URL and the strong ETag of the
+// response that started it. pinned means url names an immutable object
+// (resolve/<commit sha>/...), so a matching URL suffices. An unpinned URL
+// (a branch, fetched when the commit could not be resolved) can serve a
+// different object at any time, so it is resumed only with the recorded
+// ETag sent as If-Range: the server then answers 200 with the whole new
+// object if it changed, which restarts the partial. A partial with no
+// sidecar (an older light), a different URL, or (unpinned) no strong ETag
+// restarts from zero.
+func fetchWith(ctx context.Context, url, dst string, pinned bool, progress Progress) error {
 	tmp, srcFile := dst+".part", dst+".part.url"
 	var have int64
 	if st, err := os.Stat(tmp); err == nil {
 		have = st.Size()
 	}
-	// The partial must come from the same object. URLs are pinned to a
-	// commit SHA, so the URL identifies it; a .part without a record (from
-	// an older light) is resumed as before.
+	var etag string
 	if have > 0 {
-		if prev, err := os.ReadFile(srcFile); err == nil && string(prev) != url {
+		prevURL, prevETag, ok := readPartMeta(srcFile)
+		switch {
+		case !ok || prevURL != url:
+			have = 0 // unknown or other object
+		case !pinned && prevETag == "":
+			have = 0 // mutable URL without a validator
+		default:
+			etag = prevETag
+		}
+		if have == 0 {
 			_ = os.Remove(tmp)
-			have = 0
+			_ = os.Remove(srcFile)
 		}
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -301,12 +319,24 @@ func fetchWith(ctx context.Context, url, dst string, progress Progress) error {
 	setHeaders(req)
 	if have > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", have))
+		if !pinned {
+			req.Header.Set("If-Range", etag)
+		}
 	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("hub.Download: GET %s: %w", url, err)
 	}
 	defer resp.Body.Close()
+	if have > 0 && !pinned && (resp.StatusCode == http.StatusPartialContent || resp.StatusCode == http.StatusRequestedRangeNotSatisfiable) {
+		// A server ignoring If-Range must at least not hand us bytes of an
+		// object with another validator.
+		if got := resp.Header.Get("ETag"); got != "" && got != etag {
+			_ = os.Remove(tmp)
+			_ = os.Remove(srcFile)
+			return fmt.Errorf("hub.Download: GET %s: resuming object %s but the server sent %s; discarded the partial file, a retry restarts", url, etag, got)
+		}
+	}
 	if have > 0 && resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
 		// Nothing past the partial: it is complete if the server says the
 		// object is exactly that long.
@@ -335,7 +365,7 @@ func fetchWith(ctx context.Context, url, dst string, progress Progress) error {
 		flags |= os.O_TRUNC
 	}
 	if start == 0 {
-		if err := os.WriteFile(srcFile, []byte(url), 0o644); err != nil {
+		if err := writePartMeta(srcFile, url, strongETag(resp.Header.Get("ETag"))); err != nil {
 			return err
 		}
 	}
@@ -366,6 +396,32 @@ func fetchWith(ctx context.Context, url, dst string, progress Progress) error {
 		return fmt.Errorf("hub.Download: GET %s: have %d of %d bytes; not publishing", url, size, total)
 	}
 	return publish(tmp, srcFile, dst)
+}
+
+// The .part.url sidecar holds the URL a partial was started from and, on
+// a second line, the strong ETag of that response ("" when the server sent
+// none or a weak one). Older lights wrote just the URL.
+func readPartMeta(path string) (url, etag string, ok bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", false
+	}
+	url, etag, _ = strings.Cut(string(b), "\n")
+	return url, strings.TrimSpace(etag), url != ""
+}
+
+func writePartMeta(path, url, etag string) error {
+	return os.WriteFile(path, []byte(url+"\n"+etag+"\n"), 0o644)
+}
+
+// strongETag returns etag if it is a strong validator, usable in If-Range
+// (RFC 9110 §13.1.5); weak (W/"...") or empty validators yield "".
+func strongETag(etag string) string {
+	etag = strings.TrimSpace(etag)
+	if len(etag) < 2 || etag[0] != '"' || etag[len(etag)-1] != '"' {
+		return ""
+	}
+	return etag
 }
 
 // publish atomically renames a completed .part into place.
