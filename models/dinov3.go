@@ -159,7 +159,7 @@ func dinov3Rotate(o *iop, x, cos, sin *tensor.Tensor) *tensor.Tensor {
 	}
 	Dh := x.Dim(3)
 	x1, x2 := o.narrow(x, 3, 0, Dh/2), o.narrow(x, 3, Dh/2, Dh/2)
-	rh := o.cat(3, o.un(ops.Neg, x2), x1)
+	rh := o.cat(3, o.un(ops.Neg, o.reshape(x2, x2.Shape().Dims()...)), x1) // contiguous: CUDA neg takes no views
 	return o.add(o.mul(x, cos), o.mul(rh, sin))
 }
 
