@@ -801,3 +801,18 @@ func loadIdolGaussian(path string, a IdolDecoderArgs, dev device.Device) (*IdolG
 	}
 	return m, nil
 }
+
+// IdolImageTokens is idol's DINOv3 conditioning on last_hidden_state: a
+// LayerNorm without affine (PyTorch's default eps).
+func IdolImageTokens(hidden *tensor.Tensor) (*tensor.Tensor, error) {
+	D := hidden.Dim(-1)
+	ones, err := tensor.Ones(dtype.F32, []int{D}, hidden.Device())
+	if err != nil {
+		return nil, err
+	}
+	zeros, err := tensor.Zeros(dtype.F32, []int{D}, hidden.Device())
+	if err != nil {
+		return nil, err
+	}
+	return ops.LayerNorm(hidden, ones, zeros, 1e-5)
+}

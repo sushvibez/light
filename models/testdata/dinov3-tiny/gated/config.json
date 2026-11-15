@@ -1,0 +1,45 @@
+{
+  "apply_layernorm": true,
+  "architectures": [
+    "DINOv3ViTModel"
+  ],
+  "attention_dropout": 0.0,
+  "drop_path_rate": 0.0,
+  "dtype": "float32",
+  "hidden_act": "silu",
+  "hidden_size": 128,
+  "image_size": 64,
+  "initializer_range": 0.02,
+  "intermediate_size": 192,
+  "key_bias": false,
+  "layer_norm_eps": 1e-05,
+  "layerscale_value": 0.5,
+  "mlp_bias": true,
+  "model_type": "dinov3_vit",
+  "num_attention_heads": 2,
+  "num_channels": 3,
+  "num_hidden_layers": 2,
+  "num_register_tokens": 4,
+  "out_features": [
+    "stage2"
+  ],
+  "out_indices": [
+    2
+  ],
+  "patch_size": 16,
+  "pos_embed_jitter": null,
+  "pos_embed_rescale": 2.0,
+  "pos_embed_shift": null,
+  "proj_bias": true,
+  "query_bias": true,
+  "reshape_hidden_states": true,
+  "rope_theta": 100.0,
+  "stage_names": [
+    "stem",
+    "stage1",
+    "stage2"
+  ],
+  "transformers_version": "5.21.0",
+  "use_gated_mlp": true,
+  "value_bias": true
+}
