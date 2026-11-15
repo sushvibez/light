@@ -34,6 +34,9 @@ func gatherKernel[T any](ctx *registry.Context) error {
 	srcS := asSlice[T](src)
 	idxS := asSlice[int64](indices)
 	outS := asSlice[T](out)
+	if err := checkIndexRange("gather", idxS[:indices.NumElements()], src.Dim(dim)); err != nil {
+		return err
+	}
 
 	srcDims := src.Shape().Dims()
 	outDims := out.Shape().Dims()
@@ -110,6 +113,9 @@ func scatterAddKernel[T dtype.Numeric](ctx *registry.Context) error {
 	srcS := asSlice[T](src)
 	idxS := asSlice[int64](indices)
 	outS := asSlice[T](out)
+	if err := checkIndexRange("scatter_add", idxS[:indices.NumElements()], out.Dim(dim)); err != nil {
+		return err
+	}
 
 	srcDims := src.Shape().Dims()
 	outDims := out.Shape().Dims()
@@ -181,6 +187,20 @@ func init() {
 	reg("index_add", dtype.I64, indexAddKernel[int64])
 }
 
+// checkIndexRange enforces 0 <= idx < n for every index of a gather/scatter
+// op before any element is read or written. The kernels address memory
+// with flat offsets, so an out-of-range index would otherwise either panic
+// or silently land in a neighbouring row. One linear pass over the indices:
+// small next to the op itself.
+func checkIndexRange(op string, idx []int64, n int) error {
+	for i, v := range idx {
+		if v < 0 || v >= int64(n) {
+			return fmt.Errorf("%s: index %d at position %d out of range [0, %d)", op, v, i, n)
+		}
+	}
+	return nil
+}
+
 // axisSplit returns (outer, axis, inner) for a contiguous tensor split at dim.
 func axisSplit(dims []int, dim int) (outer, axis, inner int) {
 	outer, inner = 1, 1
@@ -199,6 +219,9 @@ func scatterKernel[T any](ctx *registry.Context) error {
 	src, indices, out := ctx.Inputs[0], ctx.Inputs[1], ctx.Output
 	dim := ctx.Attrs["dim"].(int)
 	srcS, idxS, outS := asSlice[T](src), asSlice[int64](indices), asSlice[T](out)
+	if err := checkIndexRange("scatter", idxS[:indices.NumElements()], out.Dim(dim)); err != nil {
+		return err
+	}
 	outer, srcAxis, inner := axisSplit(src.Shape().Dims(), dim)
 	outAxis := out.Dim(dim)
 	for o := range outer {
@@ -217,6 +240,9 @@ func indexAddKernel[T dtype.Numeric](ctx *registry.Context) error {
 	src, indices, out := ctx.Inputs[0], ctx.Inputs[1], ctx.Output
 	dim := ctx.Attrs["dim"].(int)
 	srcS, idxS, outS := asSlice[T](src), asSlice[int64](indices), asSlice[T](out)
+	if err := checkIndexRange("index_add", idxS[:indices.NumElements()], out.Dim(dim)); err != nil {
+		return err
+	}
 	outer, srcAxis, inner := axisSplit(src.Shape().Dims(), dim)
 	outAxis := out.Dim(dim)
 	for o := range outer {
@@ -238,6 +264,13 @@ func scatterAddHalfKernel(toF32 func(uint16) float32, fromF32 func(float32) uint
 		src, indices, out := ctx.Inputs[0], ctx.Inputs[1], ctx.Output
 		dim := ctx.Attrs["dim"].(int)
 		srcS, idxS, outS := asSlice[uint16](src), asSlice[int64](indices), asSlice[uint16](out)
+		op := "scatter_add"
+		if oneD {
+			op = "index_add"
+		}
+		if err := checkIndexRange(op, idxS[:indices.NumElements()], out.Dim(dim)); err != nil {
+			return err
+		}
 		outer, srcAxis, inner := axisSplit(src.Shape().Dims(), dim)
 		outAxis := out.Dim(dim)
 		for o := range outer {

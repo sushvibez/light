@@ -35,6 +35,11 @@ func topkKernel[T dtype.Numeric](ctx *registry.Context) error {
 	k := ctx.Attrs["k"].(int)
 	largest := ctx.Attrs["largest"].(bool)
 
+	if k == 0 || a.NumElements() == 0 {
+		// Empty output; ops.TopK returns before dispatch, this guards
+		// direct callers (and the cols == 0 division below).
+		return nil
+	}
 	aS := asSlice[T](a)
 	outS := asSlice[T](out)
 

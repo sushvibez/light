@@ -10,11 +10,18 @@ import (
 
 // Gather selects values from `src` along `dim` at positions given by `indices`.
 // The output has the same shape as `indices`. src and indices must have the
-// same rank; indices must be I64; indices must match src.shape except along `dim`.
+// same rank and device; indices must be I64; indices.dim(i) <= src.dim(i)
+// for every i != dim (PyTorch's contract); every index must lie in
+// [0, src.dim(dim)).
 //
 //	out[i_0, …, i_k, …, i_n] = src[i_0, …, indices[i_0, …, i_k, …, i_n], …, i_n]
 //
 // (k = dim)
+//
+// Index values are checked on the CPU (one pass over the indices before any
+// element moves). Device-resident indices (CUDA, WebGPU) are not read back
+// to check them: that would add a device→host sync to hot paths, so their
+// bounds stay the caller's and the kernel's responsibility.
 func Gather(src, indices *tensor.Tensor, dim int) (*tensor.Tensor, error) {
 	if indices.DType() != dtype.I64 {
 		return nil, fmt.Errorf("gather: indices must be I64")
@@ -27,7 +34,12 @@ func Gather(src, indices *tensor.Tensor, dim int) (*tensor.Tensor, error) {
 		return nil, fmt.Errorf("gather: %w", err)
 	}
 	if !src.Device().SameAs(indices.Device()) {
-		return nil, fmt.Errorf("gather: device mismatch")
+		return nil, fmt.Errorf("gather: device mismatch (%v vs %v)", src.Device(), indices.Device())
+	}
+	for i := range src.Rank() {
+		if i != d && indices.Dim(i) > src.Dim(i) {
+			return nil, fmt.Errorf("gather: indices %v exceed src %v along dim %d (only dim %d may be larger)", indices.Shape(), src.Shape(), i, d)
+		}
 	}
 	srcC, err := ensureContig(src)
 	if err != nil {
@@ -56,64 +68,20 @@ func Gather(src, indices *tensor.Tensor, dim int) (*tensor.Tensor, error) {
 }
 
 // ScatterAdd computes out = base; out[…, indices[j], …] += src[…, j, …] along `dim`.
-// src and indices have identical shape; out has the same shape as `base`.
-// If `base` is nil, `out` starts at zero.
+// src and indices have identical shape; out has the same shape as `base`,
+// which is required and must match src except along `dim`. It shares
+// Scatter's and IndexAdd's validation (indexOp).
 func ScatterAdd(base *tensor.Tensor, indices, src *tensor.Tensor, dim int) (*tensor.Tensor, error) {
-	if indices.DType() != dtype.I64 {
-		return nil, fmt.Errorf("scatter_add: indices must be I64")
+	if base == nil {
+		return nil, fmt.Errorf("scatter_add: base is required")
 	}
-	if !src.Shape().Equal(indices.Shape()) {
-		return nil, fmt.Errorf("scatter_add: src and indices must have identical shape (got %v vs %v)", src.Shape(), indices.Shape())
-	}
-	if base.Rank() != src.Rank() {
-		return nil, fmt.Errorf("scatter_add: base rank %d != src rank %d", base.Rank(), src.Rank())
-	}
-	if base.DType() != src.DType() {
-		return nil, fmt.Errorf("scatter_add: base/src dtype mismatch")
-	}
-	d, err := base.Shape().NormalizeAxis(dim)
-	if err != nil {
-		return nil, fmt.Errorf("scatter_add: %w", err)
-	}
-
-	baseC, err := ensureContig(base)
-	if err != nil {
-		return nil, err
-	}
-	srcC, err := ensureContig(src)
-	if err != nil {
-		return nil, err
-	}
-	idxC, err := ensureContig(indices)
-	if err != nil {
-		return nil, err
-	}
-
-	// Start from a copy of base (since scatter_add is an accumulation).
-	out, err := tensor.Zeros(base.DType(), base.Shape().Dims(), base.Device())
-	if err != nil {
-		return nil, err
-	}
-	if err := out.CopyFrom(baseC); err != nil {
-		return nil, err
-	}
-
-	k, err := registry.Lookup(registry.Key{Op: "scatter_add", Dev: base.Device().Kind(), DType: base.DType()})
-	if err != nil {
-		return nil, err
-	}
-	if err := k(&registry.Context{
-		Inputs: []*tensor.Tensor{srcC, idxC},
-		Output: out,
-		Attrs:  map[string]any{"dim": d},
-	}); err != nil {
-		return nil, err
-	}
-	return out, nil
+	return indexOp("scatter_add", base, indices, src, dim, false)
 }
 
-// indexOp validates the shared contract of the scatter-style ops and runs
-// the kernel on a copy of base.
+// indexOp validates the shared contract of the scatter-style ops (dtypes,
+// devices, shapes) and runs the kernel on a copy of base. The CPU kernels
+// also check every index lies in [0, base.dim(dim)) before writing;
+// device-resident indices are not read back (see Gather).
 func indexOp(op string, base, indices, src *tensor.Tensor, dim int, oneD bool) (*tensor.Tensor, error) {
 	if indices.DType() != dtype.I64 {
 		return nil, fmt.Errorf("%s: indices must be I64", op)

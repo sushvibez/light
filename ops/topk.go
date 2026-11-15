@@ -23,6 +23,22 @@ func TopK(a *tensor.Tensor, k int, largest bool) (*tensor.Tensor, *tensor.Tensor
 	if k < 0 || k > last {
 		return nil, nil, fmt.Errorf("TopK: k=%d out of range [0, %d]", k, last)
 	}
+	if k == 0 || a.NumElements() == 0 {
+		// Empty output (k = 0, an empty leading dim, or an empty last axis,
+		// which forces k = 0): shaped results on every backend, with no
+		// kernel dispatch or buffer pointer taken.
+		outDims := append([]int{}, a.Shape().Dims()...)
+		outDims[len(outDims)-1] = k
+		vals, err := tensor.Zeros(a.DType(), outDims, a.Device())
+		if err != nil {
+			return nil, nil, err
+		}
+		idx, err := tensor.Zeros(dtype.I64, outDims, a.Device())
+		if err != nil {
+			return nil, nil, err
+		}
+		return vals, idx, nil
+	}
 	a, err := ensureContig(a)
 	if err != nil {
 		return nil, nil, err
