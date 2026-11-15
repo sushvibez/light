@@ -248,6 +248,12 @@ func LoadChatModelFromHF(repo string, dev device.Device, weightDT dtype.DType) (
 		return LoadDeepseekV2FromHF(repo, dev, weightDT)
 	case "minimax":
 		return LoadMiniMaxFromHF(repo, dev, weightDT)
+	case "glm5_next":
+		return LoadGLM5ChatFromHF(repo, dev)
+	case "deepseek_v41":
+		return LoadDeepseekV41ChatFromHF(repo, dev)
+	case "kimi_k31":
+		return LoadKimiK31ChatFromHF(repo, dev)
 	case "lfm3":
 		return LoadLFM3FromHF(repo, dev, weightDT)
 	case "falcon", "RefinedWebModel", "RefinedWeb":

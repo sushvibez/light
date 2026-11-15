@@ -414,6 +414,9 @@ type KVCache struct {
 	// ring marks K / V as fixed-size ring buffers (Moshi's one-frame decode
 	// path) rather than position-ordered concatenations.
 	ring bool
+	// State holds a model's own decode state (GLM5Cache, DeepseekV41Cache,
+	// KimiK31Cache) when it is driven through CausalLM; Reset drops it.
+	State any
 }
 
 // NewKVCache allocates a fresh cache for a model with `numLayers` blocks.
@@ -678,6 +681,9 @@ func (c *KVCache) Truncate(n int) error {
 	if c.ring {
 		return fmt.Errorf("KVCache.Truncate: ring-buffer cache")
 	}
+	if c.State != nil && n != c.Len {
+		return fmt.Errorf("KVCache.Truncate: %T decode state cannot rewind", c.State)
+	}
 	for i := range c.Conv {
 		if c.Conv[i] != nil || c.Rec[i] != nil {
 			return fmt.Errorf("KVCache.Truncate: layer %d carries recurrent state", i)
@@ -727,6 +733,7 @@ func (c *KVCache) Reset() {
 	c.Len = 0
 	c.posSynced = false
 	c.ring = false
+	c.State = nil
 }
 
 // NewLlama constructs a fresh model with the given config on dev. Loaders
