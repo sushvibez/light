@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,11 +18,70 @@ import (
 	"light/models"
 )
 
+// Limits bounds what one HTTP request may ask of the server. Zero fields
+// take DefaultLimits' values.
+type Limits struct {
+	JSONBytes       int64   // chat / embeddings request body (images ride inline as data URLs)
+	UploadBytes     int64   // whole multipart audio request body
+	AudioSeconds    float64 // decoded audio for /v1/audio/transcriptions
+	ConverseSeconds float64 // decoded audio for /v1/audio/conversations
+	ExtraSeconds    float64 // extra_seconds of /v1/audio/conversations
+	EmbedInputs     int     // strings per embeddings request
+	EmbedTokens     int     // padded tokens (inputs × longest input) per embeddings request
+	MaxTokens       int     // max_tokens of a chat completion
+}
+
+// DefaultLimits are the OpenAIHandler limits.
+var DefaultLimits = Limits{
+	JSONBytes:       32 << 20,
+	UploadBytes:     64 << 20,
+	AudioSeconds:    30 * 60,
+	ConverseSeconds: 5 * 60,
+	ExtraSeconds:    30,
+	EmbedInputs:     256,
+	EmbedTokens:     64 << 10,
+	MaxTokens:       1 << 17,
+}
+
+func (l Limits) withDefaults() Limits {
+	d := DefaultLimits
+	if l.JSONBytes <= 0 {
+		l.JSONBytes = d.JSONBytes
+	}
+	if l.UploadBytes <= 0 {
+		l.UploadBytes = d.UploadBytes
+	}
+	if l.AudioSeconds <= 0 {
+		l.AudioSeconds = d.AudioSeconds
+	}
+	if l.ConverseSeconds <= 0 {
+		l.ConverseSeconds = d.ConverseSeconds
+	}
+	if l.ExtraSeconds <= 0 {
+		l.ExtraSeconds = d.ExtraSeconds
+	}
+	if l.EmbedInputs <= 0 {
+		l.EmbedInputs = d.EmbedInputs
+	}
+	if l.EmbedTokens <= 0 {
+		l.EmbedTokens = d.EmbedTokens
+	}
+	if l.MaxTokens <= 0 {
+		l.MaxTokens = d.MaxTokens
+	}
+	return l
+}
+
 // OpenAIHandler serves the subset of the OpenAI REST API that chat clients
 // use: GET /v1/models and POST /v1/chat/completions (streaming and not).
 // "model" in a request may be a catalog id; if it differs from the loaded
-// model, the runtime loads it first.
-func OpenAIHandler(rt *Runtime) http.Handler {
+// model, the runtime loads it first. Requests are bounded by
+// DefaultLimits.
+func OpenAIHandler(rt *Runtime) http.Handler { return OpenAIHandlerLimits(rt, DefaultLimits) }
+
+// OpenAIHandlerLimits is OpenAIHandler with explicit request limits.
+func OpenAIHandlerLimits(rt *Runtime, lim Limits) http.Handler {
+	lim = lim.withDefaults()
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/models", func(w http.ResponseWriter, _ *http.Request) {
 		entries, _ := Catalog()
@@ -39,17 +99,11 @@ func OpenAIHandler(rt *Runtime) http.Handler {
 	})
 	mux.HandleFunc("POST /v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		var req chatRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			httpErr(w, 400, "invalid JSON: "+err.Error())
+		if !decodeJSON(w, r, lim.JSONBytes, &req) {
 			return
 		}
 		if len(req.Messages) == 0 {
 			httpErr(w, 400, "messages required")
-			return
-		}
-		m, err := ensureModel(rt, req.Model)
-		if err != nil {
-			httpErr(w, 503, err.Error())
 			return
 		}
 		opts := GenOpts{MaxTokens: req.MaxTokens, Temperature: 0.7, TopP: 0.9}
@@ -62,10 +116,23 @@ func OpenAIHandler(rt *Runtime) http.Handler {
 		if req.Seed != nil {
 			opts.Seed = uint64(*req.Seed)
 		}
+		if msg := validateGenOpts(req, lim); msg != "" {
+			httpErr(w, 400, msg)
+			return
+		}
+		// The lease pins the selected model (no other request can replace
+		// it or generate on it) until the response is written.
+		lease, err := acquireModel(rt, req.Model)
+		if err != nil {
+			httpErr(w, 503, err.Error())
+			return
+		}
+		defer lease.Release()
+		m := lease.Model()
 		id := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
 		created := time.Now().Unix()
 		if !req.Stream {
-			text, st, err := rt.Generate(r.Context(), req.Messages, opts, nil)
+			text, st, err := lease.Generate(r.Context(), req.Messages, opts, nil)
 			if err != nil {
 				httpErr(w, 500, err.Error())
 				return
@@ -96,7 +163,7 @@ func OpenAIHandler(rt *Runtime) http.Handler {
 			}
 		}
 		send(chunk(map[string]any{"role": "assistant", "content": ""}, nil))
-		_, st, err := rt.Generate(r.Context(), req.Messages, opts, func(s string) {
+		_, st, err := lease.Generate(r.Context(), req.Messages, opts, func(s string) {
 			send(chunk(map[string]any{"content": s}, nil))
 		})
 		if err != nil && !errors.Is(err, context.Canceled) {
@@ -112,29 +179,13 @@ func OpenAIHandler(rt *Runtime) http.Handler {
 	// OpenAI audio API: multipart form with `file` (WAV), optional `model`
 	// (catalog id of a Whisper repo), `language`, `response_format`.
 	mux.HandleFunc("POST /v1/audio/transcriptions", func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseMultipartForm(64 << 20); err != nil {
-			httpErr(w, 400, "multipart form required: "+err.Error())
-			return
-		}
-		f, _, err := r.FormFile("file")
-		if err != nil {
-			httpErr(w, 400, "missing file field")
-			return
-		}
-		defer f.Close()
-		raw, err := io.ReadAll(f)
-		if err != nil {
-			httpErr(w, 400, err.Error())
+		samples, rate, ok := readWAVUpload(w, r, lim.UploadBytes, lim.AudioSeconds)
+		if !ok {
 			return
 		}
 		tr, err := ensureSTT(rt, r.FormValue("model"))
 		if err != nil {
 			httpErr(w, 503, err.Error())
-			return
-		}
-		samples, rate, err := audio.DecodeWAV(raw)
-		if err != nil {
-			httpErr(w, 400, "only WAV input is supported: "+err.Error())
 			return
 		}
 		res, err := tr.Transcribe(samples, rate, models.TranscribeOpts{Language: r.FormValue("language"), Prompt: r.FormValue("prompt")})
@@ -158,8 +209,7 @@ func OpenAIHandler(rt *Runtime) http.Handler {
 			Input          json.RawMessage `json:"input"`
 			EncodingFormat string          `json:"encoding_format"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			httpErr(w, 400, "invalid JSON: "+err.Error())
+		if !decodeJSON(w, r, lim.JSONBytes, &req) {
 			return
 		}
 		if req.EncodingFormat != "" && req.EncodingFormat != "float" {
@@ -174,12 +224,20 @@ func OpenAIHandler(rt *Runtime) http.Handler {
 			httpErr(w, 400, "input must be a string or a non-empty array of strings")
 			return
 		}
+		if len(texts) > lim.EmbedInputs {
+			httpErr(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("%d inputs exceeds the limit of %d per request", len(texts), lim.EmbedInputs))
+			return
+		}
 		e, err := ensureEmbedder(rt, req.Model)
 		if err != nil {
 			httpErr(w, 503, err.Error())
 			return
 		}
-		vecs, tokens, err := e.Embed(texts)
+		vecs, tokens, err := e.EmbedLimit(texts, lim.EmbedTokens)
+		if errors.Is(err, ErrEmbedTooLarge) {
+			httpErr(w, http.StatusRequestEntityTooLarge, err.Error())
+			return
+		}
 		if err != nil {
 			httpErr(w, 500, err.Error())
 			return
@@ -205,34 +263,32 @@ func OpenAIHandler(rt *Runtime) http.Handler {
 	// as base64 WAV in audio_wav_base64) or "wav" (audio/wav body, text in
 	// the X-Light-Text header).
 	mux.HandleFunc("POST /v1/audio/conversations", func(w http.ResponseWriter, r *http.Request) {
-		if err := r.ParseMultipartForm(64 << 20); err != nil {
-			httpErr(w, 400, "multipart form required: "+err.Error())
+		samples, rate, ok := readWAVUpload(w, r, lim.UploadBytes, lim.ConverseSeconds)
+		if !ok {
 			return
 		}
-		f, _, err := r.FormFile("file")
-		if err != nil {
-			httpErr(w, 400, "missing file field")
-			return
+		opts := ConverseOpts{Greedy: r.FormValue("greedy") == "1"}
+		if s := r.FormValue("extra_seconds"); s != "" {
+			v, err := strconv.ParseFloat(s, 64)
+			if err != nil || math.IsNaN(v) || v < 0 || v > lim.ExtraSeconds {
+				httpErr(w, 400, fmt.Sprintf("extra_seconds must be a number in [0, %g]", lim.ExtraSeconds))
+				return
+			}
+			opts.ExtraSec = v
 		}
-		defer f.Close()
-		raw, err := io.ReadAll(f)
-		if err != nil {
-			httpErr(w, 400, err.Error())
-			return
-		}
-		samples, rate, err := audio.DecodeWAV(raw)
-		if err != nil {
-			httpErr(w, 400, "only WAV input is supported: "+err.Error())
-			return
+		if s := r.FormValue("seed"); s != "" {
+			v, err := strconv.ParseInt(s, 10, 64)
+			if err != nil {
+				httpErr(w, 400, "seed must be an integer")
+				return
+			}
+			opts.Seed = v
 		}
 		sp, err := ensureSpeech(rt, r.FormValue("model"))
 		if err != nil {
 			httpErr(w, 503, err.Error())
 			return
 		}
-		opts := ConverseOpts{Greedy: r.FormValue("greedy") == "1"}
-		opts.ExtraSec, _ = strconv.ParseFloat(r.FormValue("extra_seconds"), 64)
-		opts.Seed, _ = strconv.ParseInt(r.FormValue("seed"), 10, 64)
 		res, err := sp.Converse(samples, rate, opts)
 		if err != nil {
 			httpErr(w, 500, err.Error())
@@ -260,6 +316,78 @@ func OpenAIHandler(rt *Runtime) http.Handler {
 	return cors(mux)
 }
 
+// tooLarge reports whether err comes from an http.MaxBytesReader limit
+// (multipart wraps it without %w, so the message is checked too).
+func tooLarge(err error) bool {
+	var mbe *http.MaxBytesError
+	return errors.As(err, &mbe) || (err != nil && strings.Contains(err.Error(), "request body too large"))
+}
+
+// decodeJSON decodes a body of at most limit bytes into v, writing a 413
+// or 400 and returning false on failure.
+func decodeJSON(w http.ResponseWriter, r *http.Request, limit int64, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		if tooLarge(err) {
+			httpErr(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body exceeds %d bytes", limit))
+		} else {
+			httpErr(w, 400, "invalid JSON: "+err.Error())
+		}
+		return false
+	}
+	return true
+}
+
+// readWAVUpload parses a multipart body of at most limit bytes and decodes
+// its `file` field as WAV of at most maxSec seconds, writing the error
+// response and returning ok=false on failure.
+func readWAVUpload(w http.ResponseWriter, r *http.Request, limit int64, maxSec float64) (samples []float32, rate int, ok bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
+		if tooLarge(err) {
+			httpErr(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("request body exceeds %d bytes", limit))
+		} else {
+			httpErr(w, 400, "multipart form required: "+err.Error())
+		}
+		return nil, 0, false
+	}
+	f, _, err := r.FormFile("file")
+	if err != nil {
+		httpErr(w, 400, "missing file field")
+		return nil, 0, false
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(f) // bounded by limit
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return nil, 0, false
+	}
+	samples, rate, err = audio.DecodeWAV(raw)
+	if err != nil {
+		httpErr(w, 400, "only WAV input is supported: "+err.Error())
+		return nil, 0, false
+	}
+	if sec := float64(len(samples)) / float64(rate); sec > maxSec {
+		httpErr(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("audio is %.0f s, the limit is %.0f s", sec, maxSec))
+		return nil, 0, false
+	}
+	return samples, rate, true
+}
+
+// validateGenOpts checks a chat request's numeric options; "" when valid.
+func validateGenOpts(req chatRequest, lim Limits) string {
+	if req.MaxTokens < 0 || req.MaxTokens > lim.MaxTokens {
+		return fmt.Sprintf("max_tokens must be in [0, %d]", lim.MaxTokens)
+	}
+	if t := req.Temperature; t != nil && (*t < 0 || *t > 100) {
+		return "temperature must be in [0, 100]"
+	}
+	if p := req.TopP; p != nil && (*p < 0 || *p > 1) {
+		return "top_p must be in [0, 1]"
+	}
+	return ""
+}
+
 type chatRequest struct {
 	Model       string    `json:"model"`
 	Messages    []Message `json:"messages"`
@@ -270,21 +398,26 @@ type chatRequest struct {
 	Seed        *int64    `json:"seed"`
 }
 
-func ensureModel(rt *Runtime, id string) (*Model, error) {
-	m := rt.Model()
-	if m != nil && (id == "" || id == m.Spec.ID || strings.EqualFold(id, "default")) {
-		return m, nil
+// acquireModel leases the chat model a request names (a catalog id, or
+// ""/"default" for whatever is loaded), loading it first when another
+// model is loaded. Selection and lease are atomic: the returned lease's
+// model is the requested one and stays loaded until Release.
+func acquireModel(rt *Runtime, id string) (*Lease, error) {
+	anyModel := id == "" || strings.EqualFold(id, "default")
+	l, err := rt.Acquire(func(m *Model) bool { return anyModel || id == m.Spec.ID })
+	if !errors.Is(err, ErrNoModel) {
+		return l, err
 	}
-	if id == "" {
+	if anyModel {
 		return nil, errors.New("no model loaded; pass a catalog id as \"model\"")
 	}
 	entries, _ := Catalog()
 	for _, e := range entries {
 		if e.Spec.ID == id {
-			return rt.Load(e.Spec)
+			return rt.LoadAndAcquire(e.Spec)
 		}
 	}
-	if m != nil {
+	if m := rt.Model(); m != nil {
 		return nil, fmt.Errorf("model %q not in catalog (loaded: %s)", id, m.Spec.ID)
 	}
 	return nil, fmt.Errorf("model %q not in catalog", id)
