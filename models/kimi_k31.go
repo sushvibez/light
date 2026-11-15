@@ -24,8 +24,8 @@ import (
 // sub-layer's input is a softmax mix, per token, of the block snapshots taken
 // every attn_res_block_size layers and the running in-block sum.
 //
-// Forward is a prefill (no KV / recurrent cache); the indexer's top-k is
-// selected on the host.
+// ForwardWithCache decodes incrementally (KimiK31Cache); the indexer's
+// top-k is selected on the host.
 type KimiK31 struct {
 	Cfg     KimiK31Config
 	Embed   *tensor.Tensor // (V, D)
@@ -113,7 +113,7 @@ func (m *KimiK31) attnRes(o *iop, sources []*tensor.Tensor, w, outNorm *tensor.T
 // kda is Kimi Delta Attention on x (B, S, D): q / k / v through SiLU short
 // convolutions, a per-channel forget gate lower_bound·σ(e^A·(f + dt_bias)),
 // the delta rule, then RMSNorm(out)·σ(g_proj x) and o_proj.
-func (m *KimiK31) kda(o *iop, ly *kimiK31Layer, x *tensor.Tensor) *tensor.Tensor {
+func (m *KimiK31) kda(o *iop, ly *kimiK31Layer, x *tensor.Tensor, c *KimiK31Cache, li int) *tensor.Tensor {
 	if o.err != nil {
 		return nil
 	}
@@ -130,7 +130,14 @@ func (m *KimiK31) kda(o *iop, ly *kimiK31Layer, x *tensor.Tensor) *tensor.Tensor
 		if t, err = t.Contiguous(); err != nil {
 			return nil, err
 		}
-		out, _, err := ops.CausalConv1dDepthwise(t, ly.ConvW, nil, true)
+		var state *tensor.Tensor
+		if c != nil {
+			state = c.conv[li]
+		}
+		out, ns, err := ops.CausalConv1dDepthwise(t, ly.ConvW, state, true)
+		if err == nil && c != nil {
+			c.conv[li] = ns
+		}
 		return out, err
 	})
 	conv = o.perm(conv, 0, 2, 1)
@@ -156,42 +163,60 @@ func (m *KimiK31) kda(o *iop, ly *kimiK31Layer, x *tensor.Tensor) *tensor.Tensor
 	if o.err != nil {
 		return nil
 	}
-	core, _, err := ops.KimiDeltaRule(q, k, v, g, beta, nil)
+	var rec *tensor.Tensor
+	if c != nil {
+		rec = c.rec[li]
+	}
+	core, final, err := ops.KimiDeltaRule(q, k, v, g, beta, rec)
 	if err != nil {
 		o.err = err
 		return nil
+	}
+	if c != nil {
+		c.rec[li] = final
 	}
 	gate := o.reshape(o.lin(ly.G, x), B, S, H, hd)
 	out := o.mul(o.do(func() (*tensor.Tensor, error) { return ops.RMSNorm(core, ly.ONormW, 1e-5) }), o.un(ops.Sigmoid, gate))
 	return o.lin(ly.O, o.reshape(out, B, S, qkv))
 }
 
-// dsaSelect is the indexer's per-query key mask (B, 1, S, S): 0 on the
-// index_topk best visible keys by Σ_h relu(q_h·k)·w_h (every visible key
-// while there are no more than index_topk), -inf elsewhere; all visible keys
-// when the layer has no indexer.
-func (m *KimiK31) dsaSelect(o *iop, ly *kimiK31Layer, x, qr *tensor.Tensor) *tensor.Tensor {
+// dsaSelect is the indexer's per-query key mask (B, 1, S, T) for the S
+// queries after P cached tokens (T = P + S): 0 on the index_topk best
+// visible keys by Σ_h relu(q_h·k)·w_h (every visible key while there are no
+// more than index_topk), -inf elsewhere; all visible keys when the layer has
+// no indexer. The index keys are cached in c.
+func (m *KimiK31) dsaSelect(o *iop, ly *kimiK31Layer, x, qr *tensor.Tensor, c *KimiK31Cache, li, P int) *tensor.Tensor {
 	if o.err != nil {
 		return nil
 	}
 	B, S := x.Dim(0), x.Dim(1)
+	T := P + S
 	ninf := float32(math.Inf(-1))
-	mv := make([]float32, B*S*S)
+	mv := make([]float32, B*S*T)
 	for i := range mv {
-		if i%S > i/S%S {
+		if i%T > P+i/T%S {
 			mv[i] = ninf
 		}
 	}
-	if ly.IWqB != nil && S > m.Cfg.DSAConfig.IndexTopk {
-		dc := m.Cfg.DSAConfig
-		nh, dh, topk := dc.IndexNumHeads, dc.IndexHeadDim, dc.IndexTopk
-		iq := o.reshape(o.lin(ly.IWqB, qr), B, S*nh, dh)
-		ik := o.lin(ly.IWk, x)
+	var ik *tensor.Tensor
+	if ly.IWqB != nil {
+		ik = o.lin(ly.IWk, x)
 		if ly.IKNormB != nil {
 			ik = o.ln(ik, ly.IKNormW, ly.IKNormB, m.Cfg.RMSNormEps)
 		} else {
 			ik = m.rms(o, ik, ly.IKNormW)
 		}
+		if c != nil {
+			if c.ik[li] != nil {
+				ik = o.cat(1, c.ik[li], ik)
+			}
+			c.ik[li] = ik
+		}
+	}
+	if ly.IWqB != nil && T > m.Cfg.DSAConfig.IndexTopk {
+		dc := m.Cfg.DSAConfig
+		nh, dh, topk := dc.IndexNumHeads, dc.IndexHeadDim, dc.IndexTopk
+		iq := o.reshape(o.lin(ly.IWqB, qr), B, S*nh, dh)
 		ikT := o.do(func() (*tensor.Tensor, error) {
 			t, err := ik.Transpose(1, 2)
 			if err != nil {
@@ -200,34 +225,34 @@ func (m *KimiK31) dsaSelect(o *iop, ly *kimiK31Layer, x, qr *tensor.Tensor) *ten
 			return t.Contiguous()
 		})
 		w := o.affine(o.lin(ly.IWeights, x), 1/math.Sqrt(float64(dh))/math.Sqrt(float64(nh)), 0)
-		sc := o.reshape(o.un(ops.Relu, o.matmul(iq, ikT)), B, S, nh, S)
-		sv := o.toHost(o.sum(o.mul(sc, o.reshape(w, B, S, nh, 1)), 2)) // (B, S, S)
+		sc := o.reshape(o.un(ops.Relu, o.matmul(iq, ikT)), B, S, nh, T)
+		sv := o.toHost(o.sum(o.mul(sc, o.reshape(w, B, S, nh, 1)), 2)) // (B, S, T)
 		if o.err != nil {
 			return nil
 		}
-		order := make([]int, S)
+		order := make([]int, T)
 		for r := range B * S {
-			t := r % S
+			t := P + r%S
 			if t < topk {
 				continue
 			}
-			row := sv[r*S : r*S+t+1]
+			row := sv[r*T : r*T+t+1]
 			order = order[:t+1]
 			for i := range order {
 				order[i] = i
 			}
 			sort.SliceStable(order, func(a, b int) bool { return row[order[a]] > row[order[b]] })
 			for _, j := range order[topk:] {
-				mv[r*S+j] = ninf
+				mv[r*T+j] = ninf
 			}
 		}
 	}
-	return o.do(func() (*tensor.Tensor, error) { return tensor.New(mv, []int{B, 1, S, S}, m.dev) })
+	return o.do(func() (*tensor.Tensor, error) { return tensor.New(mv, []int{B, 1, S, T}, m.dev) })
 }
 
 // mla is the gated (DSA) multi-head latent attention on x (B, S, D): NoPE,
 // the qk_rope_head_dim key part shared by every head, unrotated.
-func (m *KimiK31) mla(o *iop, ly *kimiK31Layer, x *tensor.Tensor) *tensor.Tensor {
+func (m *KimiK31) mla(o *iop, ly *kimiK31Layer, x *tensor.Tensor, c *KimiK31Cache, li int) *tensor.Tensor {
 	if o.err != nil {
 		return nil
 	}
@@ -249,28 +274,37 @@ func (m *KimiK31) mla(o *iop, ly *kimiK31Layer, x *tensor.Tensor) *tensor.Tensor
 		}
 		k = o.cat(3, k, o.cat(2, copies...))
 	}
+	headMajor := func(t *tensor.Tensor) *tensor.Tensor { // (B, S, H, d) → (B, H, S, d)
+		return o.do(func() (*tensor.Tensor, error) {
+			p, err := t.Permute(0, 2, 1, 3)
+			if err != nil {
+				return nil, err
+			}
+			return p.Contiguous()
+		})
+	}
+	kh, v := headMajor(k), headMajor(o.narrow(kv, 3, nope, dv))
+	P := 0
+	if c != nil {
+		P = c.pos
+		if c.k[li] != nil {
+			kh, v = o.cat(2, c.k[li], kh), o.cat(2, c.v[li], v)
+		}
+		c.k[li], c.v[li] = kh, v
+	}
+	T := P + S
 	kT := o.do(func() (*tensor.Tensor, error) {
-		t, err := k.Permute(0, 2, 3, 1) // (B, H, dk, S)
+		t, err := kh.Transpose(2, 3) // (B, H, dk, T)
 		if err != nil {
 			return nil, err
 		}
 		return t.Contiguous()
 	})
-	v := o.do(func() (*tensor.Tensor, error) {
-		t, err := kv.Narrow(3, nope, dv)
-		if err == nil {
-			t, err = t.Permute(0, 2, 1, 3)
-		}
-		if err != nil {
-			return nil, err
-		}
-		return t.Contiguous()
-	})
-	mask := m.dsaSelect(o, ly, x, qr)
-	sc := o.matmul(o.reshape(q, B*H, S, dk), o.reshape(kT, B*H, dk, S))
-	sc = o.add(o.affine(o.reshape(sc, B, H, S, S), 1/math.Sqrt(float64(dk)), 0), mask)
-	p := o.reshape(o.do(func() (*tensor.Tensor, error) { return ops.Softmax(sc, 3) }), B*H, S, S)
-	att := o.reshape(o.matmul(p, o.reshape(v, B*H, S, dv)), B, H, S, dv)
+	mask := m.dsaSelect(o, ly, x, qr, c, li, P)
+	sc := o.matmul(o.reshape(q, B*H, S, dk), o.reshape(kT, B*H, dk, T))
+	sc = o.add(o.affine(o.reshape(sc, B, H, S, T), 1/math.Sqrt(float64(dk)), 0), mask)
+	p := o.reshape(o.do(func() (*tensor.Tensor, error) { return ops.Softmax(sc, 3) }), B*H, S, T)
+	att := o.reshape(o.matmul(p, o.reshape(v, B*H, T, dv)), B, H, S, dv)
 	out := o.reshape(o.perm(att, 0, 2, 1, 3), B, S, H*dv)
 	if ly.MG != nil {
 		out = o.mul(out, o.un(ops.Sigmoid, o.lin(ly.MG, x)))
@@ -428,11 +462,11 @@ func (m *KimiK31) moe(o *iop, ly *kimiK31Layer, x *tensor.Tensor) *tensor.Tensor
 	return o.reshape(routed, B, S, D)
 }
 
-func (m *KimiK31) mixer(o *iop, ly *kimiK31Layer, x *tensor.Tensor) *tensor.Tensor {
+func (m *KimiK31) mixer(o *iop, ly *kimiK31Layer, x *tensor.Tensor, c *KimiK31Cache, li int) *tensor.Tensor {
 	if ly.KDA {
-		return m.kda(o, ly, x)
+		return m.kda(o, ly, x, c, li)
 	}
-	return m.mla(o, ly, x)
+	return m.mla(o, ly, x, c, li)
 }
 
 func (m *KimiK31) ffn(o *iop, ly *kimiK31Layer, x *tensor.Tensor) *tensor.Tensor {
@@ -442,21 +476,54 @@ func (m *KimiK31) ffn(o *iop, ly *kimiK31Layer, x *tensor.Tensor) *tensor.Tensor
 	return m.moe(o, ly, x)
 }
 
+// KimiK31Cache is the decode state: per KDA layer the short-convolution
+// and recurrent states, per MLA layer the head-major keys / values and the
+// DSA index keys.
+type KimiK31Cache struct {
+	pos       int
+	conv, rec []*tensor.Tensor
+	k, v, ik  []*tensor.Tensor
+}
+
+// NewCache returns an empty decode cache.
+func (m *KimiK31) NewCache() *KimiK31Cache {
+	n := len(m.Layers)
+	return &KimiK31Cache{conv: make([]*tensor.Tensor, n), rec: make([]*tensor.Tensor, n),
+		k: make([]*tensor.Tensor, n), v: make([]*tensor.Tensor, n), ik: make([]*tensor.Tensor, n)}
+}
+
+// Pos is the number of tokens the cache has seen.
+func (c *KimiK31Cache) Pos() int { return c.pos }
+
 // Forward returns the logits (B, S, V) of every position for tokens (B, S).
 func (m *KimiK31) Forward(tokens *tensor.Tensor) (*tensor.Tensor, error) {
+	return m.ForwardWithCache(tokens, nil)
+}
+
+// ForwardWithCache returns the logits (B, S, V) of tokens (B, S) following
+// the cache's (nil: none), and extends the cache with them.
+func (m *KimiK31) ForwardWithCache(tokens *tensor.Tensor, c *KimiK31Cache) (*tensor.Tensor, error) {
 	o := &iop{}
 	cfg := m.Cfg
+	if tokens.Rank() != 2 {
+		return nil, fmt.Errorf("kimi_k31: tokens %v, want (B, S)", tokens.Shape())
+	}
 	B, S := tokens.Dim(0), tokens.Dim(1)
+	done := func(logits *tensor.Tensor) (*tensor.Tensor, error) {
+		if o.err == nil && c != nil {
+			c.pos += S
+		}
+		return logits, o.err
+	}
 	flatTok := o.do(func() (*tensor.Tensor, error) { return tokens.Reshape(B * S) })
 	h := o.reshape(o.do(func() (*tensor.Tensor, error) { return ops.IndexSelect(m.Embed, flatTok) }), B, S, cfg.HiddenSize)
 	bs := cfg.AttnResBlockSize
 	if bs <= 0 { // plain pre-norm residual stream
-		for _, ly := range m.Layers {
-			h = o.add(h, m.mixer(o, ly, m.rms(o, h, ly.InNormW)))
+		for li, ly := range m.Layers {
+			h = o.add(h, m.mixer(o, ly, m.rms(o, h, ly.InNormW), c, li))
 			h = o.add(h, m.ffn(o, ly, m.rms(o, h, ly.PostNormW)))
 		}
-		logits := o.lin(m.LMHead, m.rms(o, h, m.NormW))
-		return logits, o.err
+		return done(o.lin(m.LMHead, m.rms(o, h, m.NormW)))
 	}
 	// Attention Residuals: blocks[j] snapshots the stream at layer j·bs; prefix
 	// is the sum of the sub-layer outputs since the last snapshot (the
@@ -473,7 +540,7 @@ func (m *KimiK31) Forward(tokens *tensor.Tensor) (*tensor.Tensor, error) {
 			blocks = append(blocks, prefix)
 		}
 		x := m.attnRes(o, append(append([]*tensor.Tensor(nil), blocks[:prev]...), prefix), ly.AttnResW, ly.InNormW)
-		a := m.mixer(o, ly, x)
+		a := m.mixer(o, ly, x, c, i)
 		if write {
 			prefix = a
 		} else {
@@ -490,6 +557,5 @@ func (m *KimiK31) Forward(tokens *tensor.Tensor) (*tensor.Tensor, error) {
 		prefix = o.add(prefix, delta)
 	}
 	out := m.attnRes(o, append(append([]*tensor.Tensor(nil), blocks...), prefix), m.OutResW, nil)
-	logits := o.lin(m.LMHead, m.rms(o, out, m.NormW))
-	return logits, o.err
+	return done(o.lin(m.LMHead, m.rms(o, out, m.NormW)))
 }

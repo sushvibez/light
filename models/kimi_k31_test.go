@@ -68,3 +68,77 @@ func TestKimiK31TinyMatchesReference(t *testing.T) {
 		})
 	}
 }
+
+// Prefill, then single tokens and short chunks through KimiK31Cache
+// reproduce the full prompt's logits: KDA conv / recurrent states, MLA
+// keys and values, and DSA index keys once past index_topk (5).
+func TestKimiK31CacheMatchesFullForward(t *testing.T) {
+	raw, err := os.ReadFile("testdata/kimi-k31-tiny.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ref struct{ IDs [][]int64 }
+	if err := json.Unmarshal(raw, &ref); err != nil {
+		t.Fatal(err)
+	}
+	B, S := len(ref.IDs), len(ref.IDs[0])
+	devs := []device.Device{device.CPU()}
+	if g, err := device.WebGPU(0); err == nil {
+		devs = append(devs, g)
+	}
+	for _, dev := range devs {
+		t.Run(fmt.Sprint(dev), func(t *testing.T) {
+			m, err := LoadKimiK31("testdata/kimi-k31-tiny", dev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			span := func(a, n int) *tensor.Tensor {
+				var ids []int64
+				for _, r := range ref.IDs {
+					ids = append(ids, r[a:a+n]...)
+				}
+				x, err := tensor.New(ids, []int{B, n}, dev)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return x
+			}
+			full, err := m.Forward(span(0, S))
+			if err != nil {
+				t.Fatal(err)
+			}
+			fc, _ := full.To(device.CPU())
+			want := tensor.MustSlice[float32](fc)
+			V := len(want) / (B * S)
+			c := m.NewCache()
+			md := 0.0
+			for _, step := range [][2]int{{0, 4}, {4, 1}, {5, 1}, {6, 3}, {9, 1}, {10, 2}} {
+				out, err := m.ForwardWithCache(span(step[0], step[1]), c)
+				if err != nil {
+					t.Fatal(err)
+				}
+				oc, _ := out.To(device.CPU())
+				got := tensor.MustSlice[float32](oc)
+				for b := range B {
+					for s := range step[1] {
+						for v := range V {
+							g := got[(b*step[1]+s)*V+v]
+							w := want[(b*S+step[0]+s)*V+v]
+							md = math.Max(md, math.Abs(float64(g-w)))
+							if g != g {
+								md = math.Inf(1)
+							}
+						}
+					}
+				}
+			}
+			if c.Pos() != S {
+				t.Fatalf("cache at %d, want %d", c.Pos(), S)
+			}
+			t.Logf("cached decode vs full forward: max diff %.3g", md)
+			if !(md <= 1e-4) {
+				t.Errorf("cached logits differ by %.3g", md)
+			}
+		})
+	}
+}
