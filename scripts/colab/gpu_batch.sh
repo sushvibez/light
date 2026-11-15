@@ -217,6 +217,39 @@ for g in "${SEL[@]}"; do
 		LIGHT_TIMINGS=1 LIGHT_PROFILE_GPU=1 "$WORK/light-bin" image -device gpu -cpuprofile "$LOGS/zperf.cpu" -o "$LOGS/zperf.png" -width 1024 -height 1024 -seed 11 $ZI 			"A cozy reading nook by a large window on a rainy evening, warm lamp light, a ginger cat curled on a knitted blanket, shelves of old books, photorealistic" 2>&1 | tee "$LOGS/zperf.log"
 		SUMMARY+=("zperf $(grep -c '^timing' "$LOGS/zperf.log") phases, $(grep -oE 'generated in [0-9.]+ s' "$LOGS/zperf.log")")
 		;;
+	idol)
+		# speridlabs/idol on three of its demo images (black backgrounds cut
+		# out by a flood fill: BiRefNet is not ported yet), 50 steps, 262,144
+		# Gaussians, PLY + turntable views in $LOGS/idol/. DINOv3 is gated: it
+		# needs HF_TOKEN or the token file (hf auth login).
+		[ -x "$WORK/light-bin" ] || go build -o "$WORK/light-bin" ./cmd/light || { SUMMARY+=("$g FAIL build"); continue; }
+		mkdir -p "$LOGS/idol"
+		python3 - "$LOGS/idol" <<'PY'
+import sys, urllib.request
+import numpy as np
+from PIL import Image, ImageDraw, ImageFilter
+out = sys.argv[1]
+for name in ["fig-fox", "food-avocado", "fig-robot-cute"]:
+    src = f"{out}/{name}.webp"
+    urllib.request.urlretrieve(f"https://raw.githubusercontent.com/speridlabs/idol-sdk/main/demo/examples/{name}.webp", src)
+    im = Image.open(src).convert("RGB")
+    m = im.copy()
+    for xy in [(0, 0), (m.width - 1, 0), (0, m.height - 1), (m.width - 1, m.height - 1)]:
+        ImageDraw.floodfill(m, xy, (255, 0, 255), thresh=18)
+    mask = (np.array(m) == [255, 0, 255]).all(-1)
+    a = Image.fromarray(np.where(mask, 0, 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(1))
+    im.putalpha(a)
+    im.save(f"{out}/{name}.png")
+    print("cut", name, f"{(np.array(a) > 127).mean():.2f} object")
+PY
+		for ex in fig-fox food-avocado fig-robot-cute; do
+			say "idol $ex"
+			t0=$SECONDS
+			"$WORK/light-bin" idol -device gpu -o "$LOGS/idol/$ex.ply" "$LOGS/idol/$ex.png" 2>&1 | tr '' '
+' | grep -v '^step' | tee "$LOGS/idol-$ex.log"
+			SUMMARY+=("idol $ex: $(grep -oE '(loaded idol|generated [0-9]+ Gaussians) in [0-9.]+ s' "$LOGS/idol-$ex.log" | paste -sd ' ')  wall $((SECONDS - t0))s")
+		done
+		;;
 	examples)
 		# Example images for scratch/examples: 1024^2 generations kept in
 		# $LOGS/examples/<model>/ (run with colab run --keep, then colab download).
