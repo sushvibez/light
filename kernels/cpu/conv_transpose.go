@@ -5,6 +5,7 @@ import (
 
 	"light/device"
 	"light/dtype"
+	"light/internal/parallel"
 	"light/internal/registry"
 )
 
@@ -113,17 +114,25 @@ func upsampleBilinear2dKernel[T dtype.Numeric](ctx *registry.Context) error {
 	N, C, H, W := inD[0], inD[1], inD[2], inD[3]
 	Hout, Wout := outD[2], outD[3]
 	inS, outS := asSlice[T](in), asSlice[T](out)
-	for oh := range Hout {
-		h0, h1, lh := bilinearSource(oh, H, Hout, align)
-		for ow := range Wout {
-			w0, w1, lw := bilinearSource(ow, W, Wout, align)
-			for nc := range N * C {
-				base := nc * H * W
-				v := (1-lh)*((1-lw)*float64(inS[base+h0*W+w0])+lw*float64(inS[base+h0*W+w1])) +
-					lh*((1-lw)*float64(inS[base+h1*W+w0])+lw*float64(inS[base+h1*W+w1]))
-				outS[nc*Hout*Wout+oh*Wout+ow] = T(v)
+	w0s, w1s, lws := make([]int, Wout), make([]int, Wout), make([]float64, Wout)
+	for ow := range Wout {
+		w0s[ow], w1s[ow], lws[ow] = bilinearSource(ow, W, Wout, align)
+	}
+	// One output row (plane nc, row oh) per work item.
+	parallel.For(N*C*Hout, max(1, 4096/max(1, Wout)), func(lo, hi int) {
+		for r := lo; r < hi; r++ {
+			nc, oh := r/Hout, r%Hout
+			h0, h1, lh := bilinearSource(oh, H, Hout, align)
+			base := nc * H * W
+			row0, row1 := inS[base+h0*W:base+h0*W+W], inS[base+h1*W:base+h1*W+W]
+			dst := outS[nc*Hout*Wout+oh*Wout : nc*Hout*Wout+oh*Wout+Wout]
+			for ow := range Wout {
+				w0, w1, lw := w0s[ow], w1s[ow], lws[ow]
+				v := (1-lh)*((1-lw)*float64(row0[w0])+lw*float64(row0[w1])) +
+					lh*((1-lw)*float64(row1[w0])+lw*float64(row1[w1]))
+				dst[ow] = T(v)
 			}
 		}
-	}
+	})
 	return nil
 }

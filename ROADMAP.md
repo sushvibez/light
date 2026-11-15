@@ -113,9 +113,9 @@ From Hugging Face downloads / trending per category, weighed by what fits
 the laptop (31 GB RAM, Intel iGPU) and the desktop (16 GB GPU) and by what
 Light already has. Sizes are BF16 safetensors.
 
-1. **Idol** (image → 3D Gaussians): done (L4, real weights). Next: BiRefNet
-   background removal (DeformConv2d done; Swin-L + decoder left), speed
-   (428 s vs 55 s upstream per object on the L4).
+1. **Idol** (image → 3D Gaussians): done (L4, real weights), BiRefNet
+   background removal included. Next: speed (428 s vs 55 s upstream per
+   object on the L4; BiRefNet 25-150 s on CPU vs 15-22 s for torch).
 2. **Large MoEs** (all tiny-verified 2026-11-15): GLM-5.3 Flash (truncated
    real weights match; decode cache done) — next the DSA indexer, engine
    chat; DeepSeek-V4.1 Flash — decode cache, truncated real-weight check;
@@ -145,7 +145,7 @@ Light already has. Sizes are BF16 safetensors.
    (condition images in the text stream, VAE encoder, Qwen3-VL vision), the
    prefix KV cache.
 14. Quick non-image wins: Kokoro-82M (TTS), Qwen3-Embedding-0.6B,
-   Depth-Anything-V2, BiRefNet / RMBG-2.0 (background removal), Florence-2.
+   Depth-Anything-V2, RMBG-2.0 (background removal; BiRefNet is in, for Idol), Florence-2.
 15. **LTX-2.5** (queued): 76 GB DiT + 24 GB encoder; Colab only, after Wan
     proves the video path.
 16. **PixelGen** (queued): an SDXL fine-tune; works once SDXL lands

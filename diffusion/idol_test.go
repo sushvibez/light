@@ -39,7 +39,7 @@ func TestIdolConditioningMatchesSDK(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	px, _, err := idolPreprocess(img, ref.Size, ref.Margin)
+	px, _, err := idolPreprocess(img, ref.Size, ref.Margin, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -19,7 +19,8 @@ import (
 )
 
 // IdolPipeline is speridlabs/idol: one image of an object to 3D Gaussians.
-// The image (with its background removed) is encoded by DINOv3 ViT-H+ and
+// The image (its background removed by BiRefNet unless it has an alpha
+// channel) is encoded by DINOv3 ViT-H+ and
 // the FLUX.2 VAE, the denoiser samples the object latent and the input
 // camera (50 Euler steps, CFG 3), the octree decoder places anchor points
 // and the Gaussian decoder turns each into 32 Gaussians.
@@ -27,7 +28,10 @@ type IdolPipeline struct {
 	Model *models.Idol
 	DINO  *models.DINOv3
 	VAE   *models.FluxVAE
-	Dev   device.Device
+	// BiRefNet removes the background of images without alpha; nil when
+	// the repo has no birefnet.safetensors (such images are then refused).
+	BiRefNet *models.BiRefNet
+	Dev      device.Device
 }
 
 // IdolLoadOptions adjust LoadIdolPipeline.
@@ -117,6 +121,15 @@ func LoadIdolPipeline(repo string, dev device.Device, o IdolLoadOptions) (*IdolP
 	if p.VAE.Encoder == nil || p.VAE.BNMean == nil {
 		return nil, fmt.Errorf("idol: %s has no FLUX.2 VAE encoder with batch-norm statistics", vae)
 	}
+	// BiRefNet is optional: without it only images with alpha are accepted.
+	if bdir, err := fetchFiles(repo, "birefnet.safetensors"); err == nil {
+		bpath := filepath.Join(bdir, "birefnet.safetensors")
+		if _, err := os.Stat(bpath); err == nil {
+			if err := load(func() (err error) { p.BiRefNet, err = models.LoadBiRefNet(bpath, dev); return }); err != nil {
+				return nil, err
+			}
+		}
+	}
 	return p, nil
 }
 
@@ -195,7 +208,7 @@ func (p *IdolPipeline) Condition(pixels []float32, S int, eps []float32) (f1, f2
 
 // IdolOptions control one generation.
 type IdolOptions struct {
-	Image        image.Image // an object with its background removed (alpha), or any photo once BiRefNet is ported
+	Image        image.Image // an object with its background removed (alpha), or any photo (BiRefNet cuts it out)
 	Mode         string      // "synthetic" (renders, default) or "real" (photos): the crop margin
 	CropMargin   float64     // overrides Mode's margin
 	Seed         uint64
@@ -241,7 +254,11 @@ func (p *IdolPipeline) Generate(o IdolOptions) (*IdolResult, error) {
 		o.CFG = 0
 	}
 	S := cfg.ImageSize
-	pixels, prepared, err := idolPreprocess(o.Image, S, margin)
+	var matte idolMatte
+	if p.BiRefNet != nil {
+		matte = p.BiRefNet.RemoveBackground
+	}
+	pixels, prepared, err := idolPreprocess(o.Image, S, margin, matte)
 	if err != nil {
 		return nil, err
 	}

@@ -31,7 +31,7 @@ func cmdIdol(args []string) error {
 	f32 := fs.Bool("f32", false, "keep F32 weights (default: 16-bit weight storage, F32 compute)")
 	views := fs.Int("views", 4, "also render this many turntable views from the predicted camera into <name>_views.png (0: none)")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: light idol [flags] <image>\n\nOne image of an object to a 3D Gaussian splat (.ply). The image needs a transparent background (background removal is not ported yet).\n\nflags:")
+		fmt.Fprintln(os.Stderr, "usage: light idol [flags] <image>\n\nOne image of an object to a 3D Gaussian splat (.ply). An image with a transparent background is used as is; any other (a photo, a render on a plain background) has its background removed by BiRefNet (the repo's birefnet.safetensors) first.\n\nflags:")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {

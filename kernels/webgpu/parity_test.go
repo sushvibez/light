@@ -285,6 +285,20 @@ func TestUpsampleNearestParity(t *testing.T) {
 	}
 }
 
+// ops.UpsampleBilinear2d up, down and to 1 x 1, with and without
+// align_corners.
+func TestUpsampleBilinearParity(t *testing.T) {
+	cpu := device.CPU()
+	x := mustNew(t, randF32(2*3*5*7, 83), []int{2, 3, 5, 7}, cpu)
+	for _, s := range [][2]int{{11, 16}, {3, 4}, {1, 1}, {5, 7}} {
+		for _, align := range []bool{false, true} {
+			parity1(t, "upsample_bilinear", x, func(a *tensor.Tensor) (*tensor.Tensor, error) {
+				return ops.UpsampleBilinear2d(a, s[0], s[1], align)
+			}, 1e-5)
+		}
+	}
+}
+
 // ops.Clamp with finite and infinite bounds.
 func TestClampParity(t *testing.T) {
 	cpu := device.CPU()

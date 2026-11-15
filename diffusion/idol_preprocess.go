@@ -134,18 +134,42 @@ func (p *idolPlanes) resize(ow, oh int) *idolPlanes {
 	return r
 }
 
-// idolPreprocess is idol's preprocess_image for an image with a real alpha
-// channel: resize the short side to size, erode the alpha by one pixel,
-// crop a square of margin × the object's bounding box around its centre
-// (outside the image is transparent), resize to size × size and composite
-// on black. Returns the RGB planes (3, size, size) in [0, 1] and the image.
-func idolPreprocess(img image.Image, size int, margin float64) ([]float32, *image.NRGBA, error) {
-	if !idolHasAlpha(img) {
-		return nil, nil, fmt.Errorf("idol: the image has no transparent background; background removal (BiRefNet) is not ported yet, so give an RGBA image with the object cut out")
+// idolMatte predicts an alpha matte (row-major uint8) for RGB planes (3, h,
+// w) in [0, 1]: BiRefNet's remove_background.
+type idolMatte func(rgb []float32, w, h int) ([]uint8, error)
+
+// idolPreprocess is idol's preprocess_image: resize the short side to size;
+// if the image has no real alpha channel, matte (BiRefNet) predicts one
+// from the resized RGB (quantised to 8 bits as the SDK's PIL image is);
+// erode the alpha by one pixel, crop a square of margin × the object's
+// bounding box around its centre (outside the image is transparent),
+// resize to size × size and composite on black. Returns the RGB planes (3,
+// size, size) in [0, 1] and the image.
+func idolPreprocess(img image.Image, size int, margin float64, matte idolMatte) ([]float32, *image.NRGBA, error) {
+	hasAlpha := idolHasAlpha(img)
+	if !hasAlpha && matte == nil {
+		return nil, nil, fmt.Errorf("idol: the image has no transparent background and BiRefNet (birefnet.safetensors) is not loaded, so give an RGBA image with the object cut out")
 	}
 	p := idolPlanesOf(img)
 	sc := float64(size) / float64(min(p.w, p.h))
 	p = p.resize(max(1, int(math.Round(float64(p.w)*sc))), max(1, int(math.Round(float64(p.h)*sc))))
+	if !hasAlpha {
+		n := p.w * p.h
+		rgb := make([]float32, 3*n)
+		for i := range n {
+			for c, pl := range [3][]float64{p.r, p.g, p.b} {
+				pl[i] = math.Round(pl[i]*255) / 255
+				rgb[c*n+i] = float32(pl[i])
+			}
+		}
+		a, err := matte(rgb, p.w, p.h)
+		if err != nil {
+			return nil, nil, fmt.Errorf("idol: background removal: %w", err)
+		}
+		for i := range n {
+			p.a[i] = float64(a[i]) / 255
+		}
+	}
 	// MinFilter(3) on the alpha.
 	er := make([]float64, len(p.a))
 	for y := range p.h {
