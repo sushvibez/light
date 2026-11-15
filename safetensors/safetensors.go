@@ -139,9 +139,16 @@ func LoadTensor(r io.ReaderAt, name string, dev device.Device) (*tensor.Tensor, 
 //
 // Only CPU tensors are supported; callers should `t.To(device.CPU())` first.
 func Write(w io.Writer, tensors map[string]*tensor.Tensor, metadata map[string]string) error {
-	// Pre-validate: all tensors must be CPU and contiguous.
+	// Pre-validate: all tensors must be CPU and contiguous, of a dtype the
+	// format can name, and not use the reserved metadata key.
 	names := make([]string, 0, len(tensors))
 	for n, t := range tensors {
+		if n == "__metadata__" {
+			return fmt.Errorf("safetensors.Write: tensor name %q is reserved", n)
+		}
+		if dtypeString(t.DType()) == "UNKNOWN" {
+			return fmt.Errorf("safetensors.Write: tensor %q: dtype %v has no safetensors encoding", n, t.DType())
+		}
 		if t.Device().Kind() != device.KindCPU {
 			return fmt.Errorf("safetensors.Write: tensor %q not on CPU", n)
 		}
@@ -188,8 +195,12 @@ func Write(w io.Writer, tensors map[string]*tensor.Tensor, metadata map[string]s
 		return err
 	}
 	for _, n := range names {
+		// Exactly the logical bytes: a prefix view (offset 0, contiguous)
+		// can sit on a larger backing allocation whose tail must not leak
+		// into the file and shift every later tensor off its offsets.
 		t := tensors[n]
-		if _, err := w.Write(t.Storage().CPUBytes()); err != nil {
+		size := t.DType().ByteSize(t.NumElements())
+		if _, err := w.Write(t.Storage().CPUBytes()[:size]); err != nil {
 			return err
 		}
 	}
