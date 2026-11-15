@@ -47,9 +47,10 @@ func (t *Tensor) CopyFrom(src *Tensor) error {
 	}
 	switch kind := t.Device().Kind(); kind {
 	case device.KindCPU:
-		dstBuf := dst.storage.CPUBytes()
-		srcBuf := srcC.storage.CPUBytes()
-		copy(dstBuf, srcBuf)
+		// Both are contiguous at offset 0, but either may be a prefix view
+		// over a larger allocation: copy only the logical bytes.
+		n := t.DType().ByteSize(t.NumElements())
+		copy(dst.storage.CPUBytes()[:n], srcC.storage.CPUBytes()[:n])
 		return nil
 	default:
 		fn := copyFns[kind]

@@ -183,26 +183,28 @@ func fillScalar(t *Tensor, v float64) error {
 	}
 	buf := t.storage.CPUBytes()
 	dt := t.DType()
+	// unsafe.SliceData, not &buf[0]: an empty tensor's buffer has no
+	// element 0, and unsafe.Slice of it with length 0 is just empty.
 	switch dt {
 	case dtype.F32:
-		vals := unsafe.Slice((*float32)(unsafe.Pointer(&buf[0])), len(buf)/4)
+		vals := unsafe.Slice((*float32)(unsafe.Pointer(unsafe.SliceData(buf))), len(buf)/4)
 		fv := float32(v)
 		for i := range vals {
 			vals[i] = fv
 		}
 	case dtype.F64:
-		vals := unsafe.Slice((*float64)(unsafe.Pointer(&buf[0])), len(buf)/8)
+		vals := unsafe.Slice((*float64)(unsafe.Pointer(unsafe.SliceData(buf))), len(buf)/8)
 		for i := range vals {
 			vals[i] = v
 		}
 	case dtype.I32:
-		vals := unsafe.Slice((*int32)(unsafe.Pointer(&buf[0])), len(buf)/4)
+		vals := unsafe.Slice((*int32)(unsafe.Pointer(unsafe.SliceData(buf))), len(buf)/4)
 		iv := int32(v)
 		for i := range vals {
 			vals[i] = iv
 		}
 	case dtype.I64:
-		vals := unsafe.Slice((*int64)(unsafe.Pointer(&buf[0])), len(buf)/8)
+		vals := unsafe.Slice((*int64)(unsafe.Pointer(unsafe.SliceData(buf))), len(buf)/8)
 		iv := int64(v)
 		for i := range vals {
 			vals[i] = iv
@@ -219,13 +221,13 @@ func fillScalar(t *Tensor, v float64) error {
 		}
 	case dtype.F16:
 		h := dtype.HalfFromF32(float32(v))
-		vals := unsafe.Slice((*uint16)(unsafe.Pointer(&buf[0])), len(buf)/2)
+		vals := unsafe.Slice((*uint16)(unsafe.Pointer(unsafe.SliceData(buf))), len(buf)/2)
 		for i := range vals {
 			vals[i] = uint16(h)
 		}
 	case dtype.BF16:
 		b := dtype.BF16FromF32(float32(v))
-		vals := unsafe.Slice((*uint16)(unsafe.Pointer(&buf[0])), len(buf)/2)
+		vals := unsafe.Slice((*uint16)(unsafe.Pointer(unsafe.SliceData(buf))), len(buf)/2)
 		for i := range vals {
 			vals[i] = uint16(b)
 		}
@@ -276,7 +278,7 @@ func ToSlice[T dtype.Numeric](t *Tensor) ([]T, error) {
 		return []T{}, nil
 	}
 	buf := t.storage.CPUBytes()
-	src := unsafe.Slice((*T)(unsafe.Pointer(&buf[0])), n)
+	src := unsafe.Slice((*T)(unsafe.Pointer(unsafe.SliceData(buf))), n)
 	out := make([]T, n)
 	copy(out, src)
 	return out, nil
@@ -308,7 +310,7 @@ func ToHalfSlice(t *Tensor) ([]dtype.Half, error) {
 	if n == 0 {
 		return []dtype.Half{}, nil
 	}
-	src := unsafe.Slice((*dtype.Half)(unsafe.Pointer(&buf[0])), n)
+	src := unsafe.Slice((*dtype.Half)(unsafe.Pointer(unsafe.SliceData(buf))), n)
 	out := make([]dtype.Half, n)
 	copy(out, src)
 	return out, nil
@@ -330,7 +332,7 @@ func ToBF16Slice(t *Tensor) ([]dtype.BFloat16, error) {
 	if n == 0 {
 		return []dtype.BFloat16{}, nil
 	}
-	src := unsafe.Slice((*dtype.BFloat16)(unsafe.Pointer(&buf[0])), n)
+	src := unsafe.Slice((*dtype.BFloat16)(unsafe.Pointer(unsafe.SliceData(buf))), n)
 	out := make([]dtype.BFloat16, n)
 	copy(out, src)
 	return out, nil
@@ -366,7 +368,7 @@ func RandN(dt dtype.DType, dims []int, dev device.Device) (*Tensor, error) {
 	buf := cpuT.storage.CPUBytes()
 	switch dt {
 	case dtype.F32:
-		vals := unsafe.Slice((*float32)(unsafe.Pointer(&buf[0])), n)
+		vals := unsafe.Slice((*float32)(unsafe.Pointer(unsafe.SliceData(buf))), n)
 		for i := 0; i < n; i += 2 {
 			u1 := rand.Float64()
 			if u1 < 1e-12 {
@@ -381,7 +383,7 @@ func RandN(dt dtype.DType, dims []int, dev device.Device) (*Tensor, error) {
 			}
 		}
 	case dtype.F64:
-		vals := unsafe.Slice((*float64)(unsafe.Pointer(&buf[0])), n)
+		vals := unsafe.Slice((*float64)(unsafe.Pointer(unsafe.SliceData(buf))), n)
 		for i := 0; i < n; i += 2 {
 			u1 := rand.Float64()
 			if u1 < 1e-12 {
@@ -413,12 +415,12 @@ func Rand(dt dtype.DType, dims []int, dev device.Device) (*Tensor, error) {
 	buf := cpuT.storage.CPUBytes()
 	switch dt {
 	case dtype.F32:
-		vals := unsafe.Slice((*float32)(unsafe.Pointer(&buf[0])), len(buf)/4)
+		vals := unsafe.Slice((*float32)(unsafe.Pointer(unsafe.SliceData(buf))), len(buf)/4)
 		for i := range vals {
 			vals[i] = rand.Float32()
 		}
 	case dtype.F64:
-		vals := unsafe.Slice((*float64)(unsafe.Pointer(&buf[0])), len(buf)/8)
+		vals := unsafe.Slice((*float64)(unsafe.Pointer(unsafe.SliceData(buf))), len(buf)/8)
 		for i := range vals {
 			vals[i] = rand.Float64()
 		}
@@ -446,12 +448,12 @@ func Arange(start, stop, step float64, dt dtype.DType, dev device.Device) (*Tens
 	buf := t.storage.CPUBytes()
 	switch dt {
 	case dtype.F32:
-		vals := unsafe.Slice((*float32)(unsafe.Pointer(&buf[0])), len(buf)/4)
+		vals := unsafe.Slice((*float32)(unsafe.Pointer(unsafe.SliceData(buf))), len(buf)/4)
 		for i := range vals {
 			vals[i] = float32(start + float64(i)*step)
 		}
 	case dtype.F64:
-		vals := unsafe.Slice((*float64)(unsafe.Pointer(&buf[0])), len(buf)/8)
+		vals := unsafe.Slice((*float64)(unsafe.Pointer(unsafe.SliceData(buf))), len(buf)/8)
 		for i := range vals {
 			vals[i] = start + float64(i)*step
 		}
