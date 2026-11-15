@@ -72,3 +72,62 @@ func testGLM5Tiny(t *testing.T, name string) {
 		})
 	}
 }
+
+// Prefill then token-by-token decode through GLM5Cache reproduces
+// transformers' full-prompt logits at every position (CPU and WebGPU).
+func TestGLM5CacheMatchesFullForward(t *testing.T) {
+	raw, err := os.ReadFile("testdata/glm5-tiny.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ref struct {
+		IDs    []int64
+		Logits []float32
+		Vocab  int
+	}
+	if err := json.Unmarshal(raw, &ref); err != nil {
+		t.Fatal(err)
+	}
+	devs := []device.Device{device.CPU()}
+	if g, err := device.WebGPU(0); err == nil {
+		devs = append(devs, g)
+	}
+	for _, dev := range devs {
+		t.Run(fmt.Sprint(dev), func(t *testing.T) {
+			m, err := LoadGLM5("testdata/glm5-tiny", dev)
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := m.NewCache()
+			const prefill = 7
+			var got []float32
+			step := func(ids []int64) {
+				x, err := tensor.New(ids, []int{1, len(ids)}, dev)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out, err := m.ForwardWithCache(x, c)
+				if err != nil {
+					t.Fatal(err)
+				}
+				h, _ := out.To(device.CPU())
+				got = append(got, tensor.MustSlice[float32](h)...)
+			}
+			step(ref.IDs[:prefill])
+			for i := prefill; i < len(ref.IDs); i++ {
+				step(ref.IDs[i : i+1])
+			}
+			if c.Len != len(ref.IDs) {
+				t.Errorf("cache length %d, want %d", c.Len, len(ref.IDs))
+			}
+			md := 0.0
+			for i := range got {
+				md = math.Max(md, math.Abs(float64(got[i]-ref.Logits[i])))
+			}
+			t.Logf("prefill %d + %d decode steps: max diff %.3g", prefill, len(ref.IDs)-prefill, md)
+			if !(md <= 1e-3) {
+				t.Errorf("cached logits differ by %.3g", md)
+			}
+		})
+	}
+}

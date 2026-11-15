@@ -486,7 +486,7 @@ func (m *GLM5) l2norm(o *iop, x *tensor.Tensor, eps float64) *tensor.Tensor {
 	return o.do(func() (*tensor.Tensor, error) { return ops.RMSNorm(x, w, eps/float64(D)) })
 }
 
-func (m *GLM5) kda(o *iop, ly *glm5Layer, x *tensor.Tensor) *tensor.Tensor {
+func (m *GLM5) kda(o *iop, ly *glm5Layer, x *tensor.Tensor, c *GLM5Cache, li int) *tensor.Tensor {
 	if o.err != nil {
 		return nil
 	}
@@ -503,7 +503,14 @@ func (m *GLM5) kda(o *iop, ly *glm5Layer, x *tensor.Tensor) *tensor.Tensor {
 		if t, err = t.Contiguous(); err != nil {
 			return nil, err
 		}
-		out, _, err := ops.CausalConv1dDepthwise(t, ly.ConvW, nil, true)
+		var state *tensor.Tensor
+		if c != nil {
+			state = c.conv[li]
+		}
+		out, ns, err := ops.CausalConv1dDepthwise(t, ly.ConvW, state, true)
+		if err == nil && c != nil {
+			c.conv[li] = ns
+		}
 		return out, err
 	})
 	conv = o.perm(conv, 0, 2, 1) // (B, S, 3qkv)
@@ -530,25 +537,36 @@ func (m *GLM5) kda(o *iop, ly *glm5Layer, x *tensor.Tensor) *tensor.Tensor {
 	if o.err != nil {
 		return nil
 	}
-	core, _, err := ops.KimiDeltaRule(q, k, v, g, beta, nil)
+	var rec *tensor.Tensor
+	if c != nil {
+		rec = c.rec[li]
+	}
+	core, final, err := ops.KimiDeltaRule(q, k, v, g, beta, rec)
 	if err != nil {
 		o.err = err
 		return nil
+	}
+	if c != nil {
+		c.rec[li] = final
 	}
 	gate := o.reshape(o.lin(ly.GB, o.lin(ly.GA, x)), B, S, H, hd)
 	out := o.mul(m.rms(o, core, ly.ONormW), o.un(ops.Sigmoid, gate))
 	return o.lin(ly.O, o.reshape(out, B, S, qkv))
 }
 
-func (m *GLM5) mla(o *iop, ly *glm5Layer, x *tensor.Tensor) *tensor.Tensor {
+func (m *GLM5) mla(o *iop, ly *glm5Layer, x *tensor.Tensor, c *GLM5Cache, li int) *tensor.Tensor {
 	if o.err != nil {
 		return nil
 	}
 	cfg := m.Cfg
 	B, S := x.Dim(0), x.Dim(1)
 	H, dk, dv := cfg.NumHeads, cfg.QKNopeHeadDim+cfg.QKRopeHeadDim, cfg.VHeadDim
-	if cfg.IndexTopk > 0 && S > cfg.IndexTopk {
-		o.err = fmt.Errorf("glm5: %d tokens exceed index_topk %d; the sparse-attention indexer is not ported yet", S, cfg.IndexTopk)
+	P := 0 // cached positions before these tokens
+	if c != nil {
+		P = c.Len
+	}
+	if cfg.IndexTopk > 0 && P+S > cfg.IndexTopk {
+		o.err = fmt.Errorf("glm5: %d tokens exceed index_topk %d; the sparse-attention indexer is not ported yet", P+S, cfg.IndexTopk)
 		return nil
 	}
 	q := o.lin(ly.QB, m.rms(o, o.lin(ly.QA, x), ly.QANormW))
@@ -557,14 +575,22 @@ func (m *GLM5) mla(o *iop, ly *glm5Layer, x *tensor.Tensor) *tensor.Tensor {
 	kv = o.reshape(o.lin(ly.KVB, kv), B, S, H, cfg.QKNopeHeadDim+dv)
 	k := o.perm(o.narrow(kv, 3, 0, cfg.QKNopeHeadDim), 0, 2, 1, 3)
 	v := o.perm(o.narrow(kv, 3, cfg.QKNopeHeadDim, dv), 0, 2, 1, 3)
+	if c != nil { // append to the cached keys / values (no RoPE: positions need no fix-up)
+		k, v = o.reshape(k, B, H, S, cfg.QKNopeHeadDim), o.reshape(v, B, H, S, dv)
+		if c.k[li] != nil {
+			k, v = o.cat(2, c.k[li], k), o.cat(2, c.v[li], v)
+		}
+		c.k[li], c.v[li] = k, v
+	}
+	T := P + S
 	mask := o.do(func() (*tensor.Tensor, error) {
-		mv := make([]float32, S*S)
+		mv := make([]float32, S*T)
 		for i := range S {
-			for j := i + 1; j < S; j++ {
-				mv[i*S+j] = float32(math.Inf(-1))
+			for j := P + i + 1; j < T; j++ {
+				mv[i*T+j] = float32(math.Inf(-1))
 			}
 		}
-		return tensor.New(mv, []int{1, 1, S, S}, m.dev)
+		return tensor.New(mv, []int{1, 1, S, T}, m.dev)
 	})
 	a := o.do(func() (*tensor.Tensor, error) {
 		qc, err := q.Contiguous()
@@ -663,8 +689,30 @@ func (m *GLM5) moe(o *iop, ly *glm5Layer, x *tensor.Tensor) *tensor.Tensor {
 	return o.reshape(out, B, S, D)
 }
 
+// GLM5Cache holds a sequence's state between ForwardWithCache calls: each
+// delta-attention layer's short-convolution tail and recurrent state, and
+// each MLA layer's keys and values.
+type GLM5Cache struct {
+	Len       int // positions already processed
+	conv, rec []*tensor.Tensor
+	k, v      []*tensor.Tensor
+}
+
+// NewCache returns an empty cache for m.
+func (m *GLM5) NewCache() *GLM5Cache {
+	n := len(m.Layers)
+	return &GLM5Cache{conv: make([]*tensor.Tensor, n), rec: make([]*tensor.Tensor, n),
+		k: make([]*tensor.Tensor, n), v: make([]*tensor.Tensor, n)}
+}
+
 // Forward returns the logits (B, S, V) of every position for tokens (B, S).
 func (m *GLM5) Forward(tokens *tensor.Tensor) (*tensor.Tensor, error) {
+	return m.ForwardWithCache(tokens, nil)
+}
+
+// ForwardWithCache runs tokens (B, S) after the positions already in cache
+// (nil: none, nothing kept) and returns their logits (B, S, V).
+func (m *GLM5) ForwardWithCache(tokens *tensor.Tensor, cache *GLM5Cache) (*tensor.Tensor, error) {
 	o := &iop{}
 	cfg := m.Cfg
 	B, S := tokens.Dim(0), tokens.Dim(1)
@@ -676,7 +724,7 @@ func (m *GLM5) Forward(tokens *tensor.Tensor) (*tensor.Tensor, error) {
 		copies[i] = h
 	}
 	streams := o.cat(2, copies...) // (B, S, N, D)
-	for _, ly := range m.Layers {
+	for li, ly := range m.Layers {
 		pre, post, combT := m.hcWeights(o, &ly.AttnHC, streams)
 		x := o.do(func() (*tensor.Tensor, error) {
 			p, err := ops.Mul(streams, pre)
@@ -687,9 +735,9 @@ func (m *GLM5) Forward(tokens *tensor.Tensor) (*tensor.Tensor, error) {
 		})
 		x = m.rms(o, x, ly.InNormW)
 		if ly.Linear {
-			x = m.kda(o, ly, x)
+			x = m.kda(o, ly, x, cache, li)
 		} else {
-			x = m.mla(o, ly, x)
+			x = m.mla(o, ly, x, cache, li)
 		}
 		streams = m.hcCombine(o, x, streams, post, combT)
 		pre, post, combT = m.hcWeights(o, &ly.FFNHC, streams)
@@ -710,5 +758,8 @@ func (m *GLM5) Forward(tokens *tensor.Tensor) (*tensor.Tensor, error) {
 	}
 	mean := o.do(func() (*tensor.Tensor, error) { return ops.Mean(streams, ops.ReduceOptions{Axes: []int{2}}) })
 	logits := o.lin(m.LMHead, m.rms(o, mean, m.NormW))
+	if cache != nil && o.err == nil {
+		cache.Len += S
+	}
 	return logits, o.err
 }
