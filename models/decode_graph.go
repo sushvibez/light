@@ -3,7 +3,6 @@ package models
 import (
 	"errors"
 	"fmt"
-	"unsafe"
 
 	"light/device"
 	"light/dtype"
@@ -187,7 +186,7 @@ func (g *DecodeGraph) Step(tok int64) (*tensor.Tensor, error) {
 			return nil, err
 		}
 	}
-	*(*int64)(unsafe.Pointer(g.tokHost)) = tok
+	cudart.StoreHostInt64(g.tokHost, tok)
 	if err := cudart.MemcpyHtoDAsyncOn(g.tok.Storage().CUDAPtr(), g.tokHost, 8, g.stream); err != nil {
 		return nil, err
 	}
