@@ -67,7 +67,8 @@ status are in the commits (and, up to 2026-11-09, the
 | **Muse Glimmer 30B (text)** | `models/muse_glimmer_load.go`, `muse_glimmer_gguf.go` (on the `Gemma3` skeleton) | ✅ Verified 2026-11-08 (30B GGUF Q4) | Gemma 3 skeleton + Muse switches (NoPE globals, output gate, q scale); 30B GGUF Q4 top-5 = reference |
 | **Mellum 2.1 12B-A2.5B** | `models/llama3_load.go` (`model_type` `mellum`, Qwen3-MoE path) | ✅ Verified 2026-11-07 (12B BF16, A100) | Qwen3-MoE + YaRN + per-layer-type RoPE; 12B BF16 matches transformers (A100) |
 | **DeepSeek-V2 / V3** | `models/deepseek_v2.go`, `deepseek_v2_load.go`, `deepseek_route.go` | ✅ Verified 2026-11-08 (V2-Lite-Chat, A100); V3 routing tiny-verified | MLA (latent KV cache) + DeepSeekMoE; V2-Lite-Chat matches transformers (A100); V3 routing tiny-verified |
-| **GLM-5.3 / GLM-5.3-Flash (glm5_next)** | `models/glm5.go`, `ops/kda.go` | ✅ Tiny-verified + truncated real weights 2026-11-15 | Kimi delta attention, MLA without RoPE, sigmoid-routed MoE + shared expert, clamped SwiGLU, 4-stream hyper-connections (Sinkhorn), block-scaled FP8; tiny = transformers within 7.2e-6 (CPU / WebGPU); GLM-5.3-Flash's first 4 layers on real FP8 weights: top-10 = transformers, logits within 0.4 %. Not yet: DSA indexer (> index_topk tokens), KV cache / decode, expert streaming |
+| **GLM-5.3 / GLM-5.3-Flash (glm5_next)** | `models/glm5.go`, `ops/kda.go` | ✅ Tiny-verified + truncated real weights 2026-11-15 | Kimi delta attention, MLA without RoPE, sigmoid-routed MoE + shared expert, clamped SwiGLU, 4-stream hyper-connections (Sinkhorn), block-scaled FP8; tiny = transformers within 7.2e-6 (CPU / WebGPU); GLM-5.3-Flash's first 4 layers on real FP8 weights: top-10 = transformers, logits within 0.4 %. Decode cache (`GLM5Cache`): prefill + decode = transformers' full-prompt logits within 7.3e-6. Not yet: DSA indexer (> index_topk tokens), engine chat, expert streaming |
+| **DeepSeek-V4.1 Flash (deepseek_v41, text)** | `models/deepseek_v41*.go` | ✅ Tiny-verified 2026-11-15 | Hyper-connections, latent single-KV attention with sinks, YaRN RoPE, grouped low-rank output, sliding window + compressed KV, ReLU indexer + candidate blocks, sqrtsoftplus routing, engram n-gram lookups; FP8 32×32 (E8M0) and FP4 experts read as released; tiny = DeepSeek's own model.py (CPU kernels) within 1.9e-6 CPU / 1.7e-6 WebGPU. Not yet: decode cache, real-weight check, vision, DSpark heads |
 | **Kimi K3.1 (kimi_k31, text)** | `models/kimi_k31.go`, `kimi_k31_load.go` | ✅ Tiny-verified 2026-11-15 | KDA (full-rank gate), gated DSA (NoPE MLA + top-k indexer), Attention Residuals, latent MoE (grouped sigmoid routing, shared experts), SiTU-GLU, MXFP4 experts in the released naming; no modeling code anywhere but vLLM, so checked against an F64 port of vLLM's: tiny within 5.7e-5 CPU / 2.4e-5 WebGPU. Real checkpoint (~2 TB) not run. Not yet: KV cache / decode, packed MXFP4 matmul, vision |
 | **GLM-4 (glm, glm4)** | `models/glm_load.go` | ✅ Verified 2026-11-08 (GLM-4-9B-0414, A100) | Interleaved partial RoPE, post-norms; GLM-4-9B-0414 top-5 ids = transformers |
 | **Nemotron** | `models/nemotron_load.go` | ✅ Verified 2026-11-08 (Nemotron-4-Mini 4B, A100) | LayerNorm1P + ReLU² MLP; Nemotron-4-Mini 4B top-5 ids = transformers, 16 / 16 greedy |
@@ -102,12 +103,14 @@ status are in the commits (and, up to 2026-11-09, the
 | **FLUX.2 klein** | `models/flux2.go`, `diffusion/flux2.go` | ✅ Tiny-verified 2026-11-09 | Qwen3 encoder + FLUX.2 DiT; text-to-image within 7.4e-6, multi-reference editing within 8.9e-6 (CPU, WebGPU) |
 | **Qwen-Image 2.1** | `models/qwenimage21.go`, `qwenimage_vae.go`, `diffusion/qwenimage21.go` | ✅ Tiny-verified 2026-11-12 | Block-causal single-stream DiT, Qwen3-VL pre-norm text states, Wan-2.2-style RGBA VAE, exponential shift + terminal stretch; text-to-image within 5.4e-6 (CPU, WebGPU). Editing and the prefix KV cache not wired |
 | **FLUX 3 Image Klein** | `models/flux3.go`, `diffusion/flux3.go` | ✅ Tiny-verified 2026-11-11 | Per-mode + joint DiT, flow-map sampler, Qwen3-VL text (stacked layers, padded window), FLUX.2 VAE; transformer within 2.8e-6 (incl. references), text-to-image within 2.6e-6, editing (1 reference padded, several cropped) within 3e-6 (CPU, WebGPU). Real weights not run yet |
-| **Z-Image (Turbo)** | `models/zimage.go`, `diffusion/zimage.go` | ✅ Tiny-verified 2026-11-09 | Qwen3 encoder + S3-DiT; ZImagePipeline within 4.6e-5, img2img within 6.9e-5 (CPU, WebGPU) |
+| **Z-Image (Turbo)** | `models/zimage.go`, `diffusion/zimage.go` | ✅ Tiny-verified 2026-11-09; real weights (L4) 2026-11-12 | Qwen3 encoder + S3-DiT; ZImagePipeline within 4.6e-5, img2img within 6.9e-5 (CPU, WebGPU). CUDA: 1.95 s per 1024² step on the L4 (§5) |
+| **Idol** (image → 3D Gaussians) | `models/idol*.go`, `models/dinov3.go`, `diffusion/idol*.go`, `splat/` | ✅ Tiny-verified + real weights (L4) 2026-11-15 | speridlabs/idol: RePo-RoPE denoiser, octree + Gaussian decoders, DINOv3 + FLUX.2 VAE conditioning, 3DGS PLY, CPU splat previews; tiny = idol-sdk within 1.4e-5, conditioning within 3.1e-6 (CPU, WebGPU); real 262k-Gaussian objects in `scratch/examples/idol/`. `light idol`. Not yet: BiRefNet (inputs need alpha), speed (428 s vs 55 s upstream on the L4) |
 
 ### 1.4 Vision (classification and detection)
 
 | Model | File | Status | Notes |
 |-------|------|--------|-------|
+| **DINOv3 ViT** | `models/dinov3.go` | ✅ Tiny-verified 2026-11-15 | Register tokens, 2-D rotate-half RoPE, LayerScale, gated / plain MLP; within 5.5e-6 of transformers (CPU, WebGPU); Idol's image encoder |
 | LeNet-5 | `models/lenet.go` | Training | MNIST 98.20% test acc in `examples/22_train_mnist` |
 | AlexNet | `models/alexnet.go` | Training | 5.4M params; 100% eval on `examples/21_train_alexnet` |
 | VGG (11/13/16/19) | `models/vgg.go` | Done — inference + GPU | 138.36M params (VGG-16) on RTX 5060 Ti, 166ms forward; `examples/28_vgg16` |
@@ -187,6 +190,7 @@ are listed in ROADMAP.md.
 
 - [x] Conv1d (CPU + CUDA F32 forward; no backward), causal depthwise Conv1d with carried state (`ops.CausalConv1dDepthwise`, CPU + CUDA F32)
 - [x] Conv2d (cuDNN on CUDA incl. BF16; forward + backward; grouped / depthwise)
+- [x] Modulated deformable Conv2d (`ops.DeformConv2d`, torchvision's deform_conv2d; host gather + GEMM; within 2.9e-6) — 2026-11-15
 - [x] Conv3d (CPU + CUDA F32 forward)
 - [x] ConvTranspose1d / 2d (`ops.ConvTranspose2d`, `nn.ConvTranspose2d`; CUDA `conv_transpose.cu`, 2026-10-28; matches `F.conv_transpose2d`)
 - [x] MaxPool2d / AvgPool2d (forward + backward, CPU + CUDA F32)
@@ -209,6 +213,9 @@ are listed in ROADMAP.md.
 - [x] BF16 inference path (weights, activations, KV cache, scores, LM head; norms stay F32; BF16 Linear + bias rounds once)
 - [x] Speculative decoding (`models.SpecGreedy` with an MTP draft head; output equals greedy) — 2026-11-08
 - [x] Block-diffusion decoding (`Llama.ForwardDiffusion`, `GenerateDiffusion`)
+- [x] BF16 tensor-core flash attention (`ops.FlashAttentionBF16`, CUDA mma.sync, head dim 128, (B, S, H, D) in place; 35 TFLOPS on the L4) — 2026-11-13
+- [x] Kimi delta attention (`ops.KimiDeltaRule`, per-channel decay; host) — 2026-11-15
+- [x] SDPA query chunking above 256 MB of scores (bit-identical; long-sequence attention on WebGPU / CPU) — 2026-11-15
 - [x] `audio`: WAV decoder, resampler, `audio.LogMel` (Whisper), `audio.LogMelFrames` (any length) + `audio.MelFilterBank` (slaney, matches transformers' `mel_filter_bank`)
 - [x] `models.CausalLM` interface; `Llama.Embed` + `Llama.ForwardEmbeds` for multimodal front ends
 
@@ -258,6 +265,7 @@ are listed in ROADMAP.md.
 - [x] Dequant Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q8_0 / Q8_1 / Q2_K–Q8_K (CPU + CUDA parity; WebGPU Q4_0 / Q5_0 / Q8_0 / Q4_K / Q6_K)
 - [x] Quantize Q4_0 / Q5_0 / Q8_0 (`quant.Quantize`, ggml reference rounding; round-trip tested) — 2026-10-28
 - [x] Int8 per-column weight quant (`quant.QuantizeInt8PerColumn`) + int8 × F32 matmul
+- [x] Block-scaled FP8 for any loader using the shared helper (ragged edge blocks and non-FP8 devices widened on the host), FP4 / MXFP4 experts with E8M0 scales widened at load (DeepSeek-V4.1, Kimi K3.1), GPTQ / AWQ for Gemma 4 — 2026-11-15
 - [x] **INT8 W8A8 GEMM** (`ops.MatMulW8A8`, 2026-11-09): activations quantised per row to int8 on the device, int8 × int8 → int32 through `cublasGemmEx(CUBLAS_COMPUTE_32I)` (tensor-core IMMA), row × column scale epilogue; Go reference on other devices (bit-exact int32 path); 88–93 TOPS at M ≥ 512 vs 41–44 TFLOPS for BF16 cuBLAS on the RTX 5060 Ti
 - [x] **GGUF quantized inference**: `ops.MatMulQ` (fused dequant-matmul CUDA kernels for Q4_0 / Q5_0 / Q8_0 / Q4_K / Q5_K / Q6_K; dequant+matmul fallback for the rest), `nn.Linear` accepts quantized weights, `models.LoadLlamaGGUF` (Q/K un-permute for llama arch, `rope_freqs` factors). Qwen2-0.5B Q8_0 / Q4_K_M and Llama-3.2-1B Q4_K_M match transformers greedy; logits within quant noise
 - [x] **Quantized CPU kernels** (2026-11-08): GGUF `matmul_q` for Q4_0 / Q5_0 / Q8_0 / Q4_K / Q6_K and GPTQ / AWQ `int4_gemv` keep weights quantized; AVX2 row decoders (`kernels/cpu/qdecode_amd64.s`, bit-identical to the Go decoders, 5–9× faster per row) feed 48-row tiles into `simd.MatTB`; GGUF tied heads stay quantized (`MatMulQFusedOn`)
@@ -281,6 +289,7 @@ are listed in ROADMAP.md.
 - [x] Chat engine (`engine/`): catalog of HF-cache + GGUF models (chat, STT, embedding, speech, pytorch kinds), chat templates (the model's own Jinja `chat_template`, else built-in ChatML, Llama-3, Phi-3, Phi-4, Mistral, Gemma), streaming generation, diffusion-LM streaming, MTP speculative decoding for greedy requests
 - [x] OpenAI-compatible API: `/v1/models`, `/v1/chat/completions`, `/v1/audio/transcriptions` (Whisper, Qwen3-ASR), `/v1/embeddings` (EmbeddingGemma 2), speech-to-speech `/v1/audio/conversations` (Moshi); speech slot releases the chat model
 - [x] **`light` CLI** (`cmd/light`, replaces `cmd/light-serve`; 2026-11-08): interactive shell with `/` commands (`/model`, `/list`, `/pull`, `/info`, `/rm`, `/clear`, `/system`, `/set temp|top-p|top-k|max-tokens|seed|device|dtype`, `/verbose`, `/serve [addr|stop]`, `/unload`, `/bench`, `/perf`, `/help`, `/exit`; unique prefixes, `"""` multi-line, Ctrl-C stops a reply); subcommands `list` (`-json`), `pull <org/repo> [file ...]`, `run <model> [prompt]` (shell or one-shot / stdin), `info`, `rm`, `serve`, `bench`, `perf`. Device defaults to CUDA when built in, else the CPU (F32 for safetensors ≤ 6 GB); GOGC 25
+- [x] `light idol <image>`: image of an object → 3DGS `.ply` + input crop + turntable preview (`splat.Render`, CPU EWA splatting) — 2026-11-15
 - [x] Per-host performance table (`~/.cache/light/perf.json`, `$LIGHT_PERF_FILE`): per host (CPU, RAM, OS, GPU names per device kind) and model × device: dtype, load time, host RAM and GPU memory growth, prompt length, prefill and decode tok/s; filled by every load / reply and by `light bench` — 2026-11-08
 - [x] Light Studio (Wails v3 + React desktop app) — moved to its own repository, `light-studio`, on 2026-11-08 (history kept; builds against a sibling checkout of this repo)
 
@@ -619,6 +628,7 @@ GGUF decode on CUDA (2026-11-09, `desktop/cuda`: lane-cooperative M = 1 kernels 
 |----------|--------|
 | Moshi speech-to-speech (Moshiko Q8 + Mimi, L4) | 58 ms per 80 ms frame through the engine (1.4× real time); model loop 61.9 ms / frame (LM 34.2, depformer 10.7, Mimi 9.8 + 7.2) |
 | Z-Image-Turbo 1024², 8 steps (L4) | 1.95 s / step (was 9.5 s): Mixed16 BF16 GEMMs, BF16 tensor-core flash attention (35 TFLOPS), fused silu·mul → BF16, folded norm modulation, best-fit caching pool (no cudaMalloc / cudaFree after the first step); transformer load 8.1 s warm (parallel CPU cast of the F32 checkpoint); PSNR 30.5 dB vs the F32 render |
+| Idol, 50 steps, 262,144 Gaussians (L4) | 428 s per object + 4.4 s load (upstream: 54.6 s); fox / avocado / robot turntables match their inputs |
 | Qwen3.5-9B BF16 heavy test (A100) | 32 s for load + prefill + 16 greedy steps |
 | Qwen3.5-27B-FP8, DeepSeek-V2-Lite, GLM-4-9B (A100) | 47–48 s each for load + prefill + 16 decode steps |
 | Qwen3.5-27B / Muse Glimmer 30B GGUF Q4 (A100) | 35–42 s each for load + prefill + 16 decode steps |
