@@ -92,9 +92,8 @@ if os.path.exists(os.path.join(work, "tokenizer_config.json")):
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(work, trust_remote_code=True)
     msgs = [{"role": "user", "content": "What is the capital of France? Answer in one short sentence."}]
-    ids = tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=True)
-    if isinstance(ids, dict):
-        ids = ids["input_ids"]
+    text = tok.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
+    ids = list(tok(text, add_special_tokens=False)["input_ids"])  # the template writes its own specials
 else:
     tok, ids = None, [0, 17, 99, 3, 42, 8, 120, 77]
 prompt = torch.tensor([ids])
