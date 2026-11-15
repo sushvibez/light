@@ -118,8 +118,8 @@ Light already has. Sizes are BF16 safetensors.
    object on the L4; BiRefNet 25-150 s on CPU vs 15-22 s for torch).
 2. **Large MoEs** (all tiny-verified 2026-11-15): GLM-5.3 Flash (truncated
    real weights match; decode cache, DSA indexer done) — next engine chat;
-   DeepSeek-V4.1 Flash (decode cache, on-demand experts done) — truncated
-   real-weight check; Kimi K3.1 (decode cache done) — packed MXFP4 (real
+   DeepSeek-V4.1 Flash (decode cache, on-demand experts, truncated real-weight
+   check done); Kimi K3.1 (decode cache done) — packed MXFP4 (real
    ~2 TB not runnable here). Then expert streaming (DeepSeek's on-demand
    experts + LRU budget generalised, with next-layer router prefetch: Edge0's
    approach) for every MoE, and Edge0-35B-A3B itself (MLX 4-bit + LoRA).
