@@ -10,6 +10,7 @@ import (
 	"light/device"
 	"light/dtype"
 	"light/hub"
+	"light/nn"
 	"light/ops"
 	"light/safetensors"
 	"light/tensor"
@@ -49,6 +50,12 @@ type gemma4HFConfig struct {
 		FullAttention    *gemma4HFRope `json:"full_attention"`
 		SlidingAttention *gemma4HFRope `json:"sliding_attention"`
 	} `json:"rope_parameters"`
+	// PerLayerConfig is how newer transformers saves the full-attention
+	// head (instead of global_head_dim / num_global_key_value_heads).
+	PerLayerConfig map[string]struct {
+		HeadDim          int `json:"head_dim"`
+		NumKeyValueHeads int `json:"num_key_value_heads"`
+	} `json:"per_layer_config"`
 }
 
 func fetchGemma4Config(repo string) (Gemma4Config, error) {
@@ -79,6 +86,17 @@ func fetchGemma4Config(repo string) (Gemma4Config, error) {
 	}
 	if hf.HeadDim == 0 {
 		hf.HeadDim = 256
+	}
+	if hf.GlobalHeadDim == 0 {
+		for _, pl := range hf.PerLayerConfig { // full-attention layers' overrides
+			if pl.HeadDim != 0 {
+				hf.GlobalHeadDim = pl.HeadDim
+				if hf.NumGlobalKeyValueHeads == 0 {
+					hf.NumGlobalKeyValueHeads = pl.NumKeyValueHeads
+				}
+				break
+			}
+		}
 	}
 	if hf.GlobalHeadDim == 0 {
 		hf.GlobalHeadDim = 512
@@ -207,6 +225,53 @@ func (idx *safetensorsIndex) copyInto(dst *tensor.Tensor, name string) error {
 	return dst.CopyFrom(t)
 }
 
+// loadRaw reads a tensor onto the CPU in its stored dtype.
+func (idx *safetensorsIndex) loadRaw(name string) (*tensor.Tensor, error) {
+	f, ok := idx.where[name]
+	if !ok {
+		return nil, fmt.Errorf("missing tensor %q", name)
+	}
+	return safetensors.LoadTensor(f, name, device.CPU())
+}
+
+// loadLinear fills l from module mod: its 4-bit GPTQ / AWQ tensors when
+// the checkpoint quantized it (q set and mod.qweight present), else
+// mod.weight at dt (copied in place, or installed into a placeholder).
+func (idx *safetensorsIndex) loadLinear(l *nn.Linear, mod string, q *int4Config, dt dtype.DType, dev device.Device) error {
+	if q != nil && idx.has(mod+".qweight") {
+		hf := map[string]*tensor.Tensor{}
+		for _, s := range []string{".qweight", ".qzeros", ".scales", ".g_idx"} {
+			if !idx.has(mod + s) {
+				continue
+			}
+			t, err := idx.loadRaw(mod + s)
+			if err != nil {
+				return err
+			}
+			hf[mod+s] = t
+		}
+		w, err := takeInt4(hf, mod, q)
+		if err != nil {
+			return err
+		}
+		if w, err = int4To(w, dev); err != nil {
+			return err
+		}
+		if err := l.SetInt4(w); err != nil {
+			return fmt.Errorf("%s: %w", mod, err)
+		}
+		return nil
+	}
+	if l.W != nil {
+		return idx.copyInto(l.W, mod+".weight")
+	}
+	t, err := idx.load(mod+".weight", dt, dev)
+	if err != nil {
+		return err
+	}
+	return l.SetWeight(t)
+}
+
 // LoadGemma4FromHF loads a Gemma 4 checkpoint text-only (the vision and
 // audio towers of Gemma4ForConditionalGeneration are skipped). weightDT is
 // dtype.F32 or dtype.BF16.
@@ -216,6 +281,13 @@ func LoadGemma4FromHF(repo string, dev device.Device, weightDT dtype.DType) (*Ge
 		return nil, err
 	}
 	cfg.WeightDType = weightDT
+	// GPTQ / AWQ: projections load as 4-bit (or plain where the checkpoint
+	// left them unquantized), so none is allocated at full size first.
+	q4, err := fetchInt4Config(repo)
+	if err != nil {
+		return nil, err
+	}
+	cfg.placeholderLinears = q4 != nil
 	paths, err := hub.DownloadModelSafetensors(repo, "main")
 	if err != nil {
 		return nil, err
@@ -240,6 +312,9 @@ func LoadGemma4FromHF(repo string, dev device.Device, weightDT dtype.DType) (*Ge
 		return nil, err
 	}
 	if m.PLEEmb != nil {
+		if q4 != nil {
+			return nil, fmt.Errorf("gemma4: 4-bit checkpoints with per-layer embeddings (E2B / E4B) are not supported")
+		}
 		if err := idx.copyInto(m.PLEEmb.Weight, prefix+"embed_tokens_per_layer.weight"); err != nil {
 			return nil, err
 		}
@@ -279,39 +354,31 @@ func LoadGemma4FromHF(repo string, dev device.Device, weightDT dtype.DType) (*Ge
 			{b.PreFFNorm.Weight, p + "pre_feedforward_layernorm.weight"},
 			{b.PostFFNorm.Weight, p + "post_feedforward_layernorm.weight"},
 			{b.QNorm.Weight, p + "self_attn.q_norm.weight"},
-			{b.QProj.W, p + "self_attn.q_proj.weight"},
-			{b.OProj.W, p + "self_attn.o_proj.weight"},
-			{b.GateProj.W, p + "mlp.gate_proj.weight"},
-			{b.UpProj.W, p + "mlp.up_proj.weight"},
-			{b.DownProj.W, p + "mlp.down_proj.weight"},
 			{b.LayerScalar, p + "layer_scalar"},
 		}
+		lins := map[string]*nn.Linear{"self_attn.q_proj": b.QProj, "self_attn.o_proj": b.OProj,
+			"mlp.gate_proj": b.GateProj, "mlp.up_proj": b.UpProj, "mlp.down_proj": b.DownProj}
 		if b.KProj != nil {
+			lins["self_attn.k_proj"] = b.KProj
 			pairs = append(pairs, struct {
-				dst  *tensor.Tensor
-				name string
-			}{b.KProj.W, p + "self_attn.k_proj.weight"}, struct {
 				dst  *tensor.Tensor
 				name string
 			}{b.KNorm.Weight, p + "self_attn.k_norm.weight"})
 		}
 		if b.VProj != nil {
-			pairs = append(pairs, struct {
-				dst  *tensor.Tensor
-				name string
-			}{b.VProj.W, p + "self_attn.v_proj.weight"})
+			lins["self_attn.v_proj"] = b.VProj
 		}
 		if b.PLEGate != nil {
+			lins["per_layer_input_gate"], lins["per_layer_projection"] = b.PLEGate, b.PLEProj
 			pairs = append(pairs, struct {
-				dst  *tensor.Tensor
-				name string
-			}{b.PLEGate.W, p + "per_layer_input_gate.weight"}, struct {
-				dst  *tensor.Tensor
-				name string
-			}{b.PLEProj.W, p + "per_layer_projection.weight"}, struct {
 				dst  *tensor.Tensor
 				name string
 			}{b.PostPLENorm.Weight, p + "post_per_layer_input_norm.weight"})
+		}
+		for name, l := range lins {
+			if err := idx.loadLinear(l, p+name, q4, cfg.activationDType(), dev); err != nil {
+				return nil, err
+			}
 		}
 		for _, pr := range pairs {
 			if pr.name == p+"layer_scalar" && !idx.has(pr.name) {

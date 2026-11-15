@@ -47,6 +47,9 @@ type Gemma4Config struct {
 	DoubleWideMLP       bool // on KV-shared layers
 	AttentionKEqV       bool // value = key projection
 	WeightDType         dtype.DType
+	// placeholderLinears builds the projections without weights, for a
+	// loader that installs each as 4-bit (GPTQ / AWQ) or plain.
+	placeholderLinears bool
 }
 
 func (cfg Gemma4Config) activationDType() dtype.DType {
@@ -168,7 +171,12 @@ func NewGemma4(cfg Gemma4Config, dev device.Device) (*Gemma4, error) {
 		return nil, err
 	}
 	norm := func(n int) (*nn.RMSNorm, error) { return nn.NewRMSNormWithDType(n, cfg.RmsEps, act, dev) }
-	lin := func(in, out int) (*nn.Linear, error) { return nn.NewLinearUninit(in, out, false, act, dev) }
+	lin := func(in, out int) (*nn.Linear, error) {
+		if cfg.placeholderLinears {
+			return nn.NewLinearPlaceholder(in, out, false, dev)
+		}
+		return nn.NewLinearUninit(in, out, false, act, dev)
+	}
 	m := &Gemma4{Cfg: cfg, TokenEmb: emb}
 	if cfg.PLEDim > 0 {
 		if m.PLEEmb, err = nn.NewEmbeddingUninit(cfg.PLEVocab, cfg.NumLayers*cfg.PLEDim, act, dev); err != nil {
@@ -290,7 +298,7 @@ func (m *Gemma4) Parameters() []*tensor.Tensor {
 			}
 		}
 		for _, l := range []*nn.Linear{b.QProj, b.KProj, b.VProj, b.OProj, b.GateProj, b.UpProj, b.DownProj, b.PLEGate, b.PLEProj} {
-			if l != nil {
+			if l != nil && l.W != nil { // 4-bit linears hold no float weight
 				ps = append(ps, l.W)
 			}
 		}
