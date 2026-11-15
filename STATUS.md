@@ -104,7 +104,7 @@ status are in the commits (and, up to 2026-11-09, the
 | **Qwen-Image 2.1** | `models/qwenimage21.go`, `qwenimage_vae.go`, `diffusion/qwenimage21.go` | ✅ Tiny-verified 2026-11-12 | Block-causal single-stream DiT, Qwen3-VL pre-norm text states, Wan-2.2-style RGBA VAE, exponential shift + terminal stretch; text-to-image within 5.4e-6 (CPU, WebGPU). Editing and the prefix KV cache not wired |
 | **FLUX 3 Image Klein** | `models/flux3.go`, `diffusion/flux3.go` | ✅ Tiny-verified 2026-11-11 | Per-mode + joint DiT, flow-map sampler, Qwen3-VL text (stacked layers, padded window), FLUX.2 VAE; transformer within 2.8e-6 (incl. references), text-to-image within 2.6e-6, editing (1 reference padded, several cropped) within 3e-6 (CPU, WebGPU). Real weights not run yet |
 | **Z-Image (Turbo)** | `models/zimage.go`, `diffusion/zimage.go` | ✅ Tiny-verified 2026-11-09; real weights (L4) 2026-11-12 | Qwen3 encoder + S3-DiT; ZImagePipeline within 4.6e-5, img2img within 6.9e-5 (CPU, WebGPU). CUDA: 1.95 s per 1024² step on the L4 (§5) |
-| **Idol** (image → 3D Gaussians) | `models/idol*.go`, `models/dinov3.go`, `diffusion/idol*.go`, `splat/` | ✅ Tiny-verified + real weights (L4) 2026-11-15 | speridlabs/idol: RePo-RoPE denoiser, octree + Gaussian decoders, DINOv3 + FLUX.2 VAE conditioning, 3DGS PLY, CPU splat previews; tiny = idol-sdk within 1.4e-5, conditioning within 3.1e-6 (CPU, WebGPU); real 262k-Gaussian objects in `scratch/examples/idol/`. `light idol`. Not yet: BiRefNet (inputs need alpha), speed (428 s vs 55 s upstream on the L4) |
+| **Idol** (image → 3D Gaussians) | `models/idol*.go`, `models/dinov3.go`, `diffusion/idol*.go`, `splat/` | ✅ Tiny-verified + real weights (L4) 2026-11-15 | speridlabs/idol: RePo-RoPE denoiser, octree + Gaussian decoders, DINOv3 + FLUX.2 VAE conditioning, 3DGS PLY, CPU splat previews; tiny = idol-sdk within 1.4e-5, conditioning within 3.1e-6 (CPU, WebGPU); real 262k-Gaussian objects in `scratch/examples/idol/`. `light idol`. CUDA: FP16 tensor-core GEMMs + BF16 flash attention (head dim 64), 153 s per object on the L4 (was 428 s; upstream 55 s). Not yet: BiRefNet (inputs need alpha) |
 
 ### 1.4 Vision (classification and detection)
 
@@ -628,7 +628,7 @@ GGUF decode on CUDA (2026-11-09, `desktop/cuda`: lane-cooperative M = 1 kernels 
 |----------|--------|
 | Moshi speech-to-speech (Moshiko Q8 + Mimi, L4) | 58 ms per 80 ms frame through the engine (1.4× real time); model loop 61.9 ms / frame (LM 34.2, depformer 10.7, Mimi 9.8 + 7.2) |
 | Z-Image-Turbo 1024², 8 steps (L4) | 1.95 s / step (was 9.5 s): Mixed16 BF16 GEMMs, BF16 tensor-core flash attention (35 TFLOPS), fused silu·mul → BF16, folded norm modulation, best-fit caching pool (no cudaMalloc / cudaFree after the first step); transformer load 8.1 s warm (parallel CPU cast of the F32 checkpoint); PSNR 30.5 dB vs the F32 render |
-| Idol, 50 steps, 262,144 Gaussians (L4) | 428 s per object + 4.4 s load (upstream: 54.6 s); fox / avocado / robot turntables match their inputs |
+| Idol, 50 steps, 262,144 Gaussians (L4) | 153 s per object + 4.5 s load (428 s in F32; upstream 54.6 s); fox / avocado / robot turntables match their inputs |
 | Qwen3.5-9B BF16 heavy test (A100) | 32 s for load + prefill + 16 greedy steps |
 | Qwen3.5-27B-FP8, DeepSeek-V2-Lite, GLM-4-9B (A100) | 47–48 s each for load + prefill + 16 decode steps |
 | Qwen3.5-27B / Muse Glimmer 30B GGUF Q4 (A100) | 35–42 s each for load + prefill + 16 decode steps |
