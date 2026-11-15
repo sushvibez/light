@@ -85,51 +85,71 @@ func NewVAEEncoderWith(cfg VAEDecoderConfig, quantConv bool, wdt dtype.DType, de
 // Mode encodes images (B, 3, H, W) in [-1, 1] to the latent mean
 // (B, latent, H / 2^(blocks−1), W / 2^(blocks−1)).
 func (e *VAEEncoder) Mode(x *tensor.Tensor) (*tensor.Tensor, error) {
+	mean, _, err := e.Moments(x)
+	return mean, err
+}
+
+// Moments encodes images (B, 3, H, W) in [-1, 1] to the latent
+// distribution's mean and log-variance (clamped to [−30, 20], as diffusers'
+// DiagonalGaussianDistribution), each (B, latent, H / 2^(blocks−1), ...).
+// A sample is mean + exp(logvar / 2)·ε.
+func (e *VAEEncoder) Moments(x *tensor.Tensor) (mean, logvar *tensor.Tensor, err error) {
 	h, err := e.ConvIn.Forward(x)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for _, b := range e.Down {
 		for _, r := range b.Resnets {
 			if h, err = r.forward(h, nil); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 		if b.Down != nil {
 			// Downsample2D: pad (0, 1, 0, 1) then a stride-2 3 x 3 convolution.
 			if h, err = ops.Pad(h, 3, 0, 1); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if h, err = ops.Pad(h, 2, 0, 1); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			if h, err = b.Down.Forward(h); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
 	if h, err = e.Mid.forward(h); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if h, err = e.NormOut.Forward(h); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if h, err = autograd.SiLU(h); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if h, err = e.ConvOut.Forward(h); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if e.QuantConv != nil {
 		if h, err = e.QuantConv.Forward(h); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	mean, err := h.Narrow(1, 0, e.Cfg.LatentChannels)
-	if err != nil {
-		return nil, err
+	if mean, err = h.Narrow(1, 0, e.Cfg.LatentChannels); err != nil {
+		return nil, nil, err
 	}
-	return mean.Contiguous()
+	if mean, err = mean.Contiguous(); err != nil {
+		return nil, nil, err
+	}
+	if h.Dim(1) < 2*e.Cfg.LatentChannels {
+		return mean, nil, nil
+	}
+	if logvar, err = h.Narrow(1, e.Cfg.LatentChannels, e.Cfg.LatentChannels); err != nil {
+		return nil, nil, err
+	}
+	if logvar, err = ops.Clamp(logvar, -30, 20); err != nil {
+		return nil, nil, err
+	}
+	return mean, logvar, nil
 }
 
 // loadVAEEncoder builds an encoder for cfg and fills it from an
