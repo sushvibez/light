@@ -125,6 +125,13 @@ if os.environ.get("TRELLIS_BACKENDS") != "standin":
         pip("--no-deps", "xformers")
     if try_xformers():
         backends["xformers"] = "xformers " + importlib.import_module("xformers").__version__
+    else:
+        # A wheel that installs but cannot import its kernels (e.g. a missing
+        # mslk) still makes DINOv2's hub code take its xformers branch
+        # (`from xformers.ops import unbind` resolves to a module): remove it
+        # and tell DINOv2 not to look.
+        subprocess.call([sys.executable, "-m", "pip", "uninstall", "-q", "-y", "xformers"])
+        os.environ["XFORMERS_DISABLED"] = "1"
 print("backends:", backends)
 
 backend_check = {}
