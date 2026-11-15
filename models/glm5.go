@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"light/device"
 	"light/dtype"
@@ -161,6 +162,9 @@ func LoadGLM5(dir string, dev device.Device) (*GLM5, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := glm5Rename(hf); err != nil {
+		return nil, err
+	}
 	l := &idolLoader{hf: hf, dev: dev}
 	if q := top.Quant; q != nil && q.Method == "fp8" && len(q.BlockSize) == 2 {
 		l.fp8Block = [2]int{q.BlockSize[0], q.BlockSize[1]} // FP8 weights stay FP8, block-scaled
@@ -231,6 +235,48 @@ func LoadGLM5(dir string, dev device.Device) (*GLM5, error) {
 		return nil, fmt.Errorf("glm5: %w", l.err)
 	}
 	return m, nil
+}
+
+// glm5Rename maps the released checkpoint's names onto transformers'
+// (its conversion_mapping for glm5_next): hc_{attn,ffn}_{fn,base,scale} →
+// {attn,ffn}_hc.*, the forget-gate tensors under forget_gate., and the
+// separate q / k / v short convolutions concatenated into conv1d.
+func glm5Rename(hf map[string]*tensor.Tensor) error {
+	repl := []struct{ from, to string }{
+		{".hc_attn_fn", ".attn_hc.fn"}, {".hc_attn_base", ".attn_hc.base"}, {".hc_attn_scale", ".attn_hc.scale"},
+		{".hc_ffn_fn", ".ffn_hc.fn"}, {".hc_ffn_base", ".ffn_hc.base"}, {".hc_ffn_scale", ".ffn_hc.scale"},
+		{"self_attn.f_a_proj.", "self_attn.forget_gate.f_a_proj."}, {"self_attn.f_b_proj.", "self_attn.forget_gate.f_b_proj."},
+		{"self_attn.dt_bias", "self_attn.forget_gate.dt_bias"}, {"self_attn.A_log", "self_attn.forget_gate.A_log"},
+	}
+	for k, v := range hf {
+		for _, r := range repl {
+			if i := strings.Index(k, r.from); i >= 0 {
+				nk := k[:i] + r.to + k[i+len(r.from):]
+				delete(hf, k)
+				hf[nk] = v
+				break
+			}
+		}
+	}
+	for k := range hf {
+		p, ok := strings.CutSuffix(k, "self_attn.q_conv1d.weight")
+		if !ok {
+			continue
+		}
+		parts := []*tensor.Tensor{hf[k], hf[p+"self_attn.k_conv1d.weight"], hf[p+"self_attn.v_conv1d.weight"]}
+		if parts[1] == nil || parts[2] == nil {
+			return fmt.Errorf("glm5: %s without its k / v convolutions", k)
+		}
+		c, err := ops.Concat(parts, 0)
+		if err != nil {
+			return err
+		}
+		hf[p+"self_attn.conv1d.weight"] = c
+		delete(hf, k)
+		delete(hf, p+"self_attn.k_conv1d.weight")
+		delete(hf, p+"self_attn.v_conv1d.weight")
+	}
+	return nil
 }
 
 // glm5LoadExperts reads the routed experts, fused (transformers' (E, 2I, D)
