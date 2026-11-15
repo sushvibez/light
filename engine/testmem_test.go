@@ -1,36 +1,27 @@
 package engine
 
 import (
-	"bufio"
 	"os"
 	"runtime"
 	"runtime/debug"
-	"strconv"
-	"strings"
 	"testing"
+
+	"light/internal/hostmem"
 )
 
-// Same helpers as models/testmem_test.go: skip when host memory is short,
-// and return model memory to the OS when the test ends.
+// requireHostMemGB (as in models/testmem_test.go) skips the test when less than gb of host memory is
+// available: model loads stage whole checkpoints on the CPU first, and an
+// OOM takes the IDE down with the test. When the platform cannot report it
+// the test is skipped too, unless LIGHT_IGNORE_HOST_MEM=1. Tests of models
+// ≥ 2B params must also be gated on LIGHT_HEAVY_TESTS=1.
 func requireHostMemGB(t *testing.T, gb float64) {
 	t.Helper()
-	f, err := os.Open("/proc/meminfo")
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		if strings.HasPrefix(sc.Text(), "MemAvailable:") {
-			fs := strings.Fields(sc.Text())
-			if len(fs) >= 2 {
-				kb, _ := strconv.ParseFloat(fs[1], 64)
-				if avail := kb / (1 << 20); avail < gb {
-					t.Skipf("need %.0f GB host memory, %.1f GB available", gb, avail)
-				}
-			}
-			return
-		}
+	avail := hostmem.AvailableGB()
+	switch {
+	case avail == 0 && os.Getenv("LIGHT_IGNORE_HOST_MEM") != "1":
+		t.Skipf("need %.0f GB host memory; this platform does not report it (LIGHT_IGNORE_HOST_MEM=1 runs anyway)", gb)
+	case avail > 0 && avail < gb:
+		t.Skipf("need %.0f GB host memory, %.1f GB available", gb, avail)
 	}
 }
 
