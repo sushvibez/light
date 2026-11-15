@@ -43,6 +43,11 @@ type SparseMoE struct {
 	// instead of GateUp / Down: per expert (2I, H), gate rows then up rows,
 	// and (H, I). Forward expands only the routed experts (ops.MoEInt4).
 	GateUpQ4, DownQ4 []quant.Int4
+	// Stream, when set, holds the experts instead of GateUp / Down: only
+	// its slots are resident (see ExpertStream).
+	Stream *ExpertStream
+	// StreamSlots asks the loader for a Stream with this many slots.
+	StreamSlots int
 }
 
 // NewSparseMoEUninit allocates a block with zeroed expert weights at wdt;
@@ -72,6 +77,17 @@ func NewSparseMoELazy(hidden, numExperts, topk int, normTopK bool, dev device.De
 		return nil, err
 	}
 	return &SparseMoE{Gate: gate, TopK: topk, NormTopK: normTopK}, nil
+}
+
+// NewSparseMoEStreamed allocates the router only; the loader attaches an
+// ExpertStream with `slots` resident experts (StreamSlots) instead of
+// GateUp / Down.
+func NewSparseMoEStreamed(hidden, numExperts, topk int, normTopK bool, slots int, wdt dtype.DType, dev device.Device) (*SparseMoE, error) {
+	gate, err := NewLinearUninit(hidden, numExperts, false, wdt, dev)
+	if err != nil {
+		return nil, err
+	}
+	return &SparseMoE{Gate: gate, TopK: topk, NormTopK: normTopK, StreamSlots: slots}, nil
 }
 
 // StackExperts builds GateUp / Down from per-expert (I, H) gate, (I, H) up
@@ -151,16 +167,32 @@ func (m *SparseMoE) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 		}
 		return y.Reshape(dims...)
 	}
-	I := m.GateUp.Dim(1) / 2
-	quantized := m.GateUp.DType().IsQuantized()
+	var y *tensor.Tensor
+	if m.Stream != nil {
+		y, err = m.forwardStreamed(flat, route)
+	} else {
+		y, err = m.runExperts(flat, m.GateUp, m.Down, route)
+	}
+	if err != nil {
+		return nil, err
+	}
+	_ = T
+	return y.Reshape(dims...)
+}
+
+// runExperts is the routed SwiGLU on flat (T, H) with stacked expert
+// weights gateUp (E, 2I, H) / down (E, H, I): (T, H).
+func (m *SparseMoE) runExperts(flat, gateUp, down *tensor.Tensor, route *ops.MoERouting) (*tensor.Tensor, error) {
+	I := gateUp.Dim(1) / 2
+	quantized := gateUp.DType().IsQuantized()
 	if quantized && flat.DType() != dtype.F32 {
-		return nil, fmt.Errorf("nn.SparseMoE: quantized experts (%v) need F32 activations, got %v", m.GateUp.DType(), flat.DType())
+		return nil, fmt.Errorf("nn.SparseMoE: quantized experts (%v) need F32 activations, got %v", gateUp.DType(), flat.DType())
 	}
 	gemm := ops.MoEGemm
 	if quantized {
 		gemm = ops.MoEGemmQ
 	}
-	gu, err := gemm(flat, m.GateUp, route, nil, m.TopK) // (M, 2I)
+	gu, err := gemm(flat, gateUp, route, nil, m.TopK) // (M, 2I)
 	if err != nil {
 		return nil, err
 	}
@@ -186,14 +218,9 @@ func (m *SparseMoE) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 	if err != nil {
 		return nil, err
 	}
-	pair, err := gemm(h, m.Down, route, route.Weights, m.TopK) // (M, H), routing-weighted
+	pair, err := gemm(h, down, route, route.Weights, m.TopK) // (M, H), routing-weighted
 	if err != nil {
 		return nil, err
 	}
-	y, err := ops.MoECombine(pair, m.TopK) // (T, H)
-	if err != nil {
-		return nil, err
-	}
-	_ = T
-	return y.Reshape(dims...)
+	return ops.MoECombine(pair, m.TopK) // (T, H)
 }

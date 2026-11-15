@@ -75,3 +75,21 @@ func TestQwen3MoECUDA(t *testing.T) {
 	// the top-1 id is pinned; values must still be within BF16 noise.
 	checkQwen3MoE(t, dev, dtype.BF16, 2e-2, 1)
 }
+
+// The same check with the experts streamed through 3 slots per layer
+// (LIGHT_EXPERT_SLOTS): the 20-token prompt routes to all 4 experts, so
+// the prefill runs in token chunks and decode cycles the slots.
+func TestQwen3MoEStreamedExpertsCPU(t *testing.T) {
+	qwen3MoECached(t)
+	t.Setenv("LIGHT_EXPERT_SLOTS", "3")
+	checkQwen3MoE(t, device.CPU(), dtype.F32, 2e-4, 5)
+	m, err := LoadCausalLMFromHF(qwen3MoERepo, device.CPU(), dtype.F32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, b := range m.Blocks {
+		if b.MoE.Stream == nil || b.MoE.GateUp != nil {
+			t.Fatalf("layer %d: experts not streamed", i)
+		}
+	}
+}
