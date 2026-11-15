@@ -18,7 +18,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -65,11 +67,62 @@ func ReadHeader(r io.Reader) (Header, error) {
 	default:
 		return h, fmt.Errorf("npy: unsupported version %d.%d", pre[6], pre[7])
 	}
+	if hlen > maxHeaderLen {
+		return h, fmt.Errorf("npy: header length %d exceeds %d", hlen, maxHeaderLen)
+	}
 	raw := make([]byte, hlen)
 	if _, err := io.ReadFull(r, raw); err != nil {
 		return h, fmt.Errorf("npy: read header: %w", err)
 	}
 	return parseHeader(string(raw))
+}
+
+// maxHeaderLen bounds a v2/v3 header (u32 length) before it is allocated.
+// NumPy's own loader refuses headers over 10 000 bytes by default; the dict
+// for any dtype this package supports is far smaller than this.
+const maxHeaderLen = 1 << 20
+
+// numBytes returns the element count and data byte size of a validated
+// header, or an error if either overflows int.
+func (h Header) numBytes() (int, int, error) {
+	n := 1
+	for _, d := range h.Shape {
+		if d < 0 {
+			return 0, 0, fmt.Errorf("npy: negative dim in shape %v", h.Shape)
+		}
+		if d != 0 && n > math.MaxInt/d {
+			return 0, 0, fmt.Errorf("npy: shape %v element count overflows", h.Shape)
+		}
+		n *= d
+	}
+	esz := h.DType.Size()
+	if esz == 0 || n > math.MaxInt/esz {
+		return 0, 0, fmt.Errorf("npy: shape %v of %v byte size overflows", h.Shape, h.DType)
+	}
+	return n, n * esz, nil
+}
+
+// readExact reads exactly n bytes without trusting n for one up-front
+// allocation: a header can claim far more data than the stream holds, so
+// large reads grow in chunks and a short input fails before memory does.
+func readExact(r io.Reader, n int) ([]byte, error) {
+	const chunk = 64 << 20
+	if n <= chunk {
+		buf := make([]byte, n)
+		_, err := io.ReadFull(r, buf)
+		return buf, err
+	}
+	buf := make([]byte, 0, chunk)
+	for len(buf) < n {
+		k := min(chunk, n-len(buf))
+		buf = slices.Grow(buf, k)
+		m, err := io.ReadFull(r, buf[len(buf):len(buf)+k])
+		buf = buf[:len(buf)+m]
+		if err != nil {
+			return buf, err
+		}
+	}
+	return buf, nil
 }
 
 // parseHeader handles the dict literal NumPy writes, e.g.
@@ -96,7 +149,7 @@ func parseHeader(s string) (Header, error) {
 		}
 	}
 	parts = append(parts, s[start:])
-	seen := 0
+	seen := map[string]bool{}
 	for _, p := range parts {
 		p = strings.TrimSpace(p)
 		if p == "" {
@@ -108,6 +161,10 @@ func parseHeader(s string) (Header, error) {
 		}
 		key := strings.Trim(strings.TrimSpace(kv[0]), "'\"")
 		val := strings.TrimSpace(kv[1])
+		if seen[key] {
+			return h, fmt.Errorf("npy: duplicate header key %q", key)
+		}
+		seen[key] = true
 		switch key {
 		case "descr":
 			dt, err := parseDescr(strings.Trim(val, "'\""))
@@ -116,7 +173,14 @@ func parseHeader(s string) (Header, error) {
 			}
 			h.DType = dt
 		case "fortran_order":
-			h.FortranOrder = val == "True"
+			switch val {
+			case "True":
+				h.FortranOrder = true
+			case "False":
+				h.FortranOrder = false
+			default:
+				return h, fmt.Errorf("npy: bad fortran_order %q", val)
+			}
 		case "shape":
 			val = strings.TrimSuffix(strings.TrimPrefix(val, "("), ")")
 			for _, d := range strings.Split(val, ",") {
@@ -133,10 +197,12 @@ func parseHeader(s string) (Header, error) {
 		default:
 			return h, fmt.Errorf("npy: unknown header key %q", key)
 		}
-		seen++
 	}
-	if seen < 3 {
+	if !seen["descr"] || !seen["fortran_order"] || !seen["shape"] {
 		return h, fmt.Errorf("npy: incomplete header %q", s)
+	}
+	if _, _, err := h.numBytes(); err != nil {
+		return h, err
 	}
 	return h, nil
 }
@@ -212,13 +278,13 @@ func Read(r io.Reader, dev device.Device) (*tensor.Tensor, error) {
 	if err != nil {
 		return nil, err
 	}
-	n := 1
-	for _, d := range h.Shape {
-		n *= d
+	_, nBytes, err := h.numBytes()
+	if err != nil {
+		return nil, err
 	}
-	data := make([]byte, h.DType.ByteSize(n))
-	if _, err := io.ReadFull(r, data); err != nil {
-		return nil, fmt.Errorf("npy: read %d data bytes: %w", len(data), err)
+	data, err := readExact(r, nBytes)
+	if err != nil {
+		return nil, fmt.Errorf("npy: read %d data bytes: %w", nBytes, err)
 	}
 	if h.FortranOrder && len(h.Shape) > 1 {
 		data = fortranToC(data, h.Shape, h.DType.Size())
