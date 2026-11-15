@@ -1,0 +1,11 @@
+{
+  "format": "energraft-ebt-v1",
+  "energy_steps": 2,
+  "refinement_relaxation": 0.05,
+  "candidate_initialization": "gaussian",
+  "candidate_initial_std": 1.0,
+  "candidate_coordinates": "probabilities",
+  "candidate_step_size": 1.0,
+  "dtype": "float32",
+  "energy_head_width": 32
+}
