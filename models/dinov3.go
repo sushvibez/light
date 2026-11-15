@@ -154,6 +154,9 @@ func (m *DINOv3) rope(h, w int) (*tensor.Tensor, *tensor.Tensor, error) {
 
 // rotateHalf applies x·cos + rotate_half(x)·sin to (B, H, L, Dh).
 func dinov3Rotate(o *iop, x, cos, sin *tensor.Tensor) *tensor.Tensor {
+	if o.err != nil {
+		return nil
+	}
 	Dh := x.Dim(3)
 	x1, x2 := o.narrow(x, 3, 0, Dh/2), o.narrow(x, 3, Dh/2, Dh/2)
 	rh := o.cat(3, o.un(ops.Neg, x2), x1)

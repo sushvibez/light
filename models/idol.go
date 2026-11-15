@@ -206,6 +206,9 @@ func (f idolFFN) forward(o *iop, x *tensor.Tensor) *tensor.Tensor {
 
 // chunks splits m (B, n·C) into n (B, 1, C) views.
 func idolChunks(o *iop, m *tensor.Tensor, n int) []*tensor.Tensor {
+	if o.err != nil {
+		return make([]*tensor.Tensor, n)
+	}
 	B, C := m.Dim(0), m.Dim(1)/n
 	out := make([]*tensor.Tensor, n)
 	for i := range out {
@@ -222,6 +225,9 @@ func idolModulate(o *iop, h, shift, scale *tensor.Tensor) *tensor.Tensor {
 // attend runs softmax(q·kᵀ/√D)·v over (B, L, H, D) q and (B, S, H, D) k,
 // v, returning (B, L, H·D).
 func idolAttend(o *iop, q, k, v *tensor.Tensor) *tensor.Tensor {
+	if o.err != nil {
+		return nil
+	}
 	B, L, H, D := q.Dim(0), q.Dim(1), q.Dim(2), q.Dim(3)
 	a := o.do(func() (*tensor.Tensor, error) {
 		return nn.SDPA(o.perm(q, 0, 2, 1, 3), o.perm(k, 0, 2, 1, 3), o.perm(v, 0, 2, 1, 3), nil)
@@ -267,6 +273,9 @@ type idolRePo struct {
 
 // angles returns cos and sin (B, L, H, D/2) for hidden states h (B, L, C).
 func (r *idolRePo) angles(o *iop, c *idolCommon, h *tensor.Tensor) (cos, sin *tensor.Tensor) {
+	if o.err != nil {
+		return nil, nil
+	}
 	B, L := h.Dim(0), h.Dim(1)
 	n := c.norm(o, r.Norm, h)
 	d := o.lin(r.Final, o.mul(o.un(ops.SiLU, o.lin(r.Gate, n)), o.lin(r.Content, n)))
@@ -285,6 +294,9 @@ func (r *idolRePo) angles(o *iop, c *idolCommon, h *tensor.Tensor) (cos, sin *te
 // idolRotate rotates interleaved pairs of x (B, L, H, D) by (cos, sin)
 // (B, L, H, D/2): apply_rotary_emb.
 func idolRotate(o *iop, x, cos, sin *tensor.Tensor) *tensor.Tensor {
+	if o.err != nil {
+		return nil
+	}
 	B, L, H, D := x.Dim(0), x.Dim(1), x.Dim(2), x.Dim(3)
 	p := o.reshape(x, B, L, H, D/2, 2)
 	x0, x1 := o.narrow(p, 4, 0, 1), o.narrow(p, 4, 1, 1)
@@ -307,6 +319,9 @@ type idolUnifiedBlock struct {
 }
 
 func (b *idolUnifiedBlock) attn(o *iop, c *idolCommon, h, cos, sin *tensor.Tensor) *tensor.Tensor {
+	if o.err != nil {
+		return nil
+	}
 	B, L := h.Dim(0), h.Dim(1)
 	D := c.C / c.H
 	qkv := o.reshape(o.lin(b.QKV, h), B, L, 3, c.H, D)
@@ -319,6 +334,9 @@ func (b *idolUnifiedBlock) attn(o *iop, c *idolCommon, h, cos, sin *tensor.Tenso
 }
 
 func (b *idolUnifiedBlock) forward(o *iop, c *idolCommon, x, tmod *tensor.Tensor) *tensor.Tensor {
+	if o.err != nil {
+		return nil
+	}
 	cos, sin := b.RePo.angles(o, c, x)
 	if b.ShiftTable == nil {
 		x = o.add(x, b.attn(o, c, c.norm(o, b.Norm1, x), cos, sin))
@@ -435,6 +453,9 @@ type idolMHA struct {
 }
 
 func (a *idolMHA) forward(o *iop, c *idolCommon, x, ctx *tensor.Tensor) *tensor.Tensor {
+	if o.err != nil {
+		return nil
+	}
 	B, L := x.Dim(0), x.Dim(1)
 	D := c.C / c.H
 	var q, k, v *tensor.Tensor
@@ -463,6 +484,9 @@ type idolCrossBlock struct {
 }
 
 func (b *idolCrossBlock) forward(o *iop, c *idolCommon, x, ctx, mod *tensor.Tensor) *tensor.Tensor {
+	if o.err != nil {
+		return nil
+	}
 	if mod != nil {
 		m := idolChunks(o, mod, 6)
 		h := idolModulate(o, c.norm(o, idolNorm{}, x), m[0], m[1])
@@ -484,6 +508,9 @@ type idolPointEmbed struct {
 }
 
 func (e *idolPointEmbed) forward(o *iop, c *idolCommon, pts *tensor.Tensor) *tensor.Tensor {
+	if o.err != nil {
+		return nil
+	}
 	B, L := pts.Dim(0), pts.Dim(1)
 	if e.freqs == nil {
 		fd := c.C / 3 / 2
