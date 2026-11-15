@@ -174,6 +174,16 @@ func TestTrellisGaussiansRealMatchesReference(t *testing.T) {
 		if strings.HasPrefix(name, "rot") {
 			lim = 5e-3 * tol
 		}
+		if name == "opacity" {
+			// The file stores logit(opacity): near opacity 1 a 1e-5
+			// difference becomes a large one in logit space, so compare
+			// the opacities themselves (the column's meaning).
+			for i := range a {
+				a[i] = float32(1 / (1 + math.Exp(-float64(a[i]))))
+				b[i] = float32(1 / (1 + math.Exp(-float64(b[i]))))
+			}
+			name = "opacity (sigmoid)"
+		}
 		stat("save_ply "+name, a, b, lim)
 	}
 
