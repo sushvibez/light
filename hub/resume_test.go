@@ -36,6 +36,7 @@ func newBranchServer(t *testing.T, body, etag string) *branchServer {
 	t.Cleanup(srv.Close)
 	t.Setenv("HF_HOME", t.TempDir())
 	t.Setenv("HF_ENDPOINT", srv.URL)
+	t.Setenv("HF_HUB_OFFLINE", "") // these tests talk to a fake Hub
 	return b
 }
 

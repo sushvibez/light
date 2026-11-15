@@ -3,6 +3,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -37,12 +38,13 @@ func DownloadModelSafetensorsContext(ctx context.Context, repo, revision string)
 		revision = "main"
 	}
 	// Try the single-file form first. On a 404 we fall through to the sharded
-	// layout; other errors (auth, network) bubble up.
+	// layout; other errors (auth, network) bubble up. Offline, a single file
+	// missing from the cache likewise falls through to cached shards.
 	p, sha, err := downloadAt(ctx, repo, revision, "model.safetensors", nil)
 	if err == nil {
 		return []string{p}, nil
 	}
-	if !isHTTPNotFound(err) {
+	if !isHTTPNotFound(err) && !errors.Is(err, ErrOffline) {
 		return nil, err
 	}
 	if sha != "" {

@@ -40,6 +40,7 @@ func newFakeHub(t *testing.T) (*fakeHub, string) {
 	home := t.TempDir()
 	t.Setenv("HF_HOME", home)
 	t.Setenv("HF_ENDPOINT", srv.URL)
+	t.Setenv("HF_HUB_OFFLINE", "") // these tests talk to a fake Hub
 	return h, home
 }
 
@@ -355,6 +356,7 @@ func TestConcurrentDownloadsSerialize(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("HF_HOME", t.TempDir())
 	t.Setenv("HF_ENDPOINT", srv.URL)
+	t.Setenv("HF_HUB_OFFLINE", "") // these tests talk to a fake Hub
 	const n = 6
 	paths, errs := make([]string, n), make([]error, n)
 	start := make(chan struct{})

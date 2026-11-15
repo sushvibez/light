@@ -30,6 +30,7 @@ func TestDownloadCancelDuringSlowBody(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("HF_HOME", t.TempDir())
 	t.Setenv("HF_ENDPOINT", srv.URL)
+	t.Setenv("HF_HUB_OFFLINE", "") // these tests talk to a fake Hub
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -70,6 +71,7 @@ func TestDownloadCancelWhileWaitingOnLock(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("HF_HOME", t.TempDir())
 	t.Setenv("HF_ENDPOINT", srv.URL)
+	t.Setenv("HF_HUB_OFFLINE", "") // these tests talk to a fake Hub
 	cache, _ := CacheDir()
 	dst := filepath.Join(cache, "models--org--locked", "snapshots", shaA, "config.json")
 	unlock, err := lockDest(context.Background(), dst)
@@ -110,6 +112,7 @@ func TestHTTPNotFoundIsTyped(t *testing.T) {
 	}))
 	defer srv.Close()
 	t.Setenv("HF_ENDPOINT", srv.URL)
+	t.Setenv("HF_HUB_OFFLINE", "") // these tests talk to a fake Hub
 
 	_, err := DownloadModelSafetensors("org/flaky", shaA)
 	var he *HTTPError

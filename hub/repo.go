@@ -18,7 +18,8 @@ type RepoFile struct {
 }
 
 // ListFiles returns the files of repo at revision (default "main"), with
-// sizes, from the Hub model API.
+// sizes, from the Hub model API. With HF_HUB_OFFLINE set it lists the
+// cached snapshot instead (see Offline), without any request.
 func ListFiles(repo, revision string) ([]RepoFile, error) {
 	return ListFilesContext(context.Background(), repo, revision)
 }
@@ -27,6 +28,9 @@ func ListFiles(repo, revision string) ([]RepoFile, error) {
 func ListFilesContext(ctx context.Context, repo, revision string) ([]RepoFile, error) {
 	if revision == "" {
 		revision = "main"
+	}
+	if Offline() {
+		return listCached(repo, revision)
 	}
 	apiURL := fmt.Sprintf("%s/api/models/%s/revision/%s?blobs=true", Endpoint(), repo, url.PathEscape(revision))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
@@ -108,6 +112,9 @@ func DownloadToContext(ctx context.Context, repo, revision, filename, dst string
 	}
 	if st, err := os.Stat(dst); err == nil && st.Size() > 0 {
 		return nil
+	}
+	if Offline() {
+		return fmt.Errorf("hub.DownloadTo: %s@%s %s: %w", repo, revision, filename, ErrOffline)
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return err

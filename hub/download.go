@@ -65,6 +65,9 @@ func CacheDir() (string, error) {
 // commit cannot be resolved (offline API, mirror without the API). Those
 // files are not moved into a snapshots/<sha> directory: nothing proves
 // which commit produced them.
+//
+// With HF_HUB_OFFLINE set (see Offline) only the cache is consulted, and a
+// miss returns an error wrapping ErrOffline without any request.
 func Download(repo, revision, filename string) (string, error) {
 	return DownloadContext(context.Background(), repo, revision, filename)
 }
@@ -132,6 +135,10 @@ func downloadAt(ctx context.Context, repo, revision, filename string, progress P
 	if st, err := os.Stat(legacy); err == nil && st.Size() > 0 {
 		return legacy, "", nil
 	}
+	// Offline (HF_HUB_OFFLINE): the cache was all there is.
+	if Offline() {
+		return "", "", fmt.Errorf("hub.Download: %s@%s %s: %w", repo, revision, filename, ErrOffline)
+	}
 	// 3) Resolve the commit SHA. If the API fails (offline, etc.) fetch the
 	//    revision into the legacy layout so we still produce something
 	//    usable — explicitly unpinned.
@@ -164,6 +171,9 @@ func fetchSnapshot(ctx context.Context, repoDir, repo, sha, rel, filename string
 	localPath := filepath.Join(repoDir, "snapshots", sha, rel)
 	if st, err := os.Stat(localPath); err == nil && st.Size() > 0 {
 		return localPath, nil
+	}
+	if Offline() {
+		return "", fmt.Errorf("hub.Download: %s@%s %s: %w", repo, sha, filename, ErrOffline)
 	}
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 		return "", err
