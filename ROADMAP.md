@@ -117,10 +117,11 @@ Light already has. Sizes are BF16 safetensors.
    background removal included. Next: speed (428 s vs 55 s upstream per
    object on the L4; BiRefNet 25-150 s on CPU vs 15-22 s for torch).
 2. **Large MoEs** (all tiny-verified 2026-11-15): GLM-5.3 Flash (truncated
-   real weights match; decode cache done) — next the DSA indexer, engine
-   chat; DeepSeek-V4.1 Flash — decode cache, truncated real-weight check;
-   Kimi K3.1 — decode, packed MXFP4 (real ~2 TB not runnable here).
-   Then expert streaming from SSD with next-layer router prefetch (Edge0's
+   real weights match; decode cache, DSA indexer done) — next engine chat;
+   DeepSeek-V4.1 Flash (decode cache, on-demand experts done) — truncated
+   real-weight check; Kimi K3.1 (decode cache done) — packed MXFP4 (real
+   ~2 TB not runnable here). Then expert streaming (DeepSeek's on-demand
+   experts + LRU budget generalised, with next-layer router prefetch: Edge0's
    approach) for every MoE, and Edge0-35B-A3B itself (MLX 4-bit + LoRA).
 3. **Energraft-EBT-Qwen3-1.7B** (energy-based LM: gradient refinement of
    the next-token candidate through the backbone; uses Light's autograd).
