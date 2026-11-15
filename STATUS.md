@@ -79,6 +79,7 @@ status are in the commits (and, up to 2026-11-09, the
 | **LFM3** | `models/lfm3.go`, `lfm3_load.go` | ✅ Verified 2026-11-11 (1.7B BF16) | Short-conv + full / sliding attention hybrid. No library implements it yet: checked against an F64 PyTorch port of the model code (tiny 1.7e-5; 1.7B top-5 logits 1e-4, 8 / 8 greedy); CPU = WebGPU |
 | **Falcon** | `models/falcon.go`, `falcon_load.go` | ✅ Verified 2026-10-29 | Every decoder variant (ALiBi, MQA, new arch); falcon-rw-1b / 7b match transformers |
 | **SDAR-1.7B-Chat (block-diffusion LM)** | `models/sdar.go` (`Llama.ForwardDiffusion`, `GenerateDiffusion`, `SDAROpts`), `models/llama.go` (block-bidirectional mask, no-store KV pass), `engine/engine.go` (diffusion branch) | ✅ Verified 2026-10-28 | Block-diffusion decoding on a Qwen3 body; first pass = transformers on CUDA BF16 |
+| **LLaDA-8B-Instruct, Dream-v0-Instruct-7B** (masked-diffusion LMs) | `models/masked_diffusion.go` (`LoadLLaDA`, `LLaDAGenerate`, `DreamGenerate`), engine chat | ✅ Tiny-verified + real weights (Colab CPU, F32) 2026-11-15 | Bidirectional Llama / Qwen2 over a mask canvas; LLaDA low-confidence remasking (blocks, CFG, Gumbel), Dream maskgit_plus / topk_margin / entropy / origin with shifted logits; tiny = each release's code within 8.1e-6, identical generations (CPU, WebGPU); real: LLaDA logits within 2.9e-5, Dream 6.1e-5, argmax and 32-token generations identical |
 | **MercyLM** | `models/mercy.go` | Done — pretrained | 15.4M GPT-style LM; `examples/38_mercy_chat` |
 | **T5 encoder (T5 / v1.1 / Flan)** | `models/t5.go` | ✅ Verified 2026-11-09 (t5-v1_1-small) | Hidden states within 5.3e-6 of transformers on CPU and WebGPU; Flux / SD3 text encoder |
 | **BERT** | `models/bert.go`, `models/bert_load.go` | Done — pretrained | bge-small-en-v1.5 embeddings match PyTorch to 7.8e-7 |
@@ -214,6 +215,8 @@ are listed in ROADMAP.md.
 - [x] BF16 inference path (weights, activations, KV cache, scores, LM head; norms stay F32; BF16 Linear + bias rounds once)
 - [x] Speculative decoding (`models.SpecGreedy` with an MTP draft head; output equals greedy) — 2026-11-08
 - [x] Block-diffusion decoding (`Llama.ForwardDiffusion`, `GenerateDiffusion`)
+- [x] MoE expert streaming (`nn.ExpertStream`, `LIGHT_EXPERT_SLOTS`): only N experts per layer resident, read from the mmapped checkpoint on demand (LRU), token-chunked prefill, next-layer router prediction + background prefetch; Qwen2 / Qwen3-MoE loaders; DeepSeek-V4.1 on-demand experts (`ExpertBudget`) — 2026-11-15
+- [x] Energy-based decoding (Energraft: candidate refinement through autograd with frozen linears) — 2026-11-15
 - [x] BF16 tensor-core flash attention (`ops.FlashAttentionBF16`, CUDA mma.sync, head dim 128, (B, S, H, D) in place; 35 TFLOPS on the L4) — 2026-11-13
 - [x] Kimi delta attention (`ops.KimiDeltaRule`, per-channel decay; host) — 2026-11-15
 - [x] SDPA query chunking above 256 MB of scores (bit-identical; long-sequence attention on WebGPU / CPU) — 2026-11-15

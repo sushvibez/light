@@ -73,8 +73,7 @@ GPTQ / AWQ) is complete as of 2026-11-08 except for the items below.
   `light/pth` into the Nemotron loader.
 - Bigger sizes on bigger GPUs: Gemma 3 12B / 27B, Gemma 4 E4B / 12B / 31B
   (quantized path), Whisper beyond tiny.
-- Full-sequence diffusion LMs (LLaDA-8B, Dream-7B): SDAR's mask machinery with
-  block = whole sequence, plus a quantized path to fit 16 GB.
+- LLaDA-8B / Dream-7B (done, F32): a 16-bit or quantized path to fit 16 GB.
 - **TTS**: Kokoro-82M (StyleTTS2 decoder, needs a phonemizer) or Parler-TTS
   (Candle has it); EnCodec / SNAC codecs first, since both emit codec tokens.
 - Encoders: nomic-bert / modernbert (next on the encoder path), RoBERTa (BERT
@@ -125,7 +124,8 @@ Light already has. Sizes are BF16 safetensors.
    approach) for every MoE, and Edge0-35B-A3B itself (MLX 4-bit + LoRA).
 3. **Energraft-EBT-Qwen3-1.7B**: done (real weights match the release's
    code on Colab; `light energraft`).
-4. **LLaDA 8B Instruct**, **Dream 7B** (masked-diffusion LMs).
+4. **LLaDA 8B Instruct**, **Dream 7B**: done (real weights match on Colab;
+   engine chat).
 5. **TRELLIS (image-large, v1)**: image → 3D; sparse 3D convolutions.
 6. **FLUX.2-klein-4B**: done (real weights on CPU and the L4).
 7. **flux-3-image-klein**: text-to-image and editing done (tiny-verified).
