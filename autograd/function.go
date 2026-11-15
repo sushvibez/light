@@ -26,6 +26,36 @@ type Function interface {
 type Context struct {
 	saved []*tensor.Tensor
 	meta  map[string]any
+	// versions snapshots each saved tensor's storage version once Forward
+	// returns; Backward refuses to run if any has been written in place
+	// since (the derivative would silently use the new values).
+	versions []uint64
+}
+
+// snapshotVersions records the storage version of every saved tensor.
+func (c *Context) snapshotVersions() {
+	c.versions = make([]uint64, len(c.saved))
+	for i, t := range c.saved {
+		if t != nil {
+			c.versions[i] = t.Version()
+		}
+	}
+}
+
+// checkVersions reports a saved tensor that was modified in place (via
+// CopyFrom/Assign on it or on any view of its storage) after Forward.
+func (c *Context) checkVersions() error {
+	for i, t := range c.saved {
+		if t == nil || i >= len(c.versions) {
+			continue
+		}
+		if v := t.Version(); v != c.versions[i] {
+			return fmt.Errorf(
+				"saved tensor %d (shape %v) was modified in place after forward (version %d, now %d)",
+				i, t.Shape(), c.versions[i], v)
+		}
+	}
+	return nil
 }
 
 // SaveForBackward stores tensors the Backward pass will need (typically the
@@ -89,6 +119,7 @@ func Apply(fn Function, inputs []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	if !needsGrad {
 		return outputs, nil
 	}
+	ctx.snapshotVersions()
 	node := &FunctionNode{
 		fn:       fn,
 		ctx:      ctx,

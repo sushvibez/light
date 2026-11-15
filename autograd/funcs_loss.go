@@ -153,7 +153,7 @@ func buildOneHot(target *tensor.Tensor, B, C int, dev device.Device) (*tensor.Te
 	for b, cls := range tgt {
 		if cls < 0 || int(cls) >= C {
 			return nil, fmt.Errorf(
-				"CrossEntropyLoss: target[%d]=%d out of range [0, %d)", b, cls, C)
+				"target[%d]=%d out of range [0, %d)", b, cls, C)
 		}
 		data[b*C+int(cls)] = 1
 	}
@@ -165,18 +165,25 @@ func validateCELoss(logits, target *tensor.Tensor) error {
 	if logits.DType() != dtype.F32 {
 		return fmt.Errorf("CrossEntropyLoss: logits must be F32 (got %v)", logits.DType())
 	}
-	if target.DType() != dtype.I64 {
-		return fmt.Errorf("CrossEntropyLoss: target must be I64 (got %v)", target.DType())
-	}
 	if logits.Rank() != 2 {
 		return fmt.Errorf("CrossEntropyLoss: logits must be rank-2 (got %d)", logits.Rank())
 	}
-	if target.Rank() != 1 {
-		return fmt.Errorf("CrossEntropyLoss: target must be rank-1 (got %d)", target.Rank())
+	return validateClassTarget("CrossEntropyLoss", target, logits.Dim(0))
+}
+
+// validateClassTarget checks that target is an I64 rank-1 tensor of exactly
+// batch class indices, before buildOneHot reinterprets its storage. (Class
+// bounds are checked while building the one-hot.)
+func validateClassTarget(name string, target *tensor.Tensor, batch int) error {
+	if target.DType() != dtype.I64 {
+		return fmt.Errorf("%s: target must be I64 (got %v)", name, target.DType())
 	}
-	if logits.Dim(0) != target.Dim(0) {
-		return fmt.Errorf("CrossEntropyLoss: batch mismatch (logits %d vs target %d)",
-			logits.Dim(0), target.Dim(0))
+	if target.Rank() != 1 {
+		return fmt.Errorf("%s: target must be rank-1 (got %d)", name, target.Rank())
+	}
+	if target.Dim(0) != batch {
+		return fmt.Errorf("%s: batch mismatch (input %d vs target %d)",
+			name, batch, target.Dim(0))
 	}
 	return nil
 }
@@ -236,6 +243,9 @@ func NLLLoss(logp, target *tensor.Tensor) (*tensor.Tensor, error) {
 		return nil, fmt.Errorf("NLLLoss: logp must be (B, C), got %v", logp.Shape())
 	}
 	B, C := logp.Dim(0), logp.Dim(1)
+	if err := validateClassTarget("NLLLoss", target, B); err != nil {
+		return nil, err
+	}
 	oneHot, err := buildOneHot(target, B, C, logp.Device())
 	if err != nil {
 		return nil, err
@@ -262,46 +272,147 @@ func NLLLoss(logp, target *tensor.Tensor) (*tensor.Tensor, error) {
 
 // BCEWithLogitsLoss is mean(max(x,0) - x·t + log(1 + e^{-|x|})), the
 // numerically stable binary cross-entropy on logits x against targets t.
+//
+// The forward is the stable composed formula; the backward is the analytic
+// derivative of the smooth loss, (σ(x) - t)/N w.r.t. x and -x/N w.r.t. t.
+// (Differentiating the composed ReLU and Abs separately picks a zero
+// subgradient for both at x = 0 and gives -1 instead of σ(0) - 1 = -0.5.)
 func BCEWithLogitsLoss(logits, target *tensor.Tensor) (*tensor.Tensor, error) {
-	pos, err := ReLU(logits)
+	outs, err := Apply(BCEWithLogitsFunction{}, []*tensor.Tensor{logits, target})
 	if err != nil {
 		return nil, err
 	}
-	xt, err := Mul(logits, target)
+	return outs[0], nil
+}
+
+// BCEWithLogitsFunction is the fused stable BCE-with-logits (mean reduction).
+type BCEWithLogitsFunction struct{}
+
+func (BCEWithLogitsFunction) Name() string { return "BCEWithLogitsLoss" }
+
+func (BCEWithLogitsFunction) Forward(ctx *Context, inputs []*tensor.Tensor) ([]*tensor.Tensor, error) {
+	if len(inputs) != 2 {
+		return nil, fmt.Errorf("BCEWithLogitsLoss: want 2 inputs (logits, target), got %d", len(inputs))
+	}
+	x, t := inputs[0], inputs[1]
+	pos, err := ops.Relu(x)
 	if err != nil {
 		return nil, err
 	}
-	ab, err := Abs(logits)
+	xt, err := ops.Mul(x, t)
 	if err != nil {
 		return nil, err
 	}
-	negAbs, err := Neg(ab)
+	ab, err := ops.Abs(x)
 	if err != nil {
 		return nil, err
 	}
-	e, err := Exp(negAbs)
+	negAbs, err := ops.Neg(ab)
 	if err != nil {
 		return nil, err
 	}
-	one, err := scalarLike(1, logits)
+	e, err := ops.Exp(negAbs)
 	if err != nil {
 		return nil, err
 	}
-	if e, err = Add(e, one); err != nil {
-		return nil, err
-	}
-	lg, err := Log(e)
+	one, err := scalarLike(1, x)
 	if err != nil {
 		return nil, err
 	}
-	t, err := Sub(pos, xt)
+	if e, err = ops.Add(e, one); err != nil {
+		return nil, err
+	}
+	lg, err := ops.Log(e)
 	if err != nil {
 		return nil, err
 	}
-	if t, err = Add(t, lg); err != nil {
+	per, err := ops.Sub(pos, xt)
+	if err != nil {
 		return nil, err
 	}
-	return Mean(t)
+	if per, err = ops.Add(per, lg); err != nil {
+		return nil, err
+	}
+	loss, err := ops.Mean(per, ops.ReduceOptions{})
+	if err != nil {
+		return nil, err
+	}
+	ctx.SaveForBackward(x, t)
+	ctx.Set("n", per.NumElements())
+	ctx.Set("outShape", per.Shape().Dims())
+	return []*tensor.Tensor{loss}, nil
+}
+
+func (BCEWithLogitsFunction) Backward(ctx *Context, gradOutputs []*tensor.Tensor) ([]*tensor.Tensor, error) {
+	g := gradOutputs[0]
+	saved := ctx.Saved()
+	x, t := saved[0], saved[1]
+	nAny, _ := ctx.Get("n")
+	outAny, _ := ctx.Get("outShape")
+	n := nAny.(int)
+	outShape := outAny.([]int)
+
+	// scale = g / N, broadcast against the elementwise loss shape.
+	var invN *tensor.Tensor
+	var err error
+	if g.DType() == dtype.F32 {
+		invN, err = tensor.Full(1.0/float32(n), []int{1}, g.Device())
+	} else {
+		invN, err = fullLike(1/float64(n), []int{1}, g)
+	}
+	if err != nil {
+		return nil, err
+	}
+	scale, err := ops.Mul(g, invN)
+	if err != nil {
+		return nil, err
+	}
+
+	sig, err := ops.Sigmoid(x)
+	if err != nil {
+		return nil, err
+	}
+	d, err := ops.Sub(sig, t)
+	if err != nil {
+		return nil, err
+	}
+	gxRaw, err := ops.Mul(d, scale)
+	if err != nil {
+		return nil, err
+	}
+	gx, err := broadcastReduce(gxRaw, outShape, x.Shape().Dims())
+	if err != nil {
+		return nil, err
+	}
+
+	negX, err := ops.Neg(x)
+	if err != nil {
+		return nil, err
+	}
+	gtRaw, err := ops.Mul(negX, scale)
+	if err != nil {
+		return nil, err
+	}
+	gt, err := broadcastReduce(gtRaw, outShape, t.Shape().Dims())
+	if err != nil {
+		return nil, err
+	}
+	return []*tensor.Tensor{gx, gt}, nil
+}
+
+// broadcastReduce expands g to full (when an operand of a broadcasting
+// forward was smaller than the result) and then sums it back down to want.
+func broadcastReduce(g *tensor.Tensor, full, want []int) (*tensor.Tensor, error) {
+	if !equalDims(g.Shape().Dims(), full) {
+		z, err := tensor.Zeros(g.DType(), full, g.Device())
+		if err != nil {
+			return nil, err
+		}
+		if g, err = ops.Add(z, g); err != nil {
+			return nil, err
+		}
+	}
+	return reduceToShape(g, want)
 }
 
 // HuberLoss is mean(0.5·d² for |d| ≤ delta, delta·(|d| - 0.5·delta) otherwise).

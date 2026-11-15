@@ -161,3 +161,17 @@ func (o *SGD) Step() error {
 func scalarOnDevice(v float32, dev device.Device) (*tensor.Tensor, error) {
 	return tensor.Full(v, []int{1}, dev)
 }
+
+// scalarsOnDevice builds one [1]-shaped F32 tensor per value, failing on the
+// first allocation/transfer error instead of handing a nil tensor to an op.
+func scalarsOnDevice(dev device.Device, vals ...float32) ([]*tensor.Tensor, error) {
+	out := make([]*tensor.Tensor, len(vals))
+	for i, v := range vals {
+		t, err := scalarOnDevice(v, dev)
+		if err != nil {
+			return nil, fmt.Errorf("scalar %v on %v: %w", v, dev, err)
+		}
+		out[i] = t
+	}
+	return out, nil
+}

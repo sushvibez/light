@@ -3,6 +3,7 @@ package autograd
 import (
 	"fmt"
 
+	"light/dtype"
 	"light/ops"
 	"light/tensor"
 )
@@ -30,7 +31,7 @@ func (SumFunction) Backward(ctx *Context, gradOutputs []*tensor.Tensor) ([]*tens
 		return nil, fmt.Errorf("Sum backward: missing shape")
 	}
 	shape := sh.([]int)
-	ones, err := tensor.Full[float32](1.0, shape, g.Device())
+	ones, err := fullLike(1, shape, g)
 	if err != nil {
 		return nil, err
 	}
@@ -71,8 +72,14 @@ func (MeanFunction) Backward(ctx *Context, gradOutputs []*tensor.Tensor) ([]*ten
 	sh, _ := ctx.Get("shape")
 	n, _ := ctx.Get("n")
 	shape := sh.([]int)
-	nInv := float32(1.0) / float32(n.(int))
-	scale, err := tensor.Full[float32](nInv, shape, g.Device())
+	var scale *tensor.Tensor
+	var err error
+	if g.DType() == dtype.F32 {
+		// Keep the F32 path bit-identical: 1/n rounded in float32.
+		scale, err = tensor.Full(float32(1.0)/float32(n.(int)), shape, g.Device())
+	} else {
+		scale, err = fullLike(1/float64(n.(int)), shape, g)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -127,14 +134,14 @@ func (AxisSumFunction) Backward(ctx *Context, gradOutputs []*tensor.Tensor) ([]*
 	// If KeepDims was false, re-insert size-1 axes so `g` has the same rank
 	// as the input; then ops.Mul broadcasts it across those axes.
 	if !keepDims && len(axes) > 0 {
+		norm, err := normalizeAxes(axes, len(xShape))
+		if err != nil {
+			return nil, fmt.Errorf("AxisSum backward: %w", err)
+		}
 		kept := make([]int, len(xShape))
 		copy(kept, xShape)
-		for _, a := range axes {
-			na := a
-			if na < 0 {
-				na += len(xShape)
-			}
-			kept[na] = 1
+		for _, a := range norm {
+			kept[a] = 1
 		}
 		cont, err := g.Contiguous()
 		if err != nil {
@@ -145,7 +152,7 @@ func (AxisSumFunction) Backward(ctx *Context, gradOutputs []*tensor.Tensor) ([]*
 			return nil, err
 		}
 	}
-	ones, err := tensor.Full[float32](1.0, xShape, g.Device())
+	ones, err := fullLike(1, xShape, g)
 	if err != nil {
 		return nil, err
 	}
@@ -167,23 +174,58 @@ func AxisSum(x *tensor.Tensor, axes []int, keepDims bool) (*tensor.Tensor, error
 
 // AxisMean is autograd-aware mean reduction over the given axes.
 // Implemented as AxisSum divided by the product of the reduced axis sizes.
+// Empty axes reduce over every axis, as in AxisSum.
 func AxisMean(x *tensor.Tensor, axes []int, keepDims bool) (*tensor.Tensor, error) {
 	dims := x.Shape().Dims()
+	norm, err := normalizeAxes(axes, len(dims))
+	if err != nil {
+		return nil, fmt.Errorf("AxisMean: %w", err)
+	}
 	n := 1
-	for _, a := range axes {
-		na := a
-		if na < 0 {
-			na += len(dims)
-		}
-		n *= dims[na]
+	for _, a := range norm {
+		n *= dims[a]
 	}
 	s, err := AxisSum(x, axes, keepDims)
 	if err != nil {
 		return nil, err
 	}
-	inv, err := tensor.Full(1.0/float32(n), []int{1}, x.Device())
+	var inv *tensor.Tensor
+	if x.DType() == dtype.F32 {
+		inv, err = tensor.Full(1.0/float32(n), []int{1}, x.Device())
+	} else {
+		inv, err = fullLike(1/float64(n), []int{1}, x)
+	}
 	if err != nil {
 		return nil, err
 	}
 	return Mul(s, inv)
+}
+
+// normalizeAxes resolves negative axes against rank and rejects
+// out-of-range or duplicate entries. Empty axes mean every axis.
+func normalizeAxes(axes []int, rank int) ([]int, error) {
+	if len(axes) == 0 {
+		all := make([]int, rank)
+		for i := range all {
+			all[i] = i
+		}
+		return all, nil
+	}
+	out := make([]int, len(axes))
+	seen := make(map[int]bool, len(axes))
+	for i, a := range axes {
+		na := a
+		if na < 0 {
+			na += rank
+		}
+		if na < 0 || na >= rank {
+			return nil, fmt.Errorf("axis %d out of range for rank %d", a, rank)
+		}
+		if seen[na] {
+			return nil, fmt.Errorf("duplicate axis %d", a)
+		}
+		seen[na] = true
+		out[i] = na
+	}
+	return out, nil
 }

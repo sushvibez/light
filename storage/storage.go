@@ -35,6 +35,12 @@ type Storage struct {
 
 	refcount atomic.Int32
 	release  func()
+
+	// version counts in-place writes through the tensor API (CopyFrom,
+	// Assign). It lives on the storage so every view of the buffer sees the
+	// same count; autograd snapshots it to detect saved inputs mutated
+	// between forward and backward.
+	version atomic.Uint64
 }
 
 // NewCPU allocates a new CPU-backed Storage. The backing byte slice is
@@ -92,6 +98,12 @@ func (s *Storage) CPUBytes() []byte {
 	}
 	return s.cpu
 }
+
+// Version returns the in-place write counter (see Storage.version).
+func (s *Storage) Version() uint64 { return s.version.Load() }
+
+// BumpVersion records an in-place write to the buffer.
+func (s *Storage) BumpVersion() { s.version.Add(1) }
 
 // RefCount returns the current refcount value (for tests/diagnostics).
 func (s *Storage) RefCount() int32 { return s.refcount.Load() }
