@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,23 +20,27 @@ type RepoFile struct {
 // ListFiles returns the files of repo at revision (default "main"), with
 // sizes, from the Hub model API.
 func ListFiles(repo, revision string) ([]RepoFile, error) {
+	return ListFilesContext(context.Background(), repo, revision)
+}
+
+// ListFilesContext is ListFiles with a context for canceling the request.
+func ListFilesContext(ctx context.Context, repo, revision string) ([]RepoFile, error) {
 	if revision == "" {
 		revision = "main"
 	}
 	apiURL := fmt.Sprintf("%s/api/models/%s/revision/%s?blobs=true", Endpoint(), repo, url.PathEscape(revision))
-	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	setHeaders(req)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("hub.ListFiles: GET %s: %w", apiURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("hub.ListFiles: %s: HTTP %d: %s", repo, resp.StatusCode, string(body))
+		return nil, fmt.Errorf("hub.ListFiles: %s: GET %w", repo, newHTTPError(apiURL, resp))
 	}
 	var info struct {
 		SHA      string `json:"sha"`
@@ -72,7 +77,14 @@ type Progress func(done, total int64)
 // DownloadWithProgress is Download reporting progress while it fetches (a
 // file already in the cache returns at once without calling progress).
 func DownloadWithProgress(repo, revision, filename string, progress Progress) (string, error) {
-	return download(repo, revision, filename, progress)
+	return DownloadWithProgressContext(context.Background(), repo, revision, filename, progress)
+}
+
+// DownloadWithProgressContext is DownloadWithProgress with a context (see
+// DownloadContext).
+func DownloadWithProgressContext(ctx context.Context, repo, revision, filename string, progress Progress) (string, error) {
+	p, _, err := downloadAt(ctx, repo, revision, filename, progress)
+	return p, err
 }
 
 // DownloadTo fetches repo's filename (at revision) to the path dst outside
@@ -82,6 +94,11 @@ func DownloadWithProgress(repo, revision, filename string, progress Progress) (s
 // from the commit revision resolves to (falling back to the revision itself
 // when the API is unreachable), so a resumed .part never mixes commits.
 func DownloadTo(repo, revision, filename, dst string, progress Progress) error {
+	return DownloadToContext(context.Background(), repo, revision, filename, dst, progress)
+}
+
+// DownloadToContext is DownloadTo with a context (see DownloadContext).
+func DownloadToContext(ctx context.Context, repo, revision, filename, dst string, progress Progress) error {
 	if revision == "" {
 		revision = "main"
 	}
@@ -96,11 +113,13 @@ func DownloadTo(repo, revision, filename, dst string, progress Progress) error {
 	}
 	rev := revision
 	if !isCommitSHA(rev) {
-		if sha, err := resolveCommitSHA(repo, revision); err == nil {
+		if sha, err := resolveCommitSHA(ctx, repo, revision); err == nil {
 			rev = sha
+		} else if cerr := ctx.Err(); cerr != nil {
+			return fmt.Errorf("hub.DownloadTo: %w", cerr)
 		}
 	}
-	return fetchLocked(resolveURL(repo, rev, filename), dst, progress)
+	return fetchLocked(ctx, resolveURL(repo, rev, filename), dst, progress)
 }
 
 func setHeaders(req *http.Request) {

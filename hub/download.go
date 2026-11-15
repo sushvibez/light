@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -65,11 +66,14 @@ func CacheDir() (string, error) {
 // files are not moved into a snapshots/<sha> directory: nothing proves
 // which commit produced them.
 func Download(repo, revision, filename string) (string, error) {
-	return download(repo, revision, filename, nil)
+	return DownloadContext(context.Background(), repo, revision, filename)
 }
 
-func download(repo, revision, filename string, progress Progress) (string, error) {
-	p, _, err := downloadAt(repo, revision, filename, progress)
+// DownloadContext is Download with a context: canceling ctx aborts the
+// revision lookup, a wait on another caller's download of the same file,
+// and the transfer itself (a partial file is kept for a later resume).
+func DownloadContext(ctx context.Context, repo, revision, filename string) (string, error) {
+	p, _, err := downloadAt(ctx, repo, revision, filename, nil)
 	return p, err
 }
 
@@ -78,7 +82,7 @@ func download(repo, revision, filename string, progress Progress) (string, error
 // commit is reported even when the fetch itself fails (e.g. a 404 probe).
 // Callers that fetch several files of one model (DownloadModelSafetensors)
 // pass that SHA back as the revision so every file comes from one commit.
-func downloadAt(repo, revision, filename string, progress Progress) (string, string, error) {
+func downloadAt(ctx context.Context, repo, revision, filename string, progress Progress) (string, string, error) {
 	if repo == "" || filename == "" {
 		return "", "", fmt.Errorf("hub.Download: repo and filename are required")
 	}
@@ -95,7 +99,8 @@ func downloadAt(repo, revision, filename string, progress Progress) (string, str
 	if st, err := os.Stat(repo); err == nil && st.IsDir() {
 		p := filepath.Join(repo, rel)
 		if _, err := os.Stat(p); err != nil {
-			return "", "", fmt.Errorf("hub.Download: %s not in local directory %s (HTTP 404)", filename, repo)
+			return "", "", fmt.Errorf("hub.Download: %s not in local directory %s: %w", filename, repo,
+				&HTTPError{Status: http.StatusNotFound, URL: p})
 		}
 		return p, "", nil
 	}
@@ -114,7 +119,7 @@ func downloadAt(repo, revision, filename string, progress Progress) (string, str
 	// 0) A full commit SHA is already immutable: snapshots/<sha> directly,
 	//    no refs entry, no API call (as huggingface_hub does).
 	if isCommitSHA(revision) {
-		p, err := fetchSnapshot(repoDir, repo, revision, rel, filename, progress)
+		p, err := fetchSnapshot(ctx, repoDir, repo, revision, rel, filename, progress)
 		return p, revision, err
 	}
 	// 1) Already in HF Python layout (refs/<revision> → snapshots/<sha>).
@@ -130,12 +135,15 @@ func downloadAt(repo, revision, filename string, progress Progress) (string, str
 	// 3) Resolve the commit SHA. If the API fails (offline, etc.) fetch the
 	//    revision into the legacy layout so we still produce something
 	//    usable — explicitly unpinned.
-	sha, err := resolveCommitSHA(repo, revision)
+	sha, err := resolveCommitSHA(ctx, repo, revision)
 	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return "", "", fmt.Errorf("hub.Download: %w", cerr)
+		}
 		if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
 			return "", "", err
 		}
-		if dlErr := fetchLocked(resolveURL(repo, revision, filename), legacy, progress); dlErr != nil {
+		if dlErr := fetchLocked(ctx, resolveURL(repo, revision, filename), legacy, progress); dlErr != nil {
 			return "", "", fmt.Errorf("resolve sha + fetch failed: sha-resolve: %v; fetch: %w", err, dlErr)
 		}
 		return legacy, "", nil
@@ -146,13 +154,13 @@ func downloadAt(repo, revision, filename string, progress Progress) (string, str
 		return "", "", err
 	}
 	// 5) Download snapshots/<sha>/<file> from that same commit.
-	p, err := fetchSnapshot(repoDir, repo, sha, rel, filename, progress)
+	p, err := fetchSnapshot(ctx, repoDir, repo, sha, rel, filename, progress)
 	return p, sha, err
 }
 
 // fetchSnapshot returns snapshots/<sha>/<rel>, fetching it from
 // resolve/<sha>/<filename> when it is not cached.
-func fetchSnapshot(repoDir, repo, sha, rel, filename string, progress Progress) (string, error) {
+func fetchSnapshot(ctx context.Context, repoDir, repo, sha, rel, filename string, progress Progress) (string, error) {
 	localPath := filepath.Join(repoDir, "snapshots", sha, rel)
 	if st, err := os.Stat(localPath); err == nil && st.Size() > 0 {
 		return localPath, nil
@@ -160,7 +168,7 @@ func fetchSnapshot(repoDir, repo, sha, rel, filename string, progress Progress) 
 	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
 		return "", err
 	}
-	if err := fetchLocked(resolveURL(repo, sha, filename), localPath, progress); err != nil {
+	if err := fetchLocked(ctx, resolveURL(repo, sha, filename), localPath, progress); err != nil {
 		return "", err
 	}
 	return localPath, nil
@@ -209,7 +217,7 @@ var (
 // HF model API. Cached per process. The returned hex SHA is what HF
 // Python's `huggingface_hub` uses as the snapshot directory name; anything
 // that is not a full hex commit id is rejected.
-func resolveCommitSHA(repo, revision string) (string, error) {
+func resolveCommitSHA(ctx context.Context, repo, revision string) (string, error) {
 	key := repo + "@" + revision
 	shaCacheMu.Lock()
 	if sha, ok := shaCache[key]; ok {
@@ -218,19 +226,18 @@ func resolveCommitSHA(repo, revision string) (string, error) {
 	}
 	shaCacheMu.Unlock()
 	apiURL := fmt.Sprintf("%s/api/models/%s/revision/%s", Endpoint(), repo, url.PathEscape(revision))
-	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
 		return "", err
 	}
 	setHeaders(req)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("hub.resolveCommitSHA: GET %s: %w", apiURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", fmt.Errorf("hub.resolveCommitSHA: GET %s: HTTP %d: %s", apiURL, resp.StatusCode, string(body))
+		return "", fmt.Errorf("hub.resolveCommitSHA: GET %w", newHTTPError(apiURL, resp))
 	}
 	var info struct {
 		SHA string `json:"sha"`
@@ -251,8 +258,8 @@ func resolveCommitSHA(repo, revision string) (string, error) {
 // and across processes, see lockDest). It rechecks dst after acquiring the
 // lock, so a caller that waited on another's download returns its result
 // instead of fetching again.
-func fetchLocked(url, dst string, progress Progress) error {
-	unlock, err := lockDest(dst)
+func fetchLocked(ctx context.Context, url, dst string, progress Progress) error {
+	unlock, err := lockDest(ctx, dst)
 	if err != nil {
 		return fmt.Errorf("hub.Download: lock %s: %w", dst, err)
 	}
@@ -260,7 +267,7 @@ func fetchLocked(url, dst string, progress Progress) error {
 	if st, err := os.Stat(dst); err == nil && st.Size() > 0 {
 		return nil
 	}
-	return fetchWith(url, dst, progress)
+	return fetchWith(ctx, url, dst, progress)
 }
 
 // fetchWith streams `url` to `dst` (with `.part` suffix during download),
@@ -272,7 +279,7 @@ func fetchLocked(url, dst string, progress Progress) error {
 // .part started from a different URL, is discarded rather than spliced.
 // dst is only published (renamed) once it holds the full advertised length.
 // Callers hold lockDest(dst).
-func fetchWith(url, dst string, progress Progress) error {
+func fetchWith(ctx context.Context, url, dst string, progress Progress) error {
 	tmp, srcFile := dst+".part", dst+".part.url"
 	var have int64
 	if st, err := os.Stat(tmp); err == nil {
@@ -287,8 +294,7 @@ func fetchWith(url, dst string, progress Progress) error {
 			have = 0
 		}
 	}
-	client := &http.Client{Timeout: 0} // model files can be 100s of MB
-	req, err := http.NewRequest(http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
@@ -296,7 +302,7 @@ func fetchWith(url, dst string, progress Progress) error {
 	if have > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", have))
 	}
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("hub.Download: GET %s: %w", url, err)
 	}
@@ -311,8 +317,7 @@ func fetchWith(url, dst string, progress Progress) error {
 		return fmt.Errorf("hub.Download: GET %s: HTTP 416 resuming at byte %d; discarded the partial file, a retry restarts", url, have)
 	}
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("hub.Download: GET %s: HTTP %d: %s", url, resp.StatusCode, string(body))
+		return fmt.Errorf("hub.Download: GET %w", newHTTPError(url, resp))
 	}
 	start, total := int64(0), resp.ContentLength // -1 when unknown
 	flags := os.O_WRONLY | os.O_CREATE
@@ -346,6 +351,9 @@ func fetchWith(url, dst string, progress Progress) error {
 	n, err := io.Copy(w, resp.Body)
 	if err != nil {
 		_ = out.Close()
+		if cerr := ctx.Err(); cerr != nil {
+			err = cerr // report the cancellation, not the transport's view of it
+		}
 		return fmt.Errorf("hub.Download: copy: %w (partial file kept at %s for resume)", err, tmp)
 	}
 	if err := out.Close(); err != nil {

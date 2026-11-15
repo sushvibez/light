@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -282,7 +283,7 @@ func TestResumeValidatesContentRange(t *testing.T) {
 			if err := os.WriteFile(dst+".part", []byte(c.part), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			err := fetchWith(srv.URL+"/f", dst, nil)
+			err := fetchWith(context.Background(), srv.URL+"/f", dst, nil)
 			if gotRange != fmt.Sprintf("bytes=%d-", len(c.part)) {
 				t.Errorf("Range %q", gotRange)
 			}
@@ -320,7 +321,7 @@ func TestResumeDiscardsPartialFromOtherObject(t *testing.T) {
 	dst := filepath.Join(t.TempDir(), "f.bin")
 	_ = os.WriteFile(dst+".part", []byte("OLD"), 0o644)
 	_ = os.WriteFile(dst+".part.url", []byte(srv.URL+"/other"), 0o644)
-	if err := fetchWith(srv.URL+"/f", dst, nil); err != nil {
+	if err := fetchWith(context.Background(), srv.URL+"/f", dst, nil); err != nil {
 		t.Fatal(err)
 	}
 	if gotRange != "" {

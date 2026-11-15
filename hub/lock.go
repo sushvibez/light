@@ -1,6 +1,7 @@
 package hub
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -8,21 +9,28 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 )
 
 // destLocks serializes downloads of one destination within the process;
 // lockFile (flock / LockFileEx) extends that across processes sharing a
 // cache. OS locks die with their process, so a crash never leaves a stale
-// lock behind.
+// lock behind. Each in-process lock is a one-slot channel so a wait can be
+// abandoned when the caller's context ends.
 var (
 	destLocksMu sync.Mutex
-	destLocks   = map[string]*sync.Mutex{}
+	destLocks   = map[string]chan struct{}{}
 )
+
+// lockPollMax bounds the back-off between attempts on a cross-process lock
+// another process holds.
+const lockPollMax = 500 * time.Millisecond
 
 // lockDest takes exclusive ownership of dst (and its dst+".part") for the
 // whole check/resume/download/publish sequence. The returned func releases
-// it.
-func lockDest(dst string) (func(), error) {
+// it. Waiting (on another goroutine or another process) ends with ctx's
+// error when ctx is done first.
+func lockDest(ctx context.Context, dst string) (func(), error) {
 	key := dst
 	if abs, err := filepath.Abs(dst); err == nil {
 		key = abs
@@ -31,28 +39,50 @@ func lockDest(dst string) (func(), error) {
 		key = strings.ToLower(key) // case-insensitive filesystems
 	}
 	destLocksMu.Lock()
-	mu := destLocks[key]
-	if mu == nil {
-		mu = new(sync.Mutex)
-		destLocks[key] = mu
+	sem := destLocks[key]
+	if sem == nil {
+		sem = make(chan struct{}, 1)
+		destLocks[key] = sem
 	}
 	destLocksMu.Unlock()
-	mu.Lock()
+	select {
+	case sem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	release := func() { <-sem }
 
 	f, err := openLockFile(key, dst)
 	if err != nil {
-		mu.Unlock()
+		release()
 		return nil, err
 	}
-	if err := lockFile(f); err != nil {
-		_ = f.Close()
-		mu.Unlock()
-		return nil, err
+	wait := 10 * time.Millisecond
+	for {
+		ok, err := tryLockFile(f)
+		if err != nil {
+			_ = f.Close()
+			release()
+			return nil, err
+		}
+		if ok {
+			break
+		}
+		t := time.NewTimer(wait)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			_ = f.Close()
+			release()
+			return nil, ctx.Err()
+		}
+		wait = min(2*wait, lockPollMax)
 	}
 	return func() {
 		_ = unlockFile(f)
 		_ = f.Close()
-		mu.Unlock()
+		release()
 	}, nil
 }
 

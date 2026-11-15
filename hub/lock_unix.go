@@ -7,13 +7,20 @@ import (
 	"syscall"
 )
 
-// lockFile blocks until it holds an exclusive flock on f.
-func lockFile(f *os.File) error {
+// tryLockFile takes an exclusive flock on f without blocking; ok is false
+// when another process holds it.
+func tryLockFile(f *os.File) (bool, error) {
 	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
-		if err != syscall.EINTR {
-			return err
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		switch err {
+		case nil:
+			return true, nil
+		case syscall.EWOULDBLOCK:
+			return false, nil
+		case syscall.EINTR:
+			continue
 		}
+		return false, err
 	}
 }
 
