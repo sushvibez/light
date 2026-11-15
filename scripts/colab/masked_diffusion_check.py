@@ -74,14 +74,18 @@ else:
     model = dm.DreamModel(cfg)
 from safetensors.torch import load_file  # noqa: E402
 
-sd = {}
-for f in sorted(os.listdir(work)):
-    if f.endswith(".safetensors"):
-        sd.update({k: v.float() for k, v in load_file(os.path.join(work, f)).items()})
-missing, unexpected = model.load_state_dict(sd, strict=False)
-assert not [m for m in missing if "rotary" not in m and "inv_freq" not in m], missing[:10]
-del sd
 model = model.float().eval()
+params = dict(model.named_parameters())
+seen = set()
+with torch.no_grad():  # one shard at a time, copied into the F32 parameters (8B: 32 GB, not 64)
+    for f in sorted(os.listdir(work)):
+        if f.endswith(".safetensors"):
+            for k, v in load_file(os.path.join(work, f)).items():
+                if k in params:
+                    params[k].copy_(v.float())
+                    seen.add(k)
+missing = [k for k in params if k not in seen]
+assert not missing, missing[:10]
 print("loaded", flush=True)
 
 if os.path.exists(os.path.join(work, "tokenizer_config.json")):
