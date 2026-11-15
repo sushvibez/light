@@ -3,6 +3,8 @@ package audio
 import (
 	"fmt"
 	"math"
+	"runtime"
+	"sync"
 )
 
 // Whisper front-end constants (openai/whisper audio.py).
@@ -61,20 +63,7 @@ func LogMelFrames(samples []float32, filters [][]float32) ([]float32, int, error
 		x[half-i] = x[half+i]
 		x[half+n-1+i] = x[half+n-1-i]
 	}
-	window := make([]float64, WhisperNFFT)
-	for i := range window {
-		window[i] = 0.5 - 0.5*math.Cos(2*math.Pi*float64(i)/WhisperNFFT)
-	}
-	// Twiddles for a direct real DFT; frames of silence are skipped.
-	cosT := make([]float64, bins*WhisperNFFT)
-	sinT := make([]float64, bins*WhisperNFFT)
-	for k := range bins {
-		for t := range WhisperNFFT {
-			a := 2 * math.Pi * float64(k) * float64(t) / WhisperNFFT
-			cosT[k*WhisperNFFT+t] = math.Cos(a)
-			sinT[k*WhisperNFFT+t] = math.Sin(a)
-		}
-	}
+	win, tw := stftTables()
 	lastFrame := 0
 	for i := len(src) - 1; i >= 0; i-- {
 		if src[i] != 0 {
@@ -82,40 +71,98 @@ func LogMelFrames(samples []float32, filters [][]float32) ([]float32, int, error
 			break
 		}
 	}
-	power := make([]float64, bins)
-	frame := make([]float64, WhisperNFFT)
+	// Each filter row's nonzero span, so the per-frame projection skips the
+	// zero tails (same terms, same order).
+	spanLo, spanHi := make([]int, nMels), make([]int, nMels)
+	for m, row := range filters {
+		lo, hi := 0, 0
+		for k, w := range row {
+			if w != 0 {
+				if hi == 0 {
+					lo = k
+				}
+				hi = k + 1
+			}
+		}
+		spanLo[m], spanHi[m] = lo, hi
+	}
 	mel := make([]float64, nMels*frames)
-	for f := 0; f <= lastFrame; f++ {
-		allZero := true
-		for t := range WhisperNFFT {
-			v := x[f*WhisperHop+t]
-			frame[t] = v * window[t]
-			if v != 0 {
-				allZero = false
-			}
-		}
-		if allZero {
-			continue
-		}
-		for k := range bins {
-			var re, im float64
-			ct := cosT[k*WhisperNFFT : (k+1)*WhisperNFFT]
-			st := sinT[k*WhisperNFFT : (k+1)*WhisperNFFT]
-			for t, v := range frame {
-				re += v * ct[t]
-				im -= v * st[t]
-			}
-			power[k] = re*re + im*im
-		}
-		for m := range nMels {
-			var acc float64
-			for k, w := range filters[m] {
-				if w != 0 {
-					acc += float64(w) * power[k]
+
+	// Frames are independent: split them into contiguous ranges, one per
+	// worker. Within a range two non-silent frames share one complex FFT
+	// (a in the real part, b in the imaginary part); frames of silence are
+	// skipped and keep mel 0, as before.
+	nf := lastFrame + 1
+	workers := min(runtime.GOMAXPROCS(0), (nf+melFramesPerWorker-1)/melFramesPerWorker)
+	run := func(start, end int) {
+		z := make([]complex128, WhisperNFFT)
+		buf := make([]complex128, WhisperNFFT)
+		pa := make([]float64, bins)
+		pb := make([]float64, bins)
+		load := func(f int, imag bool) (zero bool) {
+			zero = true
+			off := f * WhisperHop
+			for t := range WhisperNFFT {
+				v := x[off+t]
+				if v != 0 {
+					zero = false
+				}
+				if imag {
+					z[t] = complex(real(z[t]), v*win[t])
+				} else {
+					z[t] = complex(v*win[t], 0)
 				}
 			}
-			mel[m*frames+f] = acc
+			return zero
 		}
+		project := func(f int, power []float64) {
+			for m := range nMels {
+				row := filters[m]
+				var acc float64
+				for k := spanLo[m]; k < spanHi[m]; k++ {
+					if w := row[k]; w != 0 {
+						acc += float64(w) * power[k]
+					}
+				}
+				mel[m*frames+f] = acc
+			}
+		}
+		for f := start; f < end; {
+			if load(f, false) {
+				f++
+				continue
+			}
+			pair := f+1 < end && !load(f+1, true)
+			fft400(buf, z, tw)
+			if pair {
+				for k := range bins {
+					zk, zn := buf[k], buf[(WhisperNFFT-k)%WhisperNFFT]
+					cn := complex(real(zn), -imag(zn))
+					a, b := zk+cn, zk-cn // 2·A[k], 2i·B[k]
+					pa[k] = (real(a)*real(a) + imag(a)*imag(a)) / 4
+					pb[k] = (real(b)*real(b) + imag(b)*imag(b)) / 4
+				}
+				project(f, pa)
+				project(f+1, pb)
+				f += 2
+				continue
+			}
+			for k := range bins {
+				c := buf[k]
+				pa[k] = real(c)*real(c) + imag(c)*imag(c)
+			}
+			project(f, pa)
+			f++ // f+1 (if in range) is silent or a fresh start
+		}
+	}
+	if workers <= 1 {
+		run(0, nf)
+	} else {
+		var wg sync.WaitGroup
+		for w := range workers {
+			wg.Go(func() { run(w*nf/workers, (w+1)*nf/workers) })
+		}
+		wg.Wait()
 	}
 	out := make([]float32, len(mel))
 	maxLog := math.Inf(-1)
@@ -131,6 +178,70 @@ func LogMelFrames(samples []float32, filters [][]float32) ([]float32, int, error
 		out[i] = float32((math.Max(l, floor) + 4) / 4)
 	}
 	return out, frames, nil
+}
+
+// melFramesPerWorker is the smallest frame range worth its own goroutine.
+const melFramesPerWorker = 128
+
+var (
+	stftOnce sync.Once
+	stftWin  []float64    // periodic Hann window, length NFFT
+	stftTw   []complex128 // exp(-2πik/NFFT), k < NFFT
+)
+
+// stftTables returns the immutable window and FFT twiddles, built once.
+func stftTables() ([]float64, []complex128) {
+	stftOnce.Do(func() {
+		stftWin = make([]float64, WhisperNFFT)
+		stftTw = make([]complex128, WhisperNFFT)
+		for i := range WhisperNFFT {
+			stftWin[i] = 0.5 - 0.5*math.Cos(2*math.Pi*float64(i)/WhisperNFFT)
+			a := -2 * math.Pi * float64(i) / WhisperNFFT
+			stftTw[i] = complex(math.Cos(a), math.Sin(a))
+		}
+	})
+	return stftWin, stftTw
+}
+
+// fft400Factors is WhisperNFFT = 4·4·5·5 for the mixed-radix FFT.
+var fft400Factors = []int{4, 4, 5, 5}
+
+// fft400 writes the forward DFT of src (length WhisperNFFT) into dst.
+func fft400(dst, src []complex128, tw []complex128) {
+	fftMixed(dst, src, WhisperNFFT, 1, fft400Factors, tw)
+}
+
+// fftMixed is a recursive decimation-in-time mixed-radix FFT: dst (length
+// n) receives the DFT of src[0], src[stride], …, src[(n-1)·stride]. The
+// input splits into p = factors[0] interleaved length-m subsequences whose
+// DFTs land in dst[j·m:(j+1)·m]; then for every k the p values
+// dst[j·m+k] are twiddled by W_n^{jk} and combined by a size-p DFT in
+// place. tw holds W_N^e for the full size N, so W_n^e = tw[e·N/n mod N].
+func fftMixed(dst, src []complex128, n, stride int, factors []int, tw []complex128) {
+	if n == 1 {
+		dst[0] = src[0]
+		return
+	}
+	p := factors[0]
+	m := n / p
+	for j := range p {
+		fftMixed(dst[j*m:(j+1)*m], src[j*stride:], m, stride*p, factors[1:], tw)
+	}
+	N := len(tw)
+	step := N / n
+	var t [5]complex128 // p ≤ 5
+	for k := range m {
+		for j := range p {
+			t[j] = dst[j*m+k] * tw[(j*k*step)%N]
+		}
+		for q := range p {
+			s := t[0]
+			for j := 1; j < p; j++ {
+				s += t[j] * tw[(j*q*m*step)%N] // W_n^{jqm} = W_p^{jq}
+			}
+			dst[q*m+k] = s
+		}
+	}
 }
 
 // MelFilterBank builds the slaney-scaled, slaney-normalised triangular
