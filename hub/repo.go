@@ -92,7 +92,7 @@ func DownloadTo(repo, revision, filename, dst string, progress Progress) error {
 
 func setHeaders(req *http.Request) {
 	req.Header.Set("User-Agent", "light/0.1 (+https://github.com/sushvibez/light)")
-	if tok := os.Getenv("HF_TOKEN"); tok != "" {
+	if tok := token(); tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 }

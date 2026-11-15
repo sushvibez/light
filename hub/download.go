@@ -197,7 +197,7 @@ func resolveCommitSHA(repo, revision string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("User-Agent", "light/0.1 (+https://github.com/sushvibez/light)")
-	if tok := os.Getenv("HF_TOKEN"); tok != "" {
+	if tok := token(); tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
 	resp, err := http.DefaultClient.Do(req)
