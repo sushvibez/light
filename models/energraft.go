@@ -47,6 +47,7 @@ type Energraft struct {
 	// Energy head: f·baseline + last·silu(first·(f − center)).
 	Baseline, Center *tensor.Tensor // (D,)
 	First, Last      *nn.Linear
+	Dir              string // the release folder (tokenizer.json, config.json)
 	dev              device.Device
 }
 
@@ -57,7 +58,7 @@ func LoadEnergraft(repo string, dev device.Device) (*Energraft, error) {
 	if err != nil {
 		return nil, err
 	}
-	m := &Energraft{dev: dev, Cfg: EnergraftConfig{EnergySteps: 1, Relaxation: 1, Init: "gaussian", InitialStd: 1, StepSize: 1}}
+	m := &Energraft{dev: dev, Dir: dir, Cfg: EnergraftConfig{EnergySteps: 1, Relaxation: 1, Init: "gaussian", InitialStd: 1, StepSize: 1}}
 	raw, err := os.ReadFile(filepath.Join(dir, "energy_config.json"))
 	if err != nil {
 		return nil, err
