@@ -15,7 +15,8 @@
 # ~2 GB), mimo (MiMo-7B-RL MTP speculative decoding in the engine, 15.6 GB),
 # moshi (per-stage frame profile + CPU profile, 8.2 GB + Mimi), speech
 # (end-to-end speech-to-speech through the engine's OpenAI handler, same
-# checkpoints; not in the default set).
+# checkpoints; not in the default set), trellis (TRELLIS stage 1 against
+# TRELLIS's own code). NO_UPDATE=1 runs the checkout in $WORK as is.
 # Everything fits an L4 (24 GB); an A100 is not needed.
 # Hugging Face downloads use $HF_TOKEN when set.
 set -uo pipefail
@@ -45,7 +46,9 @@ go version || exit 1
 
 # --- repo -------------------------------------------------------------------
 say "repo"
-if [ -d "$WORK/.git" ]; then
+if [ -n "${NO_UPDATE:-}" ] && [ -d "$WORK/.git" ]; then
+	echo "NO_UPDATE: using $WORK as is"
+elif [ -d "$WORK/.git" ]; then
 	git -C "$WORK" fetch --depth 1 origin "$BRANCH" && git -C "$WORK" reset --hard FETCH_HEAD && git -C "$WORK" clean -fdq
 else
 	git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$WORK" || exit 1
@@ -216,6 +219,13 @@ for g in "${SEL[@]}"; do
 		say "zperf"
 		LIGHT_TIMINGS=1 LIGHT_PROFILE_GPU=1 "$WORK/light-bin" image -device gpu -cpuprofile "$LOGS/zperf.cpu" -o "$LOGS/zperf.png" -width 1024 -height 1024 -seed 11 $ZI 			"A cozy reading nook by a large window on a rainy evening, warm lamp light, a ginger cat curled on a knitted blanket, shelves of old books, photorealistic" 2>&1 | tee "$LOGS/zperf.log"
 		SUMMARY+=("zperf $(grep -c '^timing' "$LOGS/zperf.log") phases, $(grep -oE 'generated in [0-9.]+ s' "$LOGS/zperf.log")")
+		;;
+	trellis)
+		# TRELLIS stage 1 (image -> sparse structure) on real weights:
+		# TRELLIS's own code writes the reference (~2.3 GB of downloads),
+		# then Light's CUDA build compares.
+		python3 scripts/colab/trellis_ss_check.py /content/trellis_work 2>&1 | tee "$LOGS/$STAMP-trellis-ref.log" | tail -8
+		LIGHT_TRELLIS_DIR=/content/trellis_work run trellis ./diffusion 'TrellisReal'
 		;;
 	idol)
 		# speridlabs/idol on three of its demo images (black backgrounds cut
