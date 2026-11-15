@@ -466,7 +466,7 @@ func idolPosEmbed(pos []float32, n, C int) []float32 {
 // --- decoders ----------------------------------------------------------------
 
 // idolMHA is MultiHeadAttention: self (QKV) or cross (Q, KV) attention with
-// per-head RMS-normalised queries and keys.
+// per-head RMS-normalised queries and keys (when QNorm is set).
 type idolMHA struct {
 	QKV, Q, KV, Out *nn.Linear
 	QNorm, KNorm    *tensor.Tensor
@@ -491,7 +491,9 @@ func (a *idolMHA) forward(o *iop, c *idolCommon, x, ctx *tensor.Tensor) *tensor.
 		k = o.reshape(o.narrow(kv, 2, 0, 1), B, S, c.H, D)
 		v = o.reshape(o.narrow(kv, 2, 1, 1), B, S, c.H, D)
 	}
-	q, k = c.mhRMS(o, q, a.QNorm), c.mhRMS(o, k, a.KNorm)
+	if a.QNorm != nil { // TRELLIS's cross attention has no q / k norm
+		q, k = c.mhRMS(o, q, a.QNorm), c.mhRMS(o, k, a.KNorm)
+	}
 	if a.QKV != nil {
 		return o.lin(a.Out, idolSelfAttend(o, a.QKV, q, k, v))
 	}

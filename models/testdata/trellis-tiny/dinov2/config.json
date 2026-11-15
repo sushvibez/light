@@ -1,0 +1,23 @@
+{
+  "architectures": [
+    "Dinov2WithRegistersModel"
+  ],
+  "model_type": "dinov2_with_registers",
+  "hidden_size": 64,
+  "num_hidden_layers": 2,
+  "num_attention_heads": 4,
+  "mlp_ratio": 4,
+  "image_size": 56,
+  "patch_size": 14,
+  "num_channels": 3,
+  "num_register_tokens": 4,
+  "layer_norm_eps": 1e-06,
+  "hidden_act": "gelu",
+  "qkv_bias": true,
+  "layerscale_value": 1.0,
+  "use_swiglu_ffn": false,
+  "drop_path_rate": 0.0,
+  "interpolate_antialias": true,
+  "interpolate_offset": 0.0,
+  "torch_dtype": "float32"
+}

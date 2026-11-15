@@ -1,0 +1,25 @@
+{
+    "name": "TrellisImageTo3DPipeline",
+    "args": {
+        "models": {
+            "sparse_structure_decoder": "ckpts/ss_dec_tiny_fp16",
+            "sparse_structure_flow_model": "ckpts/ss_flow_tiny_fp16"
+        },
+        "sparse_structure_sampler": {
+            "name": "FlowEulerGuidanceIntervalSampler",
+            "args": {
+                "sigma_min": 1e-05
+            },
+            "params": {
+                "steps": 25,
+                "cfg_strength": 5.0,
+                "cfg_interval": [
+                    0.5,
+                    1.0
+                ],
+                "rescale_t": 3.0
+            }
+        },
+        "image_cond_model": "dinov2_vitl14_reg"
+    }
+}
