@@ -16,7 +16,7 @@ import (
 // hyper-connections) against transformers: every position's logits, for a
 // prompt within index_topk (dense attention is exact there).
 func TestGLM5TinyMatchesTransformers(t *testing.T) {
-	for _, name := range []string{"glm5-tiny", "glm5-fp8-tiny"} {
+	for _, name := range []string{"glm5-tiny", "glm5-fp8-tiny", "glm5-dsa-tiny"} { // dsa: index_topk 8 < 13 tokens, so the indexer drops keys
 		t.Run(name, func(t *testing.T) { testGLM5Tiny(t, name) })
 	}
 }
@@ -76,7 +76,15 @@ func testGLM5Tiny(t *testing.T, name string) {
 // Prefill then token-by-token decode through GLM5Cache reproduces
 // transformers' full-prompt logits at every position (CPU and WebGPU).
 func TestGLM5CacheMatchesFullForward(t *testing.T) {
-	raw, err := os.ReadFile("testdata/glm5-tiny.json")
+	for _, name := range []string{"glm5-tiny", "glm5-dsa-tiny"} {
+		t.Run(name, func(t *testing.T) { testGLM5Cache(t, name) })
+	}
+}
+
+// testGLM5Cache prefills 7 tokens and decodes the rest one at a time (for
+// glm5-dsa-tiny the indexer starts dropping keys at the 12th position).
+func testGLM5Cache(t *testing.T, name string) {
+	raw, err := os.ReadFile("testdata/" + name + ".json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +102,7 @@ func TestGLM5CacheMatchesFullForward(t *testing.T) {
 	}
 	for _, dev := range devs {
 		t.Run(fmt.Sprint(dev), func(t *testing.T) {
-			m, err := LoadGLM5("testdata/glm5-tiny", dev)
+			m, err := LoadGLM5("testdata/"+name, dev)
 			if err != nil {
 				t.Fatal(err)
 			}

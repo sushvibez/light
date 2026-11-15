@@ -30,7 +30,7 @@ cfg = Glm5NextTextConfig(
     routed_scaling_factor=2.5, kv_lora_rank=24, q_lora_rank=32, qk_rope_head_dim=0, v_head_dim=16,
     qk_nope_head_dim=16, n_group=1, topk_group=1, norm_topk_prob=True, hidden_act="silu", rms_norm_eps=1e-5,
     tie_word_embeddings=False, mlp_layer_types=["dense", "sparse", "sparse", "sparse", "sparse"],
-    index_topk=64, index_head_dim=16, index_n_heads=2, layer_types=layer_types,
+    index_topk=int(os.environ.get("GLM5_INDEX_TOPK", "64")), index_head_dim=16, index_n_heads=2, layer_types=layer_types,
     indexer_types=["full"] * L, swiglu_limit=1.5, linear_head_dim=16, linear_num_heads=4,
     linear_conv_kernel_dim=4, linear_lower_bound=-5.0, hc_mult=4, hc_eps=1e-6, hc_sinkhorn_iters=20,
     index_kpool=4, index_kpool_always_select_tail=True, max_position_embeddings=512, pad_token_id=0,

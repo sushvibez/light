@@ -42,6 +42,11 @@ type GLM5Config struct {
 	LayerTypes       []string `json:"layer_types"`
 	MLPLayerTypes    []string `json:"mlp_layer_types"`
 	IndexTopk        int      `json:"index_topk"`
+	IndexHeadDim     int      `json:"index_head_dim"`
+	IndexNHeads      int      `json:"index_n_heads"`
+	IndexKpool       int      `json:"index_kpool"`
+	IndexAlwaysTail  bool     `json:"index_kpool_always_select_tail"`
+	IndexerTypes     []string `json:"indexer_types"`
 	SwiGLULimit      float64  `json:"swiglu_limit"`
 	LinearHeadDim    int      `json:"linear_head_dim"`
 	LinearNumHeads   int      `json:"linear_num_heads"`
@@ -100,6 +105,11 @@ type glm5Layer struct {
 	// MLA.
 	QA, QB, KVA, KVB, MO *nn.Linear
 	QANormW, KVANormW    *tensor.Tensor
+	// DSA indexer (nil IdxWqB: none; IdxShared: reuse the previous layer's
+	// selection).
+	IdxWqB, IdxWk, IdxW, IdxGate *nn.Linear
+	IdxKNormW, IdxKNormB, IdxAPE *tensor.Tensor
+	IdxShared                    bool
 	// MLP: dense, or routed experts + shared expert.
 	Dense      *glm5Expert
 	Shared     *glm5Expert
@@ -215,6 +225,19 @@ func LoadGLM5(dir string, dev device.Device) (*GLM5, error) {
 			ly.KVA, ly.KVB = l.linear(a+"kv_a_proj_with_mqa"), l.linear(a+"kv_b_proj")
 			ly.QANormW, ly.KVANormW = l.param(a+"q_a_layernorm.weight"), l.param(a+"kv_a_layernorm.weight")
 			ly.MO = l.linear(a + "o_proj")
+			if i < len(cfg.IndexerTypes) && cfg.IndexerTypes[i] == "shared" {
+				ly.IdxShared = true
+			} else if _, ok := hf[a+"indexer.wq_b.weight"]; ok {
+				x := a + "indexer."
+				if g, ok := hf[x+"index_kpool_compress_gate"]; ok {
+					hf[x+"compress_gate.weight"] = g
+					delete(hf, x+"index_kpool_compress_gate")
+				}
+				ly.IdxWqB, ly.IdxWk = l.linear(x+"wq_b"), l.linear(x+"wk")
+				ly.IdxW, ly.IdxGate = l.linear(x+"weights_proj"), l.linear(x+"compress_gate")
+				ly.IdxKNormW, ly.IdxKNormB = l.param(x+"k_norm.weight"), l.param(x+"k_norm.bias")
+				ly.IdxAPE = l.param(x + "index_kpool_compress_ape")
+			}
 		}
 		if cfg.MLPLayerTypes[i] == "sparse" {
 			ly.RouterW = l.param(p + "mlp.gate.weight")
@@ -554,7 +577,7 @@ func (m *GLM5) kda(o *iop, ly *glm5Layer, x *tensor.Tensor, c *GLM5Cache, li int
 	return o.lin(ly.O, o.reshape(out, B, S, qkv))
 }
 
-func (m *GLM5) mla(o *iop, ly *glm5Layer, x *tensor.Tensor, c *GLM5Cache, li int) *tensor.Tensor {
+func (m *GLM5) mla(o *iop, ly *glm5Layer, x *tensor.Tensor, c *GLM5Cache, li int, sel *glm5Selection) *tensor.Tensor {
 	if o.err != nil {
 		return nil
 	}
@@ -565,11 +588,21 @@ func (m *GLM5) mla(o *iop, ly *glm5Layer, x *tensor.Tensor, c *GLM5Cache, li int
 	if c != nil {
 		P = c.Len
 	}
-	if cfg.IndexTopk > 0 && P+S > cfg.IndexTopk {
-		o.err = fmt.Errorf("glm5: %d tokens exceed index_topk %d; the sparse-attention indexer is not ported yet", P+S, cfg.IndexTopk)
+	qResid := m.rms(o, o.lin(ly.QA, x), ly.QANormW)
+	q := o.lin(ly.QB, qResid)
+	// DSA: past index_topk visible tokens each query attends only to the
+	// pools its indexer selects (and its own incomplete tail); up to it the
+	// selection is every visible token, the dense causal mask.
+	var allowed glm5Selection
+	if ly.IdxWqB != nil {
+		allowed = m.indexerSelect(o, ly, x, qResid, c, li, P)
+		*sel = allowed
+	} else if ly.IdxShared {
+		allowed = *sel
+	} else if cfg.IndexTopk > 0 && P+S > cfg.IndexTopk {
+		o.err = fmt.Errorf("glm5: layer %d has no indexer for %d tokens past index_topk %d", li, P+S, cfg.IndexTopk)
 		return nil
 	}
-	q := o.lin(ly.QB, m.rms(o, o.lin(ly.QA, x), ly.QANormW))
 	q = o.perm(o.reshape(q, B, S, H, dk), 0, 2, 1, 3)
 	kv := m.rms(o, o.narrow(o.lin(ly.KVA, x), 2, 0, cfg.KVLoraRank), ly.KVANormW)
 	kv = o.reshape(o.lin(ly.KVB, kv), B, S, H, cfg.QKNopeHeadDim+dv)
@@ -584,6 +617,20 @@ func (m *GLM5) mla(o *iop, ly *glm5Layer, x *tensor.Tensor, c *GLM5Cache, li int
 	}
 	T := P + S
 	mask := o.do(func() (*tensor.Tensor, error) {
+		if allowed != nil { // per batch row: selected tokens only
+			mv := make([]float32, B*S*T)
+			for b := range B {
+				for i := range S {
+					row := mv[(b*S+i)*T : (b*S+i+1)*T]
+					for j := range row {
+						if j > P+i || !allowed[b][i][j] {
+							row[j] = float32(math.Inf(-1))
+						}
+					}
+				}
+			}
+			return tensor.New(mv, []int{B, 1, S, T}, m.dev)
+		}
 		mv := make([]float32, S*T)
 		for i := range S {
 			for j := P + i + 1; j < T; j++ {
@@ -608,6 +655,99 @@ func (m *GLM5) mla(o *iop, ly *glm5Layer, x *tensor.Tensor, c *GLM5Cache, li int
 		return nn.SDPAScaled(qc, kc, vc, mask, 1/math.Sqrt(float64(dk)))
 	})
 	return o.lin(ly.MO, o.reshape(o.perm(a, 0, 2, 1, 3), B, S, H*dv))
+}
+
+// glm5Selection is a DSA selection: [batch][query][key] allowed, or nil for
+// every visible key.
+type glm5Selection [][][]bool
+
+// indexerSelect is Glm5NextTextIndexer for the new tokens x (B, S, D) after
+// P cached ones: index keys LayerNorm(wk·x) pooled kpool at a time by a
+// softmax gate (compress_gate·x + ape), pool scores Σ_h w_h·ReLU(q_h·pool /
+// √d) with q = wq_b(q_resid) and w = weights_proj(x) / √heads, then per
+// query the top index_topk / kpool causally visible complete pools plus its
+// incomplete tail. nil while every visible token would be selected. Index
+// keys and gate scores are kept in the cache for later tokens.
+func (m *GLM5) indexerSelect(o *iop, ly *glm5Layer, x, qResid *tensor.Tensor, c *GLM5Cache, li, P int) glm5Selection {
+	if o.err != nil {
+		return nil
+	}
+	cfg := m.Cfg
+	B, S := x.Dim(0), x.Dim(1)
+	T := P + S
+	nh, hd, kp := cfg.IndexNHeads, cfg.IndexHeadDim, cfg.IndexKpool
+	kNew := o.do(func() (*tensor.Tensor, error) {
+		return ops.LayerNorm(o.lin(ly.IdxWk, x), ly.IdxKNormW, ly.IdxKNormB, 1e-6)
+	})
+	gNew := o.lin(ly.IdxGate, x)
+	kAll, gAll := kNew, gNew
+	if c != nil {
+		if c.ik[li] != nil {
+			kAll, gAll = o.cat(1, c.ik[li], kNew), o.cat(1, c.ig[li], gNew)
+		}
+		c.ik[li], c.ig[li] = kAll, gAll
+	}
+	if o.err != nil || cfg.IndexTopk <= 0 || T <= cfg.IndexTopk || kp <= 0 {
+		return nil
+	}
+	Pc := T / kp // complete pools
+	selectK := min(cfg.IndexTopk/kp, Pc)
+	var scores []float32
+	if Pc > 0 {
+		kq := o.reshape(o.narrow(kAll, 1, 0, Pc*kp), B, Pc, kp, hd)
+		gq := o.add(o.reshape(o.narrow(gAll, 1, 0, Pc*kp), B, Pc, kp, hd), ly.IdxAPE)
+		probs := o.do(func() (*tensor.Tensor, error) { return ops.Softmax(gq, 2) })
+		weighted := o.mul(probs, kq)
+		pool := o.do(func() (*tensor.Tensor, error) { return ops.Sum(weighted, ops.ReduceOptions{Axes: []int{2}}) }) // (B, Pc, hd)
+		q := o.reshape(o.lin(ly.IdxWqB, qResid), B, S*nh, hd)
+		poolT := o.reshape(o.perm(pool, 0, 2, 1), B, hd, Pc)
+		sc := o.do(func() (*tensor.Tensor, error) { return ops.MatMul(q, poolT) }) // (B, S·nh, Pc)
+		sc = o.affine(o.un(ops.Relu, sc), 1/math.Sqrt(float64(hd)), 0)
+		w := o.affine(o.lin(ly.IdxW, x), 1/math.Sqrt(float64(nh)), 0) // (B, S, nh)
+		r := o.mul(o.reshape(sc, B, S, nh, Pc), o.reshape(w, B, S, nh, 1))
+		idx := o.do(func() (*tensor.Tensor, error) { return ops.Sum(r, ops.ReduceOptions{Axes: []int{2}}) })
+		if o.err != nil {
+			return nil
+		}
+		h, err := idx.To(device.CPU())
+		if err != nil {
+			o.err = err
+			return nil
+		}
+		scores = tensor.MustSlice[float32](h)
+	}
+	out := make(glm5Selection, B)
+	for b := range B {
+		out[b] = make([][]bool, S)
+		for i := range S {
+			qpos := P + i
+			row := make([]bool, T)
+			var cand []int
+			for p := range Pc {
+				if p*kp+kp-1 <= qpos { // the pool's last token is visible
+					cand = append(cand, p)
+				}
+			}
+			if len(cand) > selectK {
+				s := scores[(b*S+i)*Pc : (b*S+i+1)*Pc]
+				sort.SliceStable(cand, func(x, y int) bool { return s[cand[x]] > s[cand[y]] })
+				cand = cand[:selectK]
+			}
+			for _, p := range cand {
+				for j := p * kp; j < p*kp+kp; j++ {
+					row[j] = true
+				}
+			}
+			if cfg.IndexAlwaysTail { // the incomplete pool the query sits in
+				vis := qpos + 1
+				for j := vis - vis%kp; j < vis; j++ {
+					row[j] = true
+				}
+			}
+			out[b][i] = row
+		}
+	}
+	return out
 }
 
 // moe is the routed experts plus the shared expert on x (B, S, D).
@@ -695,6 +835,7 @@ func (m *GLM5) moe(o *iop, ly *glm5Layer, x *tensor.Tensor) *tensor.Tensor {
 type GLM5Cache struct {
 	Len       int // positions already processed
 	conv, rec []*tensor.Tensor
+	ik, ig    []*tensor.Tensor // DSA index keys / gate scores per layer
 	k, v      []*tensor.Tensor
 }
 
@@ -702,7 +843,8 @@ type GLM5Cache struct {
 func (m *GLM5) NewCache() *GLM5Cache {
 	n := len(m.Layers)
 	return &GLM5Cache{conv: make([]*tensor.Tensor, n), rec: make([]*tensor.Tensor, n),
-		k: make([]*tensor.Tensor, n), v: make([]*tensor.Tensor, n)}
+		k: make([]*tensor.Tensor, n), v: make([]*tensor.Tensor, n),
+		ik: make([]*tensor.Tensor, n), ig: make([]*tensor.Tensor, n)}
 }
 
 // Forward returns the logits (B, S, V) of every position for tokens (B, S).
@@ -724,6 +866,7 @@ func (m *GLM5) ForwardWithCache(tokens *tensor.Tensor, cache *GLM5Cache) (*tenso
 		copies[i] = h
 	}
 	streams := o.cat(2, copies...) // (B, S, N, D)
+	var sel glm5Selection          // the last full indexer's selection, for shared layers
 	for li, ly := range m.Layers {
 		pre, post, combT := m.hcWeights(o, &ly.AttnHC, streams)
 		x := o.do(func() (*tensor.Tensor, error) {
@@ -737,7 +880,7 @@ func (m *GLM5) ForwardWithCache(tokens *tensor.Tensor, cache *GLM5Cache) (*tenso
 		if ly.Linear {
 			x = m.kda(o, ly, x, cache, li)
 		} else {
-			x = m.mla(o, ly, x, cache, li)
+			x = m.mla(o, ly, x, cache, li, &sel)
 		}
 		streams = m.hcCombine(o, x, streams, post, combT)
 		pre, post, combT = m.hcWeights(o, &ly.FFNHC, streams)
