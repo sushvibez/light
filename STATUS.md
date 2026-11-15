@@ -215,7 +215,7 @@ are listed in ROADMAP.md.
 - [x] BF16 inference path (weights, activations, KV cache, scores, LM head; norms stay F32; BF16 Linear + bias rounds once)
 - [x] Speculative decoding (`models.SpecGreedy` with an MTP draft head; output equals greedy) — 2026-11-08
 - [x] Block-diffusion decoding (`Llama.ForwardDiffusion`, `GenerateDiffusion`)
-- [x] MoE expert streaming (`nn.ExpertStream`, `LIGHT_EXPERT_SLOTS`): only N experts per layer resident, read from the mmapped checkpoint on demand (LRU), token-chunked prefill, next-layer router prediction + background prefetch; Qwen2 / Qwen3-MoE loaders; DeepSeek-V4.1 on-demand experts (`ExpertBudget`) — 2026-11-15
+- [x] MoE expert streaming (`nn.ExpertStream`, `LIGHT_EXPERT_SLOTS`): only N experts per layer resident, read from the mmapped checkpoint on demand (LRU), token-chunked prefill, next-layer router prediction + background prefetch; Qwen2 / Qwen3-MoE loaders; DeepSeek-V4.1 on-demand experts (`ExpertBudget`). Qwen3-30B-A3B (61 GB BF16) on a 50 GB Colab CPU with 16 of 128 experts per layer resident: coherent greedy text, 90 % of prefetched experts used, 13.3 s/token (disk-bound) — 2026-11-15
 - [x] Energy-based decoding (Energraft: candidate refinement through autograd with frozen linears) — 2026-11-15
 - [x] BF16 tensor-core flash attention (`ops.FlashAttentionBF16`, CUDA mma.sync, head dim 128, (B, S, H, D) in place; 35 TFLOPS on the L4) — 2026-11-13
 - [x] Kimi delta attention (`ops.KimiDeltaRule`, per-channel decay; host) — 2026-11-15
