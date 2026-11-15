@@ -17,6 +17,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
+	"math"
 	"strings"
 
 	"light/device"
@@ -31,86 +33,158 @@ type tensorInfo struct {
 	DataOffsets [2]int `json:"data_offsets"`
 }
 
+// maxHeaderLen bounds the JSON header when the input's size is unknown
+// (upstream safetensors uses the same 100 MB limit); with a known size the
+// header must also fit inside the input. Either way the header buffer is
+// never sized by an unchecked 64-bit field.
+const maxHeaderLen = 100_000_000
+
+// readerSize reports the total size of r when it can be learned cheaply
+// (bytes.Reader, io.SectionReader, *os.File), else -1.
+func readerSize(r io.ReaderAt) int64 {
+	switch v := r.(type) {
+	case interface{ Size() int64 }:
+		return v.Size()
+	case interface{ Stat() (fs.FileInfo, error) }:
+		if fi, err := v.Stat(); err == nil && fi.Mode().IsRegular() {
+			return fi.Size()
+		}
+	}
+	return -1
+}
+
 // Header parses and returns just the JSON header of a safetensors file,
 // without loading any tensor bytes. Useful for listing contents.
 func Header(r io.ReaderAt) (map[string]tensorInfo, map[string]string, error) {
+	infos, meta, _, _, err := readHeader(r, readerSize(r))
+	return infos, meta, err
+}
+
+// readHeader parses the header of an input of the given total size (-1 if
+// unknown) and returns the byte offset where tensor data starts and the
+// data section's length (-1 if unknown).
+func readHeader(r io.ReaderAt, size int64) (map[string]tensorInfo, map[string]string, int64, int64, error) {
 	var lenBuf [8]byte
 	if _, err := r.ReadAt(lenBuf[:], 0); err != nil {
-		return nil, nil, fmt.Errorf("safetensors: read header length: %w", err)
+		return nil, nil, 0, 0, fmt.Errorf("safetensors: read header length: %w", err)
 	}
-	headerLen := int64(binary.LittleEndian.Uint64(lenBuf[:]))
-	if headerLen <= 0 || headerLen > 1<<32 {
-		return nil, nil, fmt.Errorf("safetensors: implausible header length %d", headerLen)
+	rawLen := binary.LittleEndian.Uint64(lenBuf[:])
+	limit := uint64(maxHeaderLen)
+	if size >= 8 {
+		limit = uint64(size - 8)
 	}
+	if rawLen == 0 || rawLen > limit {
+		return nil, nil, 0, 0, fmt.Errorf("safetensors: implausible header length %d", rawLen)
+	}
+	headerLen := int64(rawLen)
 	buf := make([]byte, headerLen)
 	if _, err := r.ReadAt(buf, 8); err != nil {
-		return nil, nil, fmt.Errorf("safetensors: read header: %w", err)
+		return nil, nil, 0, 0, fmt.Errorf("safetensors: read header: %w", err)
 	}
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(buf, &raw); err != nil {
-		return nil, nil, fmt.Errorf("safetensors: parse header JSON: %w", err)
+		return nil, nil, 0, 0, fmt.Errorf("safetensors: parse header JSON: %w", err)
 	}
 	tensors := make(map[string]tensorInfo, len(raw))
 	var metadata map[string]string
 	for name, msg := range raw {
 		if name == "__metadata__" {
 			if err := json.Unmarshal(msg, &metadata); err != nil {
-				return nil, nil, fmt.Errorf("safetensors: parse __metadata__: %w", err)
+				return nil, nil, 0, 0, fmt.Errorf("safetensors: parse __metadata__: %w", err)
 			}
 			continue
 		}
 		var info tensorInfo
 		if err := json.Unmarshal(msg, &info); err != nil {
-			return nil, nil, fmt.Errorf("safetensors: parse %q: %w", name, err)
+			return nil, nil, 0, 0, fmt.Errorf("safetensors: parse %q: %w", name, err)
 		}
 		tensors[name] = info
 	}
-	return tensors, metadata, nil
+	dataStart := 8 + headerLen
+	dataLen := int64(-1)
+	if size >= 0 {
+		dataLen = size - dataStart
+	}
+	return tensors, metadata, dataStart, dataLen, nil
+}
+
+// checkEntry validates one header entry before any allocation or slicing:
+// a known dtype, non-negative dims whose element and byte counts don't
+// overflow, ordered non-negative offsets spanning exactly those bytes, and
+// (when dataLen >= 0) a range inside the data section. It returns the
+// dtype and element count.
+func checkEntry(name string, info tensorInfo, dataLen int64) (dtype.DType, int, error) {
+	dt, err := parseDType(info.DType)
+	if err != nil {
+		return 0, 0, fmt.Errorf("safetensors: tensor %q: %w", name, err)
+	}
+	n := 1
+	for i, d := range info.Shape {
+		if d < 0 {
+			return 0, 0, fmt.Errorf("safetensors: tensor %q: negative dim %d at axis %d", name, d, i)
+		}
+		if d != 0 && n > math.MaxInt/d {
+			return 0, 0, fmt.Errorf("safetensors: tensor %q: shape %v overflows", name, info.Shape)
+		}
+		n *= d
+	}
+	if n > math.MaxInt/dt.Size() {
+		return 0, 0, fmt.Errorf("safetensors: tensor %q: %v %v byte size overflows", name, dt, info.Shape)
+	}
+	nBytes := n * dt.Size()
+	lo, hi := info.DataOffsets[0], info.DataOffsets[1]
+	if lo < 0 || hi < lo {
+		return 0, 0, fmt.Errorf("safetensors: tensor %q: bad byte range [%d, %d)", name, lo, hi)
+	}
+	if hi-lo != nBytes {
+		return 0, 0, fmt.Errorf("safetensors: tensor %q: header says %d bytes, shape/dtype imply %d", name, hi-lo, nBytes)
+	}
+	if dataLen >= 0 && int64(hi) > dataLen {
+		return 0, 0, fmt.Errorf("safetensors: tensor %q: byte range [%d, %d) past the %d-byte data section", name, lo, hi, dataLen)
+	}
+	return dt, n, nil
 }
 
 // Load reads all tensors in the file and allocates them on the given device.
 func Load(r io.ReaderAt, dev device.Device) (map[string]*tensor.Tensor, map[string]string, error) {
-	infos, metadata, err := Header(r)
+	infos, metadata, dataStart, dataLen, err := readHeader(r, readerSize(r))
 	if err != nil {
 		return nil, nil, err
 	}
-
-	// Determine the byte offset at which tensor data begins: 8 + headerLen.
-	var lenBuf [8]byte
-	_, _ = r.ReadAt(lenBuf[:], 0)
-	dataStart := int64(8 + binary.LittleEndian.Uint64(lenBuf[:]))
-
+	for name, info := range infos {
+		if _, _, err := checkEntry(name, info, dataLen); err != nil {
+			return nil, nil, err
+		}
+	}
 	out := make(map[string]*tensor.Tensor, len(infos))
 	for name, info := range infos {
-		dt, err := parseDType(info.DType)
+		t, err := readEntry(r, name, info, dataStart, dev)
 		if err != nil {
-			return nil, nil, fmt.Errorf("safetensors: tensor %q: %w", name, err)
-		}
-		nBytes := info.DataOffsets[1] - info.DataOffsets[0]
-		if nBytes < 0 {
-			return nil, nil, fmt.Errorf("safetensors: tensor %q: negative byte range", name)
-		}
-		expected := dt.ByteSize(product(info.Shape))
-		if nBytes != expected {
-			return nil, nil, fmt.Errorf("safetensors: tensor %q: header says %d bytes, shape/dtype imply %d", name, nBytes, expected)
-		}
-		buf := make([]byte, nBytes)
-		if _, err := r.ReadAt(buf, dataStart+int64(info.DataOffsets[0])); err != nil {
-			return nil, nil, fmt.Errorf("safetensors: read %q: %w", name, err)
-		}
-		t, err := tensor.FromBytes(buf, dt, info.Shape, dev)
-		if err != nil {
-			return nil, nil, fmt.Errorf("safetensors: build %q: %w", name, err)
+			return nil, nil, err
 		}
 		out[name] = t
 	}
 	return out, metadata, nil
 }
 
+// readEntry reads one entry already accepted by checkEntry.
+func readEntry(r io.ReaderAt, name string, info tensorInfo, dataStart int64, dev device.Device) (*tensor.Tensor, error) {
+	dt, _ := parseDType(info.DType)
+	buf := make([]byte, info.DataOffsets[1]-info.DataOffsets[0])
+	if _, err := r.ReadAt(buf, dataStart+int64(info.DataOffsets[0])); err != nil {
+		return nil, fmt.Errorf("safetensors: read %q: %w", name, err)
+	}
+	t, err := tensor.FromBytes(buf, dt, info.Shape, dev)
+	if err != nil {
+		return nil, fmt.Errorf("safetensors: build %q: %w", name, err)
+	}
+	return t, nil
+}
+
 // LoadTensor loads only one named tensor, avoiding allocation for the rest.
 // Useful for very large files where you only need a subset of the tensors.
 func LoadTensor(r io.ReaderAt, name string, dev device.Device) (*tensor.Tensor, error) {
-	infos, _, err := Header(r)
+	infos, _, dataStart, dataLen, err := readHeader(r, readerSize(r))
 	if err != nil {
 		return nil, err
 	}
@@ -118,19 +192,10 @@ func LoadTensor(r io.ReaderAt, name string, dev device.Device) (*tensor.Tensor, 
 	if !ok {
 		return nil, fmt.Errorf("safetensors: no tensor named %q", name)
 	}
-	dt, err := parseDType(info.DType)
-	if err != nil {
+	if _, _, err := checkEntry(name, info, dataLen); err != nil {
 		return nil, err
 	}
-	var lenBuf [8]byte
-	_, _ = r.ReadAt(lenBuf[:], 0)
-	dataStart := int64(8 + binary.LittleEndian.Uint64(lenBuf[:]))
-	nBytes := info.DataOffsets[1] - info.DataOffsets[0]
-	buf := make([]byte, nBytes)
-	if _, err := r.ReadAt(buf, dataStart+int64(info.DataOffsets[0])); err != nil {
-		return nil, err
-	}
-	return tensor.FromBytes(buf, dt, info.Shape, dev)
+	return readEntry(r, name, info, dataStart, dev)
 }
 
 // Write serialises a map of tensors to the safetensors format. Tensor data is
@@ -276,14 +341,6 @@ func dtypeString(dt dtype.DType) string {
 		return "U64"
 	}
 	return "UNKNOWN"
-}
-
-func product(dims []int) int {
-	p := 1
-	for _, d := range dims {
-		p *= d
-	}
-	return p
 }
 
 // sortStrings is a local sort to avoid an extra import in the hot path.
