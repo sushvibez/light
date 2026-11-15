@@ -17,7 +17,6 @@ func init() {
 }
 
 const (
-	flashBF16D       = 128 // head dim baked into flash_attn_bf16_d128
 	flashBF16TileQ   = 128 // query rows per block (8 warps x 16)
 	flashBF16Threads = 256
 )
@@ -39,8 +38,8 @@ func flashAttnBF16CUDA(ctx *registry.Context) error {
 		H, seqMajor = int32(q.Dim(2)), 1
 		BH, S = q.Dim(0)*q.Dim(2), int32(q.Dim(1))
 	}
-	if D != flashBF16D {
-		return fmt.Errorf("cuda flash_attention_bf16: head dim %d, want %d", D, flashBF16D)
+	if D != 64 && D != 128 {
+		return fmt.Errorf("cuda flash_attention_bf16: head dim %d, want 64 or 128", D)
 	}
 	if q.DType() != dtype.BF16 || out.DType() != dtype.F32 {
 		return fmt.Errorf("cuda flash_attention_bf16: want BF16 q, k, v and F32 out, got %v, %v", q.DType(), out.DType())
@@ -56,7 +55,7 @@ func flashAttnBF16CUDA(ctx *registry.Context) error {
 	if err := cudart.SetDevice(out.Device().Ordinal()); err != nil {
 		return err
 	}
-	fn, err := GetKernel("flash_attn_bf16_d128")
+	fn, err := GetKernel(fmt.Sprintf("flash_attn_bf16_d%d", D))
 	if err != nil {
 		return err
 	}

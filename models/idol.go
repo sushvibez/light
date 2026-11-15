@@ -235,6 +235,26 @@ func idolAttend(o *iop, q, k, v *tensor.Tensor) *tensor.Tensor {
 	return o.reshape(o.perm(a, 0, 2, 1, 3), B, L, H*D)
 }
 
+// idolSelfAttend is idolAttend for self-attention: on BF16 tensor cores
+// (attendBF16) when the projection computes at 16 bits on CUDA (upstream
+// runs these blocks in FP16), else the F32 path.
+func idolSelfAttend(o *iop, proj *nn.Linear, q, k, v *tensor.Tensor) *tensor.Tensor {
+	if o.err != nil {
+		return nil
+	}
+	if proj != nil && proj.Mixed16 && device.IsCUDA(q.Device()) {
+		out, ok, err := attendBF16(q, k, v)
+		if err != nil {
+			o.err = err
+			return nil
+		}
+		if ok {
+			return out
+		}
+	}
+	return idolAttend(o, q, k, v)
+}
+
 // sinusoidal is SinusoidalEmbedder's frequency part: [cos | sin] of
 // t · exp(−ln(maxPeriod)·i/half) (· 2π when twoPi), 256 wide, (B, 256).
 func idolSinusoidal(ts []float32, maxPeriod float64, twoPi bool, dev device.Device) (*tensor.Tensor, error) {
@@ -330,7 +350,7 @@ func (b *idolUnifiedBlock) attn(o *iop, c *idolCommon, h, cos, sin *tensor.Tenso
 	v := o.reshape(o.narrow(qkv, 2, 2, 1), B, L, c.H, D)
 	q = c.mhRMS(o, idolRotate(o, q, cos, sin), b.QNorm)
 	k = c.mhRMS(o, idolRotate(o, k, cos, sin), b.KNorm)
-	return o.lin(b.Out, idolAttend(o, q, k, v))
+	return o.lin(b.Out, idolSelfAttend(o, b.QKV, q, k, v))
 }
 
 func (b *idolUnifiedBlock) forward(o *iop, c *idolCommon, x, tmod *tensor.Tensor) *tensor.Tensor {
@@ -471,7 +491,11 @@ func (a *idolMHA) forward(o *iop, c *idolCommon, x, ctx *tensor.Tensor) *tensor.
 		k = o.reshape(o.narrow(kv, 2, 0, 1), B, S, c.H, D)
 		v = o.reshape(o.narrow(kv, 2, 1, 1), B, S, c.H, D)
 	}
-	return o.lin(a.Out, idolAttend(o, c.mhRMS(o, q, a.QNorm), c.mhRMS(o, k, a.KNorm), v))
+	q, k = c.mhRMS(o, q, a.QNorm), c.mhRMS(o, k, a.KNorm)
+	if a.QKV != nil {
+		return o.lin(a.Out, idolSelfAttend(o, a.QKV, q, k, v))
+	}
+	return o.lin(a.Out, idolAttend(o, q, k, v))
 }
 
 // idolCrossBlock is TransformerCrossBlock (SelfAttn set: self + cross +

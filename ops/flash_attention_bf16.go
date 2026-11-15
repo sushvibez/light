@@ -108,7 +108,7 @@ func FlashAttentionBF16SeqMajor(q, k, v *tensor.Tensor, causal bool) (*tensor.Te
 // operands: rank-4 BF16 tensors of one shape with head dim 128, on a device
 // with the kernel.
 func FlashAttentionBF16OK(q, k, v *tensor.Tensor) bool {
-	if q.Rank() != 4 || !q.Shape().Equal(k.Shape()) || !q.Shape().Equal(v.Shape()) || q.Dim(3) != 128 {
+	if q.Rank() != 4 || !q.Shape().Equal(k.Shape()) || !q.Shape().Equal(v.Shape()) || (q.Dim(3) != 64 && q.Dim(3) != 128) {
 		return false
 	}
 	if q.DType() != dtype.BF16 || k.DType() != dtype.BF16 || v.DType() != dtype.BF16 {

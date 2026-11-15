@@ -69,9 +69,11 @@ func LoadIdolPipeline(repo string, dev device.Device, o IdolLoadOptions) (*IdolP
 	if err != nil {
 		return nil, err
 	}
+	// 16-bit weights compute at 16 bits where that is faster (CUDA tensor
+	// cores; elsewhere exactly): idol-sdk runs these networks in FP16 / BF16.
 	load := func(f func() error) error {
 		if o.Storage16 {
-			return nn.WithWeightStorage16(dtype.F16, f)
+			return nn.WithWeightStorage16Mixed(dtype.F16, f)
 		}
 		return f()
 	}
@@ -87,7 +89,15 @@ func LoadIdolPipeline(repo string, dev device.Device, o IdolLoadOptions) (*IdolP
 	if err != nil {
 		return nil, fmt.Errorf("idol: DINOv3 (gated: accept its licence on the Hub and log in): %w", err)
 	}
-	if err := load(func() (err error) { p.DINO, err = models.LoadDINOv3(ddir, dev); return }); err != nil {
+	// DINOv3 runs in BF16 upstream, not FP16 (ViT activation outliers): its
+	// 16-bit weights keep F32 compute.
+	exact := func(f func() error) error {
+		if o.Storage16 {
+			return nn.WithWeightStorage16(dtype.F16, f)
+		}
+		return f()
+	}
+	if err := exact(func() (err error) { p.DINO, err = models.LoadDINOv3(ddir, dev); return }); err != nil {
 		return nil, err
 	}
 	vae := o.FluxVAE
