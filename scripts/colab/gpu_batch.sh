@@ -57,6 +57,8 @@ cd "$WORK" || exit 1
 git log -1 --format='%h %s (%cd)'
 
 # --- cgo: CUDA, cuBLAS, cuDNN -------------------------------------------------
+# torch keeps the environment it came with (its own cuDNN, the driver path).
+ORIG_LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}
 say "cgo"
 python3 -c 'import nvidia.cudnn' 2>/dev/null || ls /usr/include/cudnn.h >/dev/null 2>&1 ||
 	pip install -q "nvidia-cudnn-cu$(/usr/local/cuda/bin/nvcc --version | sed -n 's/.*release \([0-9]*\).*/\1/p')"
@@ -227,7 +229,7 @@ for g in "${SEL[@]}"; do
 		# (~3.8 GB of downloads), then Light's CUDA build compares both
 		# stages and writes light.ply / light_views.png next to ref.ply.
 		# torch brings its own cuDNN: not the one LD_LIBRARY_PATH points cgo at.
-		env -u LD_LIBRARY_PATH python3 scripts/colab/trellis_check.py /content/trellis_work 2>&1 | tee "$LOGS/$STAMP-trellis-ref.log" | tail -8
+		LD_LIBRARY_PATH=$ORIG_LD_LIBRARY_PATH python3 scripts/colab/trellis_check.py /content/trellis_work 2>&1 | tee "$LOGS/$STAMP-trellis-ref.log" | tail -8
 		LIGHT_TRELLIS_DIR=/content/trellis_work run trellis ./diffusion 'TrellisReal|TrellisGaussiansReal'
 		cp /content/trellis_work/light_views.png /content/trellis_work/ref.json "$LOGS/" 2>/dev/null
 		;;
