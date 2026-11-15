@@ -2,6 +2,7 @@ package safetensors_test
 
 import (
 	"bytes"
+	"encoding/binary"
 	"slices"
 	"testing"
 
@@ -156,6 +157,28 @@ func TestAllDTypes(t *testing.T) {
 		if got.DType() != orig.DType() {
 			t.Errorf("%s dtype: got %v, want %v", name, got.DType(), orig.DType())
 		}
+	}
+}
+
+// F8_E8M0 (UE8M0 scales) loads as its raw bytes, U8.
+func TestF8E8M0LoadsAsBytes(t *testing.T) {
+	hdr := []byte(`{"s":{"dtype":"F8_E8M0","shape":[2],"data_offsets":[0,2]}}`)
+	var buf bytes.Buffer
+	var n [8]byte
+	binary.LittleEndian.PutUint64(n[:], uint64(len(hdr)))
+	buf.Write(n[:])
+	buf.Write(hdr)
+	buf.Write([]byte{127, 130})
+	loaded, _, err := safetensors.Load(bytes.NewReader(buf.Bytes()), device.CPU())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := loaded["s"]
+	if s.DType() != dtype.U8 {
+		t.Fatalf("dtype %v, want U8", s.DType())
+	}
+	if v := tensor.MustSlice[uint8](s); v[0] != 127 || v[1] != 130 {
+		t.Fatalf("bytes %v", v)
 	}
 }
 

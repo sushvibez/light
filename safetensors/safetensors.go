@@ -210,6 +210,11 @@ func parseDType(s string) (dtype.DType, error) {
 		return dtype.BF16, nil
 	case "F8_E4M3":
 		return dtype.F8E4M3, nil
+	case "F8_E8M0":
+		// Power-of-two block scales (UE8M0: 2^(b-127), 0xFF NaN), as
+		// DeepSeek-V4.1's ue8m0 checkpoints store them: loaded as their raw
+		// bytes, decoded by the model that reads them.
+		return dtype.U8, nil
 	case "I64":
 		return dtype.I64, nil
 	case "I32":
