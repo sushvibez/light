@@ -51,22 +51,30 @@ func TestDeepseekV41TinyMatchesReference(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			out, err := m.Forward(tok)
-			if err != nil {
-				t.Fatal(err)
-			}
-			c, _ := out.To(device.CPU())
-			got := tensor.MustSlice[float32](c)
-			if len(got) != len(ref.Logits) {
-				t.Fatalf("%d logits, want %d", len(got), len(ref.Logits))
-			}
-			md := 0.0
-			for i := range got {
-				md = math.Max(md, math.Abs(float64(got[i]-ref.Logits[i])))
-			}
-			t.Logf("logits: max diff %.3g over %d", md, len(got))
-			if !(md <= 1e-4) { // NaN fails too
-				t.Errorf("logits differ by %.3g", md)
+			// Every routed expert resident, then at most 3 (re-read from the
+			// checkpoint as the router picks them).
+			for _, budget := range []int{0, 3} {
+				m.ExpertBudget = budget
+				out, err := m.Forward(tok)
+				if err != nil {
+					t.Fatal(err)
+				}
+				c, _ := out.To(device.CPU())
+				got := tensor.MustSlice[float32](c)
+				if len(got) != len(ref.Logits) {
+					t.Fatalf("%d logits, want %d", len(got), len(ref.Logits))
+				}
+				md := 0.0
+				for i := range got {
+					md = math.Max(md, math.Abs(float64(got[i]-ref.Logits[i])))
+				}
+				t.Logf("expert budget %d (%d resident): logits max diff %.3g over %d", budget, m.ResidentExperts(), md, len(got))
+				if !(md <= 1e-4) { // NaN fails too
+					t.Errorf("logits differ by %.3g", md)
+				}
+				if budget > 0 && m.ResidentExperts() > budget {
+					t.Errorf("%d experts resident over a budget of %d", m.ResidentExperts(), budget)
+				}
 			}
 		})
 	}

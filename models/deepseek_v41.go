@@ -3,6 +3,7 @@ package models
 import (
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 
 	"light/device"
@@ -91,9 +92,44 @@ type DeepseekV41 struct {
 	engram *v41Engram
 	hc     *GLM5 // the hyper-connection helpers (hcWeights / hcCombine / rms)
 	dev    device.Device
+	// ExpertBudget, when positive, is how many routed experts stay widened
+	// at once; the least recently used are dropped (and re-read from the
+	// checkpoint when picked again). 0 keeps every expert once loaded.
+	ExpertBudget int
+	src          *idolLoader  // the checkpoint, for routed experts
+	resident     []*v41Expert // loaded routed experts, least recent first
 }
 
-type v41Expert struct{ W1, W2, W3 *nn.Linear }
+// v41Expert is an MLP; a routed one (name set) is nil until first picked.
+type v41Expert struct {
+	W1, W2, W3 *nn.Linear
+	name       string
+}
+
+// routed returns routed expert e of ly, loading it if needed.
+func (m *DeepseekV41) routed(ly *v41Layer, e int) (*v41Expert, error) {
+	ex := ly.Experts[e]
+	if ex.name == "" { // loaded eagerly
+		return ex, nil
+	}
+	if i := slices.Index(m.resident, ex); i >= 0 {
+		m.resident = append(slices.Delete(m.resident, i, i+1), ex)
+	} else {
+		if err := m.loadExpert(ex); err != nil {
+			return nil, err
+		}
+		m.resident = append(m.resident, ex)
+	}
+	for m.ExpertBudget > 0 && len(m.resident) > m.ExpertBudget {
+		old := m.resident[0]
+		old.W1, old.W2, old.W3 = nil, nil, nil
+		m.resident = m.resident[1:]
+	}
+	return ex, nil
+}
+
+// ResidentExperts is how many routed experts are widened in memory.
+func (m *DeepseekV41) ResidentExperts() int { return len(m.resident) }
 
 type v41Layer struct {
 	ID, Ratio             int
@@ -653,7 +689,12 @@ func (m *DeepseekV41) moe(o *iop, ly *v41Layer, x *tensor.Tensor) *tensor.Tensor
 		ti := o.do(func() (*tensor.Tensor, error) { return tensor.New(tok, []int{len(tok)}, m.dev) })
 		wt := o.do(func() (*tensor.Tensor, error) { return tensor.New(wv, []int{len(wv), 1}, m.dev) })
 		xs := o.do(func() (*tensor.Tensor, error) { return ops.IndexSelect(flat, ti) })
-		y := m.expert(o, ly.Experts[e], xs, wt)
+		ex, err := m.routed(ly, e)
+		if err != nil {
+			o.err = err
+			return nil
+		}
+		y := m.expert(o, ex, xs, wt)
 		// Scatter back with a one-hot (T, n) product.
 		oh := o.do(func() (*tensor.Tensor, error) {
 			v := make([]float32, T*len(tok))

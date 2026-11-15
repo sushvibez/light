@@ -20,7 +20,9 @@ import (
 // embed, layers.N.attn.wq_a, …, head), onto dev at F32. FP8 projections
 // (E4M3 with 32 × 32 UE8M0 block scales) stay block-scaled FP8 on CPU and
 // CUDA (widened at load elsewhere); the FP4 routed experts (e2m1 packed in
-// I8, 1 × 32 UE8M0 scales) are widened to F32 at load. The engram tables
+// I8, 1 × 32 UE8M0 scales) stay packed in the checkpoint and are widened to
+// F32 the first time the router picks them (DeepseekV41.ExpertBudget bounds
+// how many stay resident). The engram tables
 // stay in the (memory-mapped) checkpoint on the host; the engram hashing
 // also needs engram_token_map.json next to config.json. vision.*, aligner.*,
 // image_* and the DSpark heads (mtp.*) are not loaded.
@@ -73,7 +75,7 @@ func LoadDeepseekV41(dir string, dev device.Device) (*DeepseekV41, error) {
 	if q := top.Quant; q != nil && len(q.BlockSize) == 2 {
 		l.fp8Block = [2]int{q.BlockSize[0], q.BlockSize[1]}
 	}
-	m := &DeepseekV41{Cfg: cfg, dev: dev}
+	m := &DeepseekV41{Cfg: cfg, dev: dev, src: l}
 	m.hc = &GLM5{Cfg: GLM5Config{RMSNormEps: cfg.RMSNormEps, HCEps: cfg.HCEps, HCSinkhornIters: cfg.HCSinkhornIters},
 		ones: map[int]*tensor.Tensor{}, dev: dev}
 	if len(cfg.EngramLayerIDs) > 0 {
@@ -128,8 +130,14 @@ func LoadDeepseekV41(dir string, dev device.Device) (*DeepseekV41, error) {
 		f := p + "ffn."
 		ly.GateW, ly.GateBias = l.param(f+"gate.weight"), l.host(f+"gate.bias")
 		ly.Shared = expert(f + "shared_experts")
-		for e := range cfg.NRoutedExperts {
-			ly.Experts = append(ly.Experts, expert(fmt.Sprintf("%sexperts.%d", f, e)))
+		for e := range cfg.NRoutedExperts { // loaded on first use
+			name := fmt.Sprintf("%sexperts.%d", f, e)
+			for _, w := range []string{".w1.weight", ".w2.weight", ".w3.weight"} {
+				if _, ok := hf[name+w]; !ok && l.err == nil {
+					l.err = fmt.Errorf("missing %s%s", name, w)
+				}
+			}
+			ly.Experts = append(ly.Experts, &v41Expert{name: name})
 		}
 		if ly.EngramIdx >= 0 {
 			en := p + "engram."
@@ -167,6 +175,29 @@ func LoadDeepseekV41(dir string, dev device.Device) (*DeepseekV41, error) {
 		}
 	}
 	return m, nil
+}
+
+// loadExpert widens routed expert e's weights from the checkpoint (through
+// a loader of its own, so the shared map keeps only the packed tensors).
+func (m *DeepseekV41) loadExpert(e *v41Expert) error {
+	sub := &idolLoader{hf: map[string]*tensor.Tensor{}, dev: m.dev, fp8Block: m.src.fp8Block}
+	for _, w := range []string{".w1", ".w2", ".w3"} {
+		for _, suf := range []string{".weight", ".scale", ".weight_scale_inv"} {
+			if t, ok := m.src.hf[e.name+w+suf]; ok {
+				sub.hf[e.name+w+suf] = t
+			}
+		}
+	}
+	lin := func(n string) *nn.Linear {
+		v41Prep(sub, n)
+		return sub.linear(n)
+	}
+	w1, w2, w3 := lin(e.name+".w1"), lin(e.name+".w2"), lin(e.name+".w3")
+	if sub.err != nil {
+		return fmt.Errorf("deepseek_v41 %s: %w", e.name, sub.err)
+	}
+	e.W1, e.W2, e.W3 = w1, w2, w3
+	return nil
 }
 
 // v41CheckSharing checks that every compressing layer reads a compressed KV
