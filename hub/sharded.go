@@ -32,15 +32,21 @@ func DownloadModelSafetensors(repo, revision string) ([]string, error) {
 	}
 	// Try the single-file form first. On a 404 we fall through to the sharded
 	// layout; other errors (auth, network) bubble up.
-	p, err := Download(repo, revision, "model.safetensors")
+	p, sha, err := downloadAt(repo, revision, "model.safetensors", nil)
 	if err == nil {
 		return []string{p}, nil
 	}
 	if !isHTTPNotFound(err) {
 		return nil, err
 	}
+	if sha != "" {
+		revision = sha // the probe's commit: the whole load stays on it
+	}
 	// Sharded layout: index.json names every shard.
-	idxPath, err := Download(repo, revision, "model.safetensors.index.json")
+	// Shards are then fetched from the commit the index came from, so a
+	// branch moving mid-load cannot mix commits.
+	var idxPath string
+	idxPath, sha, err = downloadAt(repo, revision, "model.safetensors.index.json", nil)
 	if err != nil {
 		return nil, fmt.Errorf("DownloadModelSafetensors: neither single nor sharded weights found for %s: %w", repo, err)
 	}
@@ -57,7 +63,15 @@ func DownloadModelSafetensors(repo, revision string) ([]string, error) {
 	}
 	uniq := make(map[string]struct{}, 8)
 	for _, shard := range idx.WeightMap {
+		// Shard names are checkpoint-controlled: reject traversal before
+		// fetching anything.
+		if _, err := artifactPath(shard); err != nil {
+			return nil, fmt.Errorf("DownloadModelSafetensors: %s index: %w", repo, err)
+		}
 		uniq[shard] = struct{}{}
+	}
+	if sha != "" {
+		revision = sha
 	}
 	shards := make([]string, 0, len(uniq))
 	for s := range uniq {
@@ -66,7 +80,7 @@ func DownloadModelSafetensors(repo, revision string) ([]string, error) {
 	sort.Strings(shards) // deterministic load order
 	paths := make([]string, len(shards))
 	for i, shard := range shards {
-		p, err := Download(repo, revision, shard)
+		p, _, err := downloadAt(repo, revision, shard, nil)
 		if err != nil {
 			return nil, fmt.Errorf("DownloadModelSafetensors: shard %s: %w", shard, err)
 		}
