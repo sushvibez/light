@@ -30,6 +30,8 @@ plus a pipeline.json, and records with TRELLIS's own pipeline code:
             recorded torch.randn noise, the decoder's logits and the coords
   preprocess TrellisImageTo3DPipeline.preprocess_image on an RGBA image
             (saved as object.png -> preprocessed.png, 518 x 518)
+Re-running it rewrites pipeline.json without the stage-2 entries: run
+ref_trellis_slat.py after it (that one adds them and the stage-2 fixtures).
 """
 import json, os, sys, types
 

@@ -154,29 +154,7 @@ func LoadTrellisFlow(base string, dev device.Device) (*TrellisFlow, error) {
 	if a.ShareMod {
 		m.AdaLN = l.linear("adaLN_modulation.1")
 	}
-	mha := func(name string, cross, norm bool) *idolMHA {
-		h := &idolMHA{Out: l.linear(name + ".to_out")}
-		if cross {
-			h.Q, h.KV = l.linear(name+".to_q"), l.linear(name+".to_kv")
-		} else {
-			h.QKV = l.linear(name + ".to_qkv")
-		}
-		if norm {
-			h.QNorm, h.KNorm = l.param(name+".q_rms_norm.gamma"), l.param(name+".k_rms_norm.gamma")
-		}
-		return h
-	}
-	for i := range a.NumBlocks {
-		p := fmt.Sprintf("blocks.%d", i)
-		b := &trellisBlock{
-			Self: mha(p+".self_attn", false, a.QKRMSNorm), Cross: mha(p+".cross_attn", true, a.QKRMSNormCross),
-			Norm2: l.norm(p + ".norm2"), FFN: l.ffn(p + ".mlp"),
-		}
-		if !a.ShareMod {
-			b.AdaLN = l.linear(p + ".adaLN_modulation.1")
-		}
-		m.Blocks = append(m.Blocks, b)
-	}
+	m.Blocks = l.trellisBlocks("blocks", a.NumBlocks, a.ShareMod, a.QKRMSNorm, a.QKRMSNormCross)
 	if _, ok := l.hf["pos_emb"]; ok {
 		m.PosEmb = l.param("pos_emb")
 	} else if l.err == nil {
@@ -281,50 +259,7 @@ func (o *TrellisSampleOptions) defaults() {
 // means zeros (TRELLIS's get_cond: torch.zeros_like(cond)). sigma_min
 // only enters the sampler's x_0 predictions, not the samples.
 func TrellisSample(m *TrellisFlow, noise, cond, negCond *tensor.Tensor, o TrellisSampleOptions) (*tensor.Tensor, error) {
-	o.defaults()
-	var err error
-	if negCond == nil && o.CFG > 0 {
-		if negCond, err = tensor.Zeros(cond.DType(), cond.Shape().Dims(), cond.Device()); err != nil {
-			return nil, err
-		}
-	}
-	grid := make([]float64, o.Steps+1)
-	for i := range grid {
-		t := float64(i)*(-1/float64(o.Steps)) + 1 // np.linspace(1, 0, steps + 1)
-		if i == o.Steps {
-			t = 0
-		}
-		grid[i] = o.RescaleT * t / (1 + (o.RescaleT-1)*t)
-	}
-	B := noise.Dim(0)
-	x := noise
-	for i := range o.Steps {
-		t, tPrev := grid[i], grid[i+1]
-		ts := make([]float32, B)
-		for b := range ts {
-			ts[b] = float32(1000 * t)
-		}
-		v, err := m.Forward(x, ts, cond)
-		if err != nil {
-			return nil, err
-		}
-		if o.CFG > 0 && o.Interval[0] <= t && t <= o.Interval[1] {
-			u, err := m.Forward(x, ts, negCond)
-			if err != nil {
-				return nil, err
-			}
-			if v, err = idolGuide(v, u, o.CFG); err != nil {
-				return nil, err
-			}
-		}
-		if x, err = idolEuler(x, v, t-tPrev); err != nil {
-			return nil, err
-		}
-		if o.Step != nil {
-			o.Step(i, o.Steps)
-		}
-	}
-	return x, nil
+	return trellisEulerSample(m.Forward, noise.Dim(0), noise, cond, negCond, o)
 }
 
 // TrellisImageTokens is TRELLIS's encode_image on top of DINOv2: the

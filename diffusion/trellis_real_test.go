@@ -63,7 +63,7 @@ func TestTrellisRealMatchesReference(t *testing.T) {
 		}
 	}
 	t.Logf("device %v; reference seed %d, fp16 %v, %d occupied", dev, meta.Seed, meta.FP16, meta.Occupied)
-	o := TrellisLoadOptions{}
+	o := TrellisLoadOptions{SparseStructureOnly: true}
 	if d := filepath.Join(dir, "dinov2-with-registers-large"); trellisDirExists(d) {
 		o.DINOv2 = d
 	}

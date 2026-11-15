@@ -1,0 +1,21 @@
+{
+    "name": "SLatFlowModel",
+    "args": {
+        "resolution": 16,
+        "in_channels": 8,
+        "out_channels": 8,
+        "model_channels": 64,
+        "cond_channels": 64,
+        "num_blocks": 2,
+        "num_heads": 4,
+        "mlp_ratio": 4,
+        "patch_size": 2,
+        "num_io_res_blocks": 2,
+        "io_block_channels": [
+            16
+        ],
+        "pe_mode": "ape",
+        "qk_rms_norm": true,
+        "use_fp16": true
+    }
+}

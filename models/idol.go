@@ -164,6 +164,7 @@ type idolCommon struct {
 	ones, zeros *tensor.Tensor // (C,)
 	onesD       *tensor.Tensor // (head dim,)
 	dev         device.Device
+	normCache   map[int][2]*tensor.Tensor // normN's ones / zeros per width
 }
 
 func newIdolCommon(C, H int, dev device.Device) (*idolCommon, error) {

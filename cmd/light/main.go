@@ -41,6 +41,7 @@ func init() {
 		{"perf", "[model]", "this host's measured performance table", cmdPerf},
 		{"image", "<org/repo> <prompt>", "generate or edit an image (FLUX.2 klein, Z-Image, FLUX.1) into a PNG", cmdImage},
 		{"idol", "<image>", "one image of an object to a 3D Gaussian splat .ply (speridlabs/idol)", cmdIdol},
+		{"trellis", "<image>", "one cut-out image of an object to a 3D Gaussian splat .ply (microsoft/TRELLIS-image-large)", cmdTrellis},
 		{"energraft", "<prompt>", "continue a prompt with Energraft-EBT, an energy-based LM (gradient-refined next tokens)", cmdEnergraft},
 	}
 }
