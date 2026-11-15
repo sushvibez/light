@@ -25,7 +25,9 @@ type ExpertStream struct {
 	Load  func(e int) (gateUp, down *tensor.Tensor, err error)
 	Slots int
 	// Loads counts experts read in; Hits experts already resident.
-	Loads, Hits int64
+	// Prefetched counts background loads Prefetch started; PrefetchUsed
+	// those a forward then needed (the prediction's hit count).
+	Loads, Hits, Prefetched, PrefetchUsed int64
 
 	mu      sync.Mutex
 	dev     device.Device
@@ -35,6 +37,7 @@ type ExpertStream struct {
 	used    []uint64
 	clock   uint64
 	pending map[int]*expertLoad
+	fromPF  map[int]bool // resident or pending through Prefetch, not yet used
 }
 
 type expertLoad struct {
@@ -43,13 +46,45 @@ type expertLoad struct {
 	err    error
 }
 
+// prefetchMaxTokens bounds the batches that predict the next layer: decode
+// steps and short chunks, not a whole prompt.
+const prefetchMaxTokens = 8
+
+// prefetchFor predicts the experts m routes x (T, H) to and prefetches
+// them. Errors only cost the prefetch.
+func (m *SparseMoE) prefetchFor(x *tensor.Tensor) {
+	route, err := m.route(x)
+	if err != nil {
+		return
+	}
+	idsT, err := route.TopKIDs.To(device.CPU())
+	if err == nil {
+		idsT, err = idsT.Contiguous()
+	}
+	if err != nil {
+		return
+	}
+	seen := map[int]bool{}
+	var ids []int
+	for _, e := range tensor.MustSlice[int64](idsT) {
+		if !seen[int(e)] {
+			seen[int(e)] = true
+			ids = append(ids, int(e))
+		}
+	}
+	if len(ids) > m.Stream.Slots {
+		ids = ids[:m.Stream.Slots]
+	}
+	m.Stream.Prefetch(ids)
+}
+
 // NewExpertStream returns a stream with slots resident experts on dev.
 func NewExpertStream(slots int, dev device.Device, load func(e int) (*tensor.Tensor, *tensor.Tensor, error)) (*ExpertStream, error) {
 	if slots < 1 || load == nil {
 		return nil, fmt.Errorf("nn.ExpertStream: need ≥ 1 slot and a loader")
 	}
 	s := &ExpertStream{Load: load, Slots: slots, dev: dev, slotOf: map[int]int{}, owner: make([]int, slots),
-		used: make([]uint64, slots), pending: map[int]*expertLoad{}}
+		used: make([]uint64, slots), pending: map[int]*expertLoad{}, fromPF: map[int]bool{}}
 	for i := range s.owner {
 		s.owner[i] = -1
 	}
@@ -69,6 +104,8 @@ func (s *ExpertStream) Prefetch(ids []int) {
 			continue
 		}
 		s.start(e)
+		s.Prefetched++
+		s.fromPF[e] = true
 	}
 }
 
@@ -102,6 +139,10 @@ func (s *ExpertStream) ensure(need []int) (map[int]int, error) {
 	}
 	var waits []int
 	for _, e := range need {
+		if s.fromPF[e] {
+			s.PrefetchUsed++
+			delete(s.fromPF, e)
+		}
 		s.clock++
 		if sl, ok := s.slotOf[e]; ok {
 			s.used[sl] = s.clock
@@ -190,6 +231,7 @@ func (s *ExpertStream) install(e int, gu, dn *tensor.Tensor, keep map[int]bool) 
 	}
 	if o := s.owner[best]; o >= 0 {
 		delete(s.slotOf, o)
+		delete(s.fromPF, o)
 	}
 	s.owner[best], s.slotOf[e] = e, best
 	s.clock++

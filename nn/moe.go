@@ -48,6 +48,10 @@ type SparseMoE struct {
 	Stream *ExpertStream
 	// StreamSlots asks the loader for a Stream with this many slots.
 	StreamSlots int
+	// Next is the following MoE layer: a streamed layer running a small
+	// batch (decode) predicts Next's experts by applying Next's router to
+	// its own input and prefetches them while it computes.
+	Next *SparseMoE
 }
 
 // NewSparseMoEUninit allocates a block with zeroed expert weights at wdt;
@@ -135,24 +139,10 @@ func (m *SparseMoE) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 			return nil, err
 		}
 	}
-	logits, err := m.Gate.Forward(gateIn)
-	if err != nil {
-		return nil, err
+	if m.Stream != nil && m.Next != nil && m.Next.Stream != nil && T <= prefetchMaxTokens {
+		m.Next.prefetchFor(gateIn)
 	}
-	if logits.DType() != dtype.F32 {
-		if logits, err = ops.Cast(logits, dtype.F32); err != nil {
-			return nil, err
-		}
-	}
-	var route *ops.MoERouting
-	if m.Router != nil {
-		route, err = m.Router(logits)
-	} else {
-		var probs *tensor.Tensor
-		if probs, err = ops.Softmax(logits, -1); err == nil {
-			route, err = ops.MoERoute(probs, m.TopK, m.NormTopK)
-		}
-	}
+	route, err := m.route(gateIn)
 	if err != nil {
 		return nil, err
 	}
@@ -178,6 +168,27 @@ func (m *SparseMoE) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 	}
 	_ = T
 	return y.Reshape(dims...)
+}
+
+// route runs the router on gateIn (T, H): softmax + top-k, or Router.
+func (m *SparseMoE) route(gateIn *tensor.Tensor) (*ops.MoERouting, error) {
+	logits, err := m.Gate.Forward(gateIn)
+	if err != nil {
+		return nil, err
+	}
+	if logits.DType() != dtype.F32 {
+		if logits, err = ops.Cast(logits, dtype.F32); err != nil {
+			return nil, err
+		}
+	}
+	if m.Router != nil {
+		return m.Router(logits)
+	}
+	probs, err := ops.Softmax(logits, -1)
+	if err != nil {
+		return nil, err
+	}
+	return ops.MoERoute(probs, m.TopK, m.NormTopK)
 }
 
 // runExperts is the routed SwiGLU on flat (T, H) with stacked expert

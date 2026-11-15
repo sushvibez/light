@@ -112,6 +112,7 @@ func loadQwen2(repo string, dev device.Device, weightDT dtype.DType) (*Llama, er
 	if err := mapHFToLlama(llama, tensors); err != nil {
 		return nil, err
 	}
+	linkExpertStreams(llama)
 	// MiMo-7B ships one multi-token-prediction layer: keep it as a draft
 	// head for speculative decoding (the forward never uses it).
 	if llama.MTP, err = loadMTPHead(llama, tensors, "model.mtp_layers.0."); err != nil {
@@ -506,4 +507,19 @@ func envExpertSlots() int {
 		return 0
 	}
 	return n
+}
+
+// linkExpertStreams points each streamed MoE layer at the next one, so a
+// decode step prefetches the next layer's predicted experts.
+func linkExpertStreams(m *Llama) {
+	var prev *nn.SparseMoE
+	for _, b := range m.Blocks {
+		if b.MoE == nil || b.MoE.Stream == nil {
+			continue
+		}
+		if prev != nil {
+			prev.Next = b.MoE
+		}
+		prev = b.MoE
+	}
 }

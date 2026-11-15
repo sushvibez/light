@@ -93,3 +93,43 @@ func TestQwen3MoEStreamedExpertsCPU(t *testing.T) {
 		}
 	}
 }
+
+// Decode steps through streamed experts (3 slots) equal the resident
+// model's, with the next layer's experts predicted and prefetched.
+func TestQwen3MoEStreamedDecodeCPU(t *testing.T) {
+	qwen3MoECached(t)
+	ref, err := LoadCausalLMFromHF(qwen3MoERepo, device.CPU(), dtype.F32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LIGHT_EXPERT_SLOTS", "3")
+	m, err := LoadCausalLMFromHF(qwen3MoERepo, device.CPU(), dtype.F32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Blocks[0].MoE.Next != m.Blocks[1].MoE {
+		t.Fatal("streamed layers not linked for prefetch")
+	}
+	cr, cm := NewKVCache(ref.NumLayers()), NewKVCache(m.NumLayers())
+	lastLogits(t, ref, qwen3MoEPromptIDs, cr, device.CPU())
+	lastLogits(t, m, qwen3MoEPromptIDs, cm, device.CPU())
+	md := 0.0
+	for _, id := range []int64{11, 279, 15678, 5562, 13, 576} {
+		a := lastLogits(t, ref, []int64{id}, cr, device.CPU())
+		b := lastLogits(t, m, []int64{id}, cm, device.CPU())
+		for i := range a {
+			md = math.Max(md, math.Abs(float64(a[i]-b[i])))
+		}
+	}
+	var pf, used, loads int64
+	for _, b := range m.Blocks {
+		pf, used, loads = pf+b.MoE.Stream.Prefetched, used+b.MoE.Stream.PrefetchUsed, loads+b.MoE.Stream.Loads
+	}
+	t.Logf("decode max diff %.3g; %d loads, %d prefetched, %d of them used", md, loads, pf, used)
+	if md != 0 {
+		t.Errorf("streamed decode differs by %.3g", md)
+	}
+	if pf == 0 {
+		t.Error("no prefetch during decode")
+	}
+}
