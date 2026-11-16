@@ -31,9 +31,10 @@ func cmdTrellis(args []string) error {
 	slatCFG := fs.Float64("slat-cfg", 0, "structured-latent guidance (default: pipeline.json's, 5; negative disables)")
 	pre := fs.Bool("preprocessed", false, "the image is already TRELLIS's 518 x 518 composited input (skip the alpha crop)")
 	f32 := fs.Bool("f32", false, "keep F32 weights (default: 16-bit weight storage, F32 compute)")
+	matte := fs.String("matte", "speridlabs/idol", "BiRefNet weights for images without a transparent background: a repo or folder with birefnet.safetensors or model.safetensors, or a .safetensors file (empty refuses such images; TRELLIS itself uses rembg's u2net)")
 	views := fs.Int("views", 4, "also render this many turntable views into <name>_views.png (0: none)")
 	fs.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: light trellis [flags] <image>\n\nOne image of an object to a 3D Gaussian splat (.ply, the 3DGS layout TRELLIS's save_ply writes, y up). The image needs a transparent background (TRELLIS's rembg step is not ported): the object is cropped by its alpha.\n\nflags:")
+		fmt.Fprintln(os.Stderr, "usage: light trellis [flags] <image>\n\nOne image of an object to a 3D Gaussian splat (.ply, the 3DGS layout TRELLIS's save_ply writes, y up). An image with a transparent background is cropped by its alpha; any other has its background removed by BiRefNet first (-matte; TRELLIS uses rembg's u2net there, so the cut-out can differ).\n\nflags:")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -56,7 +57,7 @@ func cmdTrellis(args []string) error {
 		return err
 	}
 	t0 := time.Now()
-	p, err := diffusion.LoadTrellisPipeline(*repo, d, diffusion.TrellisLoadOptions{DINOv2: *dino, Storage16: !*f32})
+	p, err := diffusion.LoadTrellisPipeline(*repo, d, diffusion.TrellisLoadOptions{DINOv2: *dino, Storage16: !*f32, Matte: matteFor(img, *matte, *pre)})
 	if err != nil {
 		return err
 	}
@@ -92,6 +93,16 @@ func cmdTrellis(args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s and %s_input.png\n", *out, base)
 	return nil
+}
+
+// matteFor returns the BiRefNet weights to load: only when the image needs
+// a cut-out (no alpha, not preprocessed), so cut-out inputs neither
+// download nor load it.
+func matteFor(img image.Image, matte string, preprocessed bool) string {
+	if preprocessed || diffusion.HasAlpha(img) {
+		return ""
+	}
+	return matte
 }
 
 func savePNG(path string, im image.Image) error {

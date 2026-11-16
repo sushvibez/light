@@ -112,7 +112,7 @@ func TestTrellisRealMatchesReference(t *testing.T) {
 
 	// Preprocessing (Lanczos rounding differs slightly from Pillow's).
 	img := trellisReadPNG(t, filepath.Join(dir, "object.png"))
-	px, _, err := trellisPreprocess(img, S)
+	px, _, err := trellisPreprocess(img, S, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

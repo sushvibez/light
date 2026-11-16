@@ -35,7 +35,7 @@ func trellisReadPNG(t *testing.T, path string) image.Image {
 func TestTrellisPreprocessMatchesPIL(t *testing.T) {
 	want := trellisReadPNG(t, trellisTiny+"/preprocessed.png")
 	S := want.Bounds().Dx()
-	px, _, err := trellisPreprocess(trellisReadPNG(t, trellisTiny+"/object.png"), S)
+	px, _, err := trellisPreprocess(trellisReadPNG(t, trellisTiny+"/object.png"), S, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

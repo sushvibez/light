@@ -8,6 +8,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"light/device"
 	"light/dtype"
@@ -38,7 +39,11 @@ type TrellisPipeline struct {
 	SLatSampler models.TrellisSampleOptions // pipeline.json's slat_sampler.params
 	SLatMean    []float64                   // slat_normalization
 	SLatStd     []float64
-	Dev         device.Device
+	// BiRefNet cuts out images without alpha (TRELLIS uses rembg's u2net
+	// there); nil unless TrellisLoadOptions.Matte names it, and such images
+	// are then refused.
+	BiRefNet *models.BiRefNet
+	Dev      device.Device
 }
 
 // TrellisLoadOptions adjust LoadTrellisPipeline.
@@ -52,6 +57,11 @@ type TrellisLoadOptions struct {
 	// SparseStructureOnly loads stage 1 only (no SLat flow model or
 	// Gaussian decoder).
 	SparseStructureOnly bool
+	// Matte names BiRefNet weights for images without alpha: a .safetensors
+	// file, or a Hub repo / folder with birefnet.safetensors (speridlabs/idol)
+	// or model.safetensors (ZhengPeng7/BiRefNet). Empty: no background
+	// removal.
+	Matte string
 }
 
 // trellisDINOv2Repos maps TRELLIS's torch.hub image_cond_model names to
@@ -196,6 +206,15 @@ func LoadTrellisPipeline(repo string, dev device.Device, opts ...TrellisLoadOpti
 	}
 	if err := load(func() (err error) { p.DINO, err = models.LoadDINOv2(ddir, dev); return }); err != nil {
 		return nil, err
+	}
+	if o.Matte != "" {
+		path, err := trellisMattePath(o.Matte)
+		if err != nil {
+			return nil, err
+		}
+		if err := load(func() (err error) { p.BiRefNet, err = models.LoadBiRefNet(path, dev); return }); err != nil {
+			return nil, err
+		}
 	}
 	if p.DINO.Cfg.HiddenSize != p.Flow.Args.CondChannels {
 		return nil, fmt.Errorf("trellis: DINOv2 width %d, the flow model expects %d", p.DINO.Cfg.HiddenSize, p.Flow.Args.CondChannels)
@@ -356,7 +375,11 @@ func (p *TrellisPipeline) run(o TrellisOptions, stage2 bool) (*TrellisResult, er
 	if o.Preprocessed {
 		pixels, input, err = trellisPixels(o.Image, S)
 	} else {
-		pixels, input, err = trellisPreprocess(o.Image, S)
+		var matte idolMatte
+		if p.BiRefNet != nil {
+			matte = p.BiRefNet.RemoveBackground
+		}
+		pixels, input, err = trellisPreprocess(o.Image, S, matte)
 	}
 	if err != nil {
 		return nil, err
@@ -446,17 +469,63 @@ func (p *TrellisPipeline) run(o TrellisOptions, stage2 bool) (*TrellisResult, er
 	return res, nil
 }
 
-// trellisPreprocess is TrellisImageTo3DPipeline.preprocess_image for an
-// image with alpha: crop a square of 1.2 x the bounding box of alpha >
-// 0.8 around its centre (outside the image is transparent), resize to size
-// x size (Lanczos, as Pillow), premultiply by alpha and truncate to 8 bits.
-// Returns the RGB planes (3, size, size) in [0, 1] and the image. Images
-// without alpha need rembg upstream, which is not ported: they are refused.
-func trellisPreprocess(img image.Image, size int) ([]float32, *image.NRGBA, error) {
-	if !idolHasAlpha(img) {
-		return nil, nil, fmt.Errorf("trellis: the image has no transparent background (TRELLIS removes it with rembg, which Light does not port); give an RGBA image with the object cut out")
+// HasAlpha reports whether img has a real alpha channel (some pixel not
+// fully opaque): such images need no background removal.
+func HasAlpha(img image.Image) bool { return idolHasAlpha(img) }
+
+// trellisMattePath resolves TrellisLoadOptions.Matte to a safetensors file.
+func trellisMattePath(m string) (string, error) {
+	if strings.HasSuffix(m, ".safetensors") {
+		if _, err := os.Stat(m); err == nil {
+			return m, nil
+		}
 	}
+	var errs []string
+	for _, name := range []string{"birefnet.safetensors", "model.safetensors"} {
+		dir, err := fetchFiles(m, name)
+		if err == nil {
+			path := filepath.Join(dir, name)
+			if _, err = os.Stat(path); err == nil {
+				return path, nil
+			}
+		}
+		errs = append(errs, err.Error())
+	}
+	return "", fmt.Errorf("trellis: background-removal weights %q: %s", m, strings.Join(errs, "; "))
+}
+
+// trellisPreprocess is TrellisImageTo3DPipeline.preprocess_image: an image
+// without alpha is shrunk to at most 1024 on its long side (Lanczos) and
+// cut out by matte (BiRefNet standing in for rembg's u2net; refused when
+// nil); then crop a square of 1.2 x the bounding box of alpha > 0.8
+// around its centre (outside the image is transparent), resize to size x
+// size (Lanczos, as Pillow), premultiply by alpha and truncate to 8 bits.
+// Returns the RGB planes (3, size, size) in [0, 1] and the image.
+func trellisPreprocess(img image.Image, size int, matte idolMatte) ([]float32, *image.NRGBA, error) {
 	p := idolPlanesOf(img)
+	if !idolHasAlpha(img) {
+		if matte == nil {
+			return nil, nil, fmt.Errorf("trellis: the image has no transparent background and no background remover is loaded (TrellisLoadOptions.Matte, light trellis -matte); give an RGBA image with the object cut out")
+		}
+		if sc := 1024 / float64(max(p.w, p.h)); sc < 1 {
+			p = p.resize(int(float64(p.w)*sc), int(float64(p.h)*sc))
+		}
+		n := p.w * p.h
+		rgb := make([]float32, 3*n)
+		for i := range n {
+			for c, pl := range [3][]float64{p.r, p.g, p.b} {
+				pl[i] = math.Round(math.Min(math.Max(pl[i], 0), 1)*255) / 255
+				rgb[c*n+i] = float32(pl[i])
+			}
+		}
+		a, err := matte(rgb, p.w, p.h)
+		if err != nil {
+			return nil, nil, fmt.Errorf("trellis: background removal: %w", err)
+		}
+		for i := range n {
+			p.a[i] = float64(a[i]) / 255
+		}
+	}
 	left, top, right, bottom := p.w, p.h, -1, -1
 	for y := range p.h {
 		for x := range p.w {
