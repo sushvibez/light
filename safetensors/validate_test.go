@@ -7,8 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
+	"time"
 
 	"light/device"
 	"light/dtype"
@@ -127,6 +129,9 @@ func TestMappedRoundTrip(t *testing.T) {
 	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// The tensors map the file, which Windows cannot delete while mapped:
+	// before TempDir's cleanup, drop them and let the collector unmap it.
+	t.Cleanup(func() { waitRemovable(t, path) })
 	got, _, err := safetensors.LoadFiles([]string{path}, device.CPU())
 	if err != nil {
 		t.Fatal(err)
@@ -137,4 +142,19 @@ func TestMappedRoundTrip(t *testing.T) {
 	if got["e"].NumElements() != 0 {
 		t.Errorf("e has %d elements", got["e"].NumElements())
 	}
+}
+
+// waitRemovable collects garbage until path can be removed (its mapping's
+// cleanup has run), for up to five seconds.
+func waitRemovable(t *testing.T, path string) {
+	t.Helper()
+	var err error
+	for range 100 {
+		runtime.GC()
+		if err = os.Remove(path); err == nil || os.IsNotExist(err) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Logf("%s still mapped: %v", path, err)
 }
