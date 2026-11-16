@@ -120,7 +120,7 @@ Light already has. Sizes are BF16 safetensors.
    DeepSeek-V4.1 Flash (decode cache, on-demand experts, truncated real-weight
    check done); Kimi K3.1 (decode cache done) — packed MXFP4 (real
    ~2 TB not runnable here). Expert streaming done for all three (tiny);
-   next a real streamed run on Colab, and Edge0-35B-A3B itself (MLX 4-bit + LoRA).
+   next a real streamed run on Colab. Edge0-35B-A3B (Qwen3.5-MoE, MLX 4-bit + LoRA, top-4): loader tiny-verified 2026-11-16; next a real run (19.5 GB, `LIGHT_EXPERT_SLOTS`).
 3. **Energraft-EBT-Qwen3-1.7B**: done (real weights match the release's
    code on Colab; `light energraft`).
 4. **LLaDA 8B Instruct**, **Dream 7B**: done (real weights match on Colab;
