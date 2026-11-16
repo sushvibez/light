@@ -74,6 +74,24 @@ func TestEdge0TinyMLXMatchesTransformers(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkEdge0Logits(t, lastLogits(t, m, ref.IDs, NewKVCache(m.NumLayers()), cpu), ref.Base, 0.2)
+
+	// The CLI's CPU default (w16): F32 compute, the dense weights narrowed
+	// to BF16 storage (the expanded 8-bit router and embedding round), the
+	// 4-bit ones left packed: 0.061 at most here.
+	if m, err = LoadQwen35FromHF(edge0TinyDir, cpu, dtype.F32); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := StoreWeights16(m, dtype.BF16); err != nil {
+		t.Fatal(err)
+	}
+	checkEdge0Logits(t, lastLogits(t, m, ref.IDs, NewKVCache(m.NumLayers()), cpu), ref.Base, 0.1)
+
+	// The engine's entry point dispatches qwen3_5_moe here.
+	if lm, err := LoadChatModelFromHF(edge0TinyDir, cpu, dtype.F32); err != nil {
+		t.Fatal(err)
+	} else if _, ok := lm.(*Qwen35); !ok {
+		t.Fatalf("LoadChatModelFromHF: %T", lm)
+	}
 }
 
 func TestEdge0TinyLoRAMatchesTransformers(t *testing.T) {
