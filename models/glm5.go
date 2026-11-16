@@ -116,10 +116,17 @@ type glm5Layer struct {
 	Experts    []*glm5Expert
 	RouterW    *tensor.Tensor // (E, D) F32
 	RouterBias []float32
+	// Stream holds the routed experts instead of Experts when they are
+	// streamed from the checkpoint (LIGHT_EXPERT_SLOTS); next is the
+	// following streamed layer, whose picks a decode step prefetches.
+	Stream *nn.ExpertCache[*glm5Expert]
+	next   *glm5Layer
 }
 
 // LoadGLM5 loads GLM-5.3 (a folder with config.json and safetensors) onto
-// dev at F32 (16-bit linear weights under nn.WithWeightStorage16).
+// dev at F32 (16-bit linear weights under nn.WithWeightStorage16). With
+// LIGHT_EXPERT_SLOTS set, each sparse layer keeps only that many routed
+// experts loaded, read from the (memory-mapped) checkpoint when picked.
 func LoadGLM5(dir string, dev device.Device) (*GLM5, error) {
 	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
 	if err != nil {
@@ -243,8 +250,24 @@ func LoadGLM5(dir string, dev device.Device) (*GLM5, error) {
 			ly.RouterW = l.param(p + "mlp.gate.weight")
 			ly.RouterBias = l.host(p + "mlp.gate.e_score_correction_bias")
 			ly.Shared = mlp(p + "mlp.shared_experts")
-			if ly.Experts, err = glm5LoadExperts(l, p+"mlp.experts", cfg); err != nil {
+			load, err := glm5ExpertLoader(l, p+"mlp.experts", cfg)
+			if err != nil {
 				return nil, err
+			}
+			if slots := envExpertSlots(); slots > 0 {
+				if ly.Stream, err = nn.NewExpertCache(min(slots, cfg.NRoutedExperts), load); err != nil {
+					return nil, err
+				}
+			} else {
+				for e := range cfg.NRoutedExperts {
+					ex, err := load(e)
+					if err != nil {
+						return nil, err
+					}
+					ly.Experts = append(ly.Experts, ex)
+				}
+				delete(hf, p+"mlp.experts.gate_up_proj")
+				delete(hf, p+"mlp.experts.down_proj")
 			}
 		} else {
 			ly.Dense = mlp(p + "mlp")
@@ -256,6 +279,15 @@ func LoadGLM5(dir string, dev device.Device) (*GLM5, error) {
 	}
 	if l.err != nil {
 		return nil, fmt.Errorf("glm5: %w", l.err)
+	}
+	var prev *glm5Layer
+	for _, ly := range m.Layers {
+		if ly.Stream != nil {
+			if prev != nil {
+				prev.next = ly
+			}
+			prev = ly
+		}
 	}
 	return m, nil
 }
@@ -302,49 +334,59 @@ func glm5Rename(hf map[string]*tensor.Tensor) error {
 	return nil
 }
 
-// glm5LoadExperts reads the routed experts, fused (transformers' (E, 2I, D)
-// gate_up_proj and (E, D, I) down_proj) or per expert (experts.e.*_proj).
-func glm5LoadExperts(l *idolLoader, p string, cfg GLM5Config) ([]*glm5Expert, error) {
-	E, I := cfg.NRoutedExperts, cfg.MoEIntermediate
-	out := make([]*glm5Expert, E)
+// glm5ExpertLoader returns a reader of routed expert e from the
+// checkpoint, per expert (experts.e.*_proj) or sliced from transformers'
+// fused (E, 2I, D) gate_up_proj and (E, D, I) down_proj. It never writes
+// into l's map, so loads may run concurrently.
+func glm5ExpertLoader(l *idolLoader, p string, cfg GLM5Config) (func(e int) (*glm5Expert, error), error) {
+	I := cfg.MoEIntermediate
 	gu, fused := l.hf[p+".gate_up_proj"]
-	if !fused {
-		for e := range E {
-			q := fmt.Sprintf("%s.%d", p, e)
-			out[e] = &glm5Expert{Gate: l.linear(q + ".gate_proj"), Up: l.linear(q + ".up_proj"), Down: l.linear(q + ".down_proj")}
-		}
-		return out, l.err
-	}
 	down := l.hf[p+".down_proj"]
-	if down == nil {
+	if fused && down == nil {
 		return nil, fmt.Errorf("%s: gate_up_proj without down_proj", p)
 	}
-	for e := range E {
-		ge, err := gu.Narrow(0, e, 1)
-		if err != nil {
-			return nil, err
+	if !fused {
+		for e := range cfg.NRoutedExperts {
+			for _, w := range []string{".gate_proj.weight", ".up_proj.weight", ".down_proj.weight"} {
+				if _, ok := l.hf[fmt.Sprintf("%s.%d%s", p, e, w)]; !ok {
+					return nil, fmt.Errorf("glm5: missing %s.%d%s", p, e, w)
+				}
+			}
 		}
-		de, err := down.Narrow(0, e, 1)
-		if err != nil {
-			return nil, err
-		}
+	}
+	return func(e int) (*glm5Expert, error) {
 		q := fmt.Sprintf("%s.%d", p, e)
-		g, _ := ge.Narrow(1, 0, I)
-		u, _ := ge.Narrow(1, I, I)
-		for name, t := range map[string]*tensor.Tensor{".gate_proj.weight": g, ".up_proj.weight": u, ".down_proj.weight": de} {
-			c, err := t.Contiguous()
+		var s *idolLoader
+		if fused {
+			s = l.sub()
+			ge, err := gu.Narrow(0, e, 1)
 			if err != nil {
 				return nil, err
 			}
-			if l.hf[q+name], err = c.Reshape(c.Dim(1), c.Dim(2)); err != nil {
+			de, err := down.Narrow(0, e, 1)
+			if err != nil {
 				return nil, err
 			}
+			g, _ := ge.Narrow(1, 0, I)
+			u, _ := ge.Narrow(1, I, I)
+			for name, t := range map[string]*tensor.Tensor{".gate_proj.weight": g, ".up_proj.weight": u, ".down_proj.weight": de} {
+				c, err := t.Contiguous()
+				if err != nil {
+					return nil, err
+				}
+				if s.hf[q+name], err = c.Reshape(c.Dim(1), c.Dim(2)); err != nil {
+					return nil, err
+				}
+			}
+		} else {
+			s = l.sub(q+".gate_proj", q+".up_proj", q+".down_proj")
 		}
-		out[e] = &glm5Expert{Gate: l.linear(q + ".gate_proj"), Up: l.linear(q + ".up_proj"), Down: l.linear(q + ".down_proj")}
-	}
-	delete(l.hf, p+".gate_up_proj")
-	delete(l.hf, p+".down_proj")
-	return out, l.err
+		ex := &glm5Expert{Gate: s.linear(q + ".gate_proj"), Up: s.linear(q + ".up_proj"), Down: s.linear(q + ".down_proj")}
+		if s.err != nil {
+			return nil, fmt.Errorf("glm5 %s: %w", q, s.err)
+		}
+		return ex, nil
+	}, nil
 }
 
 func (m *GLM5) onesOf(n int) (*tensor.Tensor, error) {
@@ -755,10 +797,30 @@ func (m *GLM5) moe(o *iop, ly *glm5Layer, x *tensor.Tensor) *tensor.Tensor {
 	if o.err != nil {
 		return nil
 	}
-	cfg := m.Cfg
 	B, S, D := x.Dim(0), x.Dim(1), x.Dim(2)
-	T := B * S
-	flat := o.reshape(x, T, D)
+	flat := o.reshape(x, B*S, D)
+	if o.err != nil {
+		return nil
+	}
+	if nx := ly.next; ly.Stream != nil && nx != nil {
+		moePrefetch(nx.Stream, flat, func(o *iop, x *tensor.Tensor) [][]moeHit { return m.route(o, nx, x) })
+	}
+	byExpert := m.route(o, ly, flat)
+	out := m.swiglu(o, ly.Shared, flat)
+	out = moeRun(o, m.dev, flat, byExpert, out, ly.Stream, ly.Experts, func(e *glm5Expert, xs, wt *tensor.Tensor) *tensor.Tensor {
+		return o.mul(m.swiglu(o, e, xs), wt)
+	})
+	return o.reshape(out, B, S, D)
+}
+
+// route is the sigmoid router on flat (T, D): the correction bias picks
+// the top k, the unbiased scores (renormalised, scaled) weigh them.
+func (m *GLM5) route(o *iop, ly *glm5Layer, flat *tensor.Tensor) [][]moeHit {
+	if o.err != nil {
+		return nil
+	}
+	cfg := m.Cfg
+	T := flat.Dim(0)
 	logits := o.do(func() (*tensor.Tensor, error) {
 		wt, err := ly.RouterW.Transpose(0, 1)
 		if err != nil {
@@ -776,11 +838,7 @@ func (m *GLM5) moe(o *iop, ly *glm5Layer, x *tensor.Tensor) *tensor.Tensor {
 	}
 	lv := tensor.MustSlice[float32](lc)
 	E, K := cfg.NRoutedExperts, cfg.ExpertsPerTok
-	type hit struct {
-		tok int
-		w   float32
-	}
-	byExpert := make([][]hit, E)
+	byExpert := make([][]moeHit, E)
 	idx := make([]int, E)
 	for t := range T {
 		sc := make([]float32, E)
@@ -798,35 +856,10 @@ func (m *GLM5) moe(o *iop, ly *glm5Layer, x *tensor.Tensor) *tensor.Tensor {
 			if cfg.NormTopkProb {
 				w /= sum + 1e-20
 			}
-			byExpert[e] = append(byExpert[e], hit{t, w * float32(cfg.RoutedScaling)})
+			byExpert[e] = append(byExpert[e], moeHit{t, w * float32(cfg.RoutedScaling)})
 		}
 	}
-	out := m.swiglu(o, ly.Shared, flat)
-	for e, hs := range byExpert {
-		if len(hs) == 0 || o.err != nil {
-			continue
-		}
-		tok := make([]int64, len(hs))
-		wv := make([]float32, len(hs))
-		for i, h := range hs {
-			tok[i], wv[i] = int64(h.tok), h.w
-		}
-		ti := o.do(func() (*tensor.Tensor, error) { return tensor.New(tok, []int{len(tok)}, m.dev) })
-		wt := o.do(func() (*tensor.Tensor, error) { return tensor.New(wv, []int{len(wv), 1}, m.dev) })
-		xs := o.do(func() (*tensor.Tensor, error) { return ops.IndexSelect(flat, ti) })
-		y := o.mul(m.swiglu(o, ly.Experts[e], xs), wt)
-		// Scatter back with a one-hot (T, n) product (every device has
-		// MatMul; index_add is not on all of them).
-		oh := o.do(func() (*tensor.Tensor, error) {
-			v := make([]float32, T*len(tok))
-			for i, t := range tok {
-				v[int(t)*len(tok)+i] = 1
-			}
-			return tensor.New(v, []int{T, len(tok)}, m.dev)
-		})
-		out = o.add(out, o.do(func() (*tensor.Tensor, error) { return ops.MatMul(oh, y) }))
-	}
-	return o.reshape(out, B, S, D)
+	return byExpert
 }
 
 // GLM5Cache holds a sequence's state between ForwardWithCache calls: each
