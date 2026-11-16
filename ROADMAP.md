@@ -113,8 +113,9 @@ the laptop (31 GB RAM, Intel iGPU) and the desktop (16 GB GPU) and by what
 Light already has. Sizes are BF16 safetensors.
 
 1. **Idol** (image → 3D Gaussians): done (L4, real weights), BiRefNet
-   background removal included. Next: speed (428 s vs 55 s upstream per
-   object on the L4; BiRefNet 25-150 s on CPU vs 15-22 s for torch).
+   background removal included; ~60 s per object on the L4 vs 55 s upstream
+   (attention-bound). Next: BiRefNet speed (25-150 s on CPU vs 15-22 s for
+   torch).
 2. **Large MoEs** (all tiny-verified 2026-11-15): GLM-5.3 Flash (truncated
    real weights match; decode cache, DSA indexer done) — next engine chat;
    DeepSeek-V4.1 Flash (decode cache, on-demand experts, truncated real-weight
