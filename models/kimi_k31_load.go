@@ -6,8 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 
 	"light/device"
+	"light/nn"
 	"light/ops"
 	"light/safetensors"
 	"light/tensor"
@@ -91,7 +93,9 @@ func (c KimiK31Config) isMoE(i int) bool {
 // linear weights under nn.WithWeightStorage16). The compressed-tensors
 // mxfp4-pack-quantized routed experts (weight_packed: e2m1 pairs, the even
 // element in the low nibble; weight_scale: E8M0 per 32 inputs) are widened
-// to F32 on the host. The vision tower and projector are not loaded.
+// to F32 on the host. With LIGHT_EXPERT_SLOTS set, each MoE layer keeps only
+// that many routed experts widened, read from the (memory-mapped)
+// checkpoint when picked. The vision tower and projector are not loaded.
 func LoadKimiK31(dir string, dev device.Device) (*KimiK31, error) {
 	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
 	if err != nil {
@@ -188,12 +192,28 @@ func LoadKimiK31(dir string, dev device.Device) (*KimiK31, error) {
 					ly.LatentNormW = l.param(f + "routed_expert_norm.weight")
 				}
 			}
-			for e := range cfg.NumExperts {
-				q := fmt.Sprintf("%sexperts.%d.", f, e)
-				for _, w := range []string{"w1", "w2", "w3"} {
-					kimiK31MXFP4(l, q+w)
+			load := kimiK31ExpertLoader(l, f+"experts.")
+			if slots := envExpertSlots(); slots > 0 {
+				for e := range cfg.NumExperts { // fail at load, not at the first pick
+					for _, w := range []string{"w1", "w2", "w3"} {
+						q := fmt.Sprintf("%sexperts.%d.%s", f, e, w)
+						_, packed := hf[q+".weight_packed"]
+						if _, ok := hf[q+".weight"]; !ok && !packed {
+							return nil, fmt.Errorf("kimi_k31: missing %s.weight", q)
+						}
+					}
 				}
-				ly.Experts = append(ly.Experts, &kimiK31MLP{Gate: l.linear(q + "w1"), Up: l.linear(q + "w3"), Down: l.linear(q + "w2")})
+				if ly.Stream, err = nn.NewExpertCache(min(slots, cfg.NumExperts), load); err != nil {
+					return nil, err
+				}
+			} else {
+				for e := range cfg.NumExperts {
+					ex, err := load(e)
+					if err != nil {
+						return nil, err
+					}
+					ly.Experts = append(ly.Experts, ex)
+				}
 			}
 		} else {
 			ly.Dense = mlp(p + "mlp")
@@ -206,7 +226,34 @@ func LoadKimiK31(dir string, dev device.Device) (*KimiK31, error) {
 	if l.err != nil {
 		return nil, fmt.Errorf("kimi_k31: %w", l.err)
 	}
+	var prev *kimiK31Layer
+	for _, ly := range m.Layers {
+		if ly.Stream != nil {
+			if prev != nil {
+				prev.next = ly
+			}
+			prev = ly
+		}
+	}
 	return m, nil
+}
+
+// kimiK31ExpertLoader returns a reader of routed expert e (under prefix
+// p): its MXFP4 w1 / w3 / w2 widened through a private sub-loader, so loads
+// never write into l's map and may run concurrently.
+func kimiK31ExpertLoader(l *idolLoader, p string) func(e int) (*kimiK31MLP, error) {
+	return func(e int) (*kimiK31MLP, error) {
+		q := p + strconv.Itoa(e) + "."
+		s := l.sub(q+"w1", q+"w2", q+"w3")
+		for _, w := range []string{"w1", "w2", "w3"} {
+			kimiK31MXFP4(s, q+w)
+		}
+		ex := &kimiK31MLP{Gate: s.linear(q + "w1"), Up: s.linear(q + "w3"), Down: s.linear(q + "w2")}
+		if s.err != nil {
+			return nil, fmt.Errorf("kimi_k31 %s: %w", q, s.err)
+		}
+		return ex, nil
+	}
 }
 
 func kimiK31Check(cfg KimiK31Config) error {

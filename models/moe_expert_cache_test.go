@@ -138,3 +138,33 @@ func TestDeepseekV41StreamedExperts(t *testing.T) {
 	md := checkStreamedMoE(t, ref.ForwardWithCache, m.ForwardWithCache, ref.NewCache, m.NewCache)
 	checkExpertCaches(t, caches, 2, md)
 }
+
+// Kimi K3.1 with its MXFP4 routed experts (latent MoE, grouped routing)
+// streamed through 2 slots per layer equals the resident model.
+func TestKimiK31StreamedExperts(t *testing.T) {
+	ref, err := LoadKimiK31("testdata/kimi-k31-tiny", device.CPU())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LIGHT_EXPERT_SLOTS", "2")
+	m, err := LoadKimiK31("testdata/kimi-k31-tiny", device.CPU())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var caches []*nn.ExpertCache[*kimiK31MLP]
+	var moe []*kimiK31Layer
+	for i, ly := range m.Layers {
+		if ly.RouterW == nil {
+			continue
+		}
+		if ly.Stream == nil || ly.Experts != nil {
+			t.Fatalf("layer %d: experts not streamed", i)
+		}
+		caches, moe = append(caches, ly.Stream), append(moe, ly)
+	}
+	if len(moe) < 2 || moe[0].next != moe[1] {
+		t.Fatal("streamed layers not linked for prefetch")
+	}
+	md := checkStreamedMoE(t, ref.ForwardWithCache, m.ForwardWithCache, ref.NewCache, m.NewCache)
+	checkExpertCaches(t, caches, 2, md)
+}

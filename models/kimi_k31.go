@@ -61,6 +61,11 @@ type kimiK31Layer struct {
 	LatentDown          *nn.Linear
 	LatentUp            *nn.Linear
 	LatentNormW         *tensor.Tensor
+	// Stream holds the routed experts instead of Experts when they are
+	// streamed from the checkpoint (LIGHT_EXPERT_SLOTS); next is the
+	// following streamed layer, whose picks a decode step prefetches.
+	Stream *nn.ExpertCache[*kimiK31MLP]
+	next   *kimiK31Layer
 }
 
 func (m *KimiK31) rms(o *iop, x, w *tensor.Tensor) *tensor.Tensor { return m.aux.rms(o, x, w) }
@@ -313,21 +318,56 @@ func (m *KimiK31) mla(o *iop, ly *kimiK31Layer, x *tensor.Tensor, c *KimiK31Cach
 }
 
 // moe is the routed experts (in the latent when routed_expert_hidden_size is
-// set) plus the shared experts on x (B, S, D). Routing runs on the host:
-// grouped top-k over σ(logits) + correction bias (a group scored by its two
-// best), weights from the unbiased scores, renormalised and scaled.
+// set) plus the shared experts on x (B, S, D).
 func (m *KimiK31) moe(o *iop, ly *kimiK31Layer, x *tensor.Tensor) *tensor.Tensor {
 	if o.err != nil {
 		return nil
 	}
-	cfg := m.Cfg
 	B, S, D := x.Dim(0), x.Dim(1), x.Dim(2)
 	T := B * S
 	flat := o.reshape(x, T, D)
+	if o.err != nil {
+		return nil
+	}
+	if nx := ly.next; ly.Stream != nil && nx != nil {
+		moePrefetch(nx.Stream, flat, func(o *iop, x *tensor.Tensor) [][]moeHit { return m.route(o, nx, x) })
+	}
 	routedIn := flat
 	if ly.LatentDown != nil {
 		routedIn = o.lin(ly.LatentDown, flat)
 	}
+	byExpert := m.route(o, ly, flat)
+	routed := moeRun(o, m.dev, routedIn, byExpert, nil, ly.Stream, ly.Experts, func(e *kimiK31MLP, xs, wt *tensor.Tensor) *tensor.Tensor {
+		return o.mul(m.glu(o, e, xs), wt)
+	})
+	if o.err != nil {
+		return nil
+	}
+	if routed == nil {
+		o.err = fmt.Errorf("kimi_k31 layer %d: no expert routed", ly.ID)
+		return nil
+	}
+	if ly.LatentNormW != nil {
+		routed = m.rms(o, routed, ly.LatentNormW)
+	}
+	if ly.LatentUp != nil {
+		routed = o.lin(ly.LatentUp, routed)
+	}
+	if ly.Shared != nil {
+		routed = o.add(routed, m.glu(o, ly.Shared, flat))
+	}
+	return o.reshape(routed, B, S, D)
+}
+
+// route is the host routing on flat (T, D): grouped top-k over
+// σ(logits) + correction bias (a group scored by its two best), weights
+// from the unbiased scores, renormalised and scaled.
+func (m *KimiK31) route(o *iop, ly *kimiK31Layer, flat *tensor.Tensor) [][]moeHit {
+	if o.err != nil {
+		return nil
+	}
+	cfg := m.Cfg
+	T := flat.Dim(0)
 	logits := o.do(func() (*tensor.Tensor, error) {
 		wt, err := ly.RouterW.Transpose(0, 1)
 		if err != nil {
@@ -345,11 +385,7 @@ func (m *KimiK31) moe(o *iop, ly *kimiK31Layer, x *tensor.Tensor) *tensor.Tensor
 		G, TG = cfg.NumExpertGroup, cfg.TopkGroup
 	}
 	per := E / G
-	type hit struct {
-		tok int
-		w   float32
-	}
-	byExpert := make([][]hit, E)
+	byExpert := make([][]moeHit, E)
 	sc, sel := make([]float64, E), make([]float64, E)
 	idx, gidx, gs := make([]int, 0, E), make([]int, G), make([]float64, G)
 	for t := range T {
@@ -411,55 +447,10 @@ func (m *KimiK31) moe(o *iop, ly *kimiK31Layer, x *tensor.Tensor) *tensor.Tensor
 			if cfg.MoERenormalize {
 				w /= sum
 			}
-			byExpert[e] = append(byExpert[e], hit{t, float32(w * cfg.RoutedScaling)})
+			byExpert[e] = append(byExpert[e], moeHit{t, float32(w * cfg.RoutedScaling)})
 		}
 	}
-	var routed *tensor.Tensor
-	for e, hs := range byExpert {
-		if len(hs) == 0 || o.err != nil {
-			continue
-		}
-		tok := make([]int64, len(hs))
-		wv := make([]float32, len(hs))
-		for i, h := range hs {
-			tok[i], wv[i] = int64(h.tok), h.w
-		}
-		ti := o.do(func() (*tensor.Tensor, error) { return tensor.New(tok, []int{len(tok)}, m.dev) })
-		wt := o.do(func() (*tensor.Tensor, error) { return tensor.New(wv, []int{len(wv), 1}, m.dev) })
-		xs := o.do(func() (*tensor.Tensor, error) { return ops.IndexSelect(routedIn, ti) })
-		y := o.mul(m.glu(o, ly.Experts[e], xs), wt)
-		// Scatter back with a one-hot (T, n) product.
-		oh := o.do(func() (*tensor.Tensor, error) {
-			v := make([]float32, T*len(tok))
-			for i, t := range tok {
-				v[int(t)*len(tok)+i] = 1
-			}
-			return tensor.New(v, []int{T, len(tok)}, m.dev)
-		})
-		y = o.matmul(oh, y)
-		if routed == nil {
-			routed = y
-		} else {
-			routed = o.add(routed, y)
-		}
-	}
-	if o.err != nil {
-		return nil
-	}
-	if routed == nil {
-		o.err = fmt.Errorf("kimi_k31 layer %d: no expert routed", ly.ID)
-		return nil
-	}
-	if ly.LatentNormW != nil {
-		routed = m.rms(o, routed, ly.LatentNormW)
-	}
-	if ly.LatentUp != nil {
-		routed = o.lin(ly.LatentUp, routed)
-	}
-	if ly.Shared != nil {
-		routed = o.add(routed, m.glu(o, ly.Shared, flat))
-	}
-	return o.reshape(routed, B, S, D)
+	return byExpert
 }
 
 func (m *KimiK31) mixer(o *iop, ly *kimiK31Layer, x *tensor.Tensor, c *KimiK31Cache, li int) *tensor.Tensor {
