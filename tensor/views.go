@@ -90,8 +90,20 @@ func (t *Tensor) Transpose(i, j int) (*Tensor, error) {
 // Contiguous returns a new Tensor whose storage is freshly-allocated and
 // packed in row-major order, copying elements from the receiver through its
 // strides. If the receiver is already contiguous with zero offset, returns
-// the receiver unchanged.
+// the receiver unchanged; a contiguous slice of an unaligned mapped storage
+// (storage.WrapCPUUnaligned) is copied byte-wise without aligning the rest.
 func (t *Tensor) Contiguous() (*Tensor, error) {
+	n := t.shape.NumElements()
+	if t.IsContiguous() && t.storage.Unaligned() && n < t.storage.Len() {
+		// A slice of a not-yet-aligned mapped storage: copy just its bytes.
+		newT, err := Empty(t.DType(), t.shape.Dims(), t.Device())
+		if err != nil {
+			return nil, err
+		}
+		lo := t.DType().ByteSize(t.offset)
+		copy(newT.storage.CPUBytes(), t.storage.RawCPUBytes()[lo:lo+t.DType().ByteSize(n)])
+		return newT, nil
+	}
 	if t.IsContiguous() && t.offset == 0 {
 		return t, nil
 	}

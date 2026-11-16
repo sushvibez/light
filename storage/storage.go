@@ -2,6 +2,7 @@ package storage
 
 import (
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,6 +23,12 @@ type Storage struct {
 	// CPU-only: the Go-managed backing slice. Nil on CUDA. Holding this keeps
 	// the underlying array alive as long as Storage is alive.
 	cpu []byte
+
+	// raw, for WrapCPUUnaligned, holds bytes not aligned for dtype (a file
+	// mapping); cpu is filled with an aligned copy on the first CPUBytes.
+	raw     []byte
+	rawOnce sync.Once
+	aligned atomic.Bool
 
 	// cudaPtr is set by the cuda-tagged constructor. Kept on the struct so
 	// CUDA support can land without changing Storage's layout; unused in
@@ -77,6 +84,29 @@ func WrapCPUOwned(dt dtype.DType, nelems int, buf []byte, release func()) *Stora
 	return s
 }
 
+// WrapCPUUnaligned is WrapCPUOwned for bytes that may not be aligned for
+// dt (a tensor at an odd offset of a mapped file, as mlx's safetensors
+// writer leaves them). Nothing is copied up front: the first CPUBytes call
+// copies the bytes into an aligned Go buffer, and RawCPUBytes reads them in
+// place meanwhile, so a loader taking slices of a large tensor (one expert
+// of a stacked MoE weight) copies only those.
+func WrapCPUUnaligned(dt dtype.DType, nelems int, buf []byte, release func()) *Storage {
+	return &Storage{device: device.CPU(), dtype: dt, nelems: nelems, bytes: len(buf), raw: buf, release: release}
+}
+
+// Unaligned reports whether s is a WrapCPUUnaligned storage that has not
+// been copied to an aligned buffer yet.
+func (s *Storage) Unaligned() bool { return s.raw != nil && !s.aligned.Load() }
+
+// RawCPUBytes returns the bytes of a CPU storage for byte-wise reads,
+// without forcing an unaligned storage's aligned copy.
+func (s *Storage) RawCPUBytes() []byte {
+	if s.Unaligned() {
+		return s.raw
+	}
+	return s.CPUBytes()
+}
+
 // Device returns the device this storage lives on.
 func (s *Storage) Device() device.Device { return s.device }
 
@@ -95,6 +125,12 @@ func (s *Storage) Bytes() int { return s.bytes }
 func (s *Storage) CPUBytes() []byte {
 	if s.device.Kind() != device.KindCPU {
 		panic("storage.CPUBytes: not a CPU storage")
+	}
+	if s.raw != nil {
+		s.rawOnce.Do(func() {
+			s.cpu = append([]byte(nil), s.raw...)
+			s.aligned.Store(true)
+		})
 	}
 	return s.cpu
 }

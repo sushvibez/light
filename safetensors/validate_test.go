@@ -158,3 +158,54 @@ func waitRemovable(t *testing.T, path string) {
 	}
 	t.Logf("%s still mapped: %v", path, err)
 }
+
+// mlx writes an unpadded header, leaving tensor data at offsets that are
+// not a multiple of the element size. Such tensors stay mapped: a
+// contiguous slice copies only its own bytes, and the first full read
+// copies the whole tensor to an aligned buffer.
+func TestMappedMisaligned(t *testing.T) {
+	vals := make([]byte, 48)
+	for i := range 12 {
+		binary.LittleEndian.PutUint32(vals[4*i:], uint32(i))
+	}
+	hdr := []byte(`{"w":{"dtype":"U32","shape":[4,3],"data_offsets":[0,48]}}`)
+	if (8+len(hdr))%2 == 0 {
+		hdr = append(hdr, ' ')
+	}
+	var buf bytes.Buffer
+	binary.Write(&buf, binary.LittleEndian, uint64(len(hdr)))
+	buf.Write(hdr)
+	buf.Write(vals)
+	path := filepath.Join(t.TempDir(), "odd.safetensors")
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { waitRemovable(t, path) })
+	got, _, err := safetensors.LoadFiles([]string{path}, device.CPU())
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := got["w"]
+	row, err := w.Narrow(0, 2, 1)
+	if err == nil {
+		row, err = row.Contiguous()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := tensor.MustSlice[uint32](row); !slices.Equal(v, []uint32{6, 7, 8}) {
+		t.Errorf("row 2 = %v", v)
+	}
+	if !w.Storage().Unaligned() {
+		t.Error("slicing aligned the whole tensor")
+	}
+	all := tensor.MustSlice[uint32](w)
+	for i, v := range all {
+		if v != uint32(i) {
+			t.Fatalf("w = %v", all)
+		}
+	}
+	if w.Storage().Unaligned() {
+		t.Error("still unaligned after a full read")
+	}
+}
