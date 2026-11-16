@@ -12,6 +12,7 @@ import (
 
 	"light/device"
 	"light/dtype"
+	"light/mesh"
 	"light/models"
 	"light/nn"
 	"light/splat"
@@ -26,8 +27,9 @@ import (
 // occupancy logits; coords = logits > 0. Stage 2: the SLat flow model
 // samples 8 channels on each occupied voxel (same sampler settings),
 // un-normalised by slat_normalization, and the Gaussian decoder turns each
-// voxel into 32 Gaussians. The mesh and radiance-field decoders are not
-// ported.
+// voxel into 32 Gaussians; optionally (TrellisLoadOptions.Mesh) the mesh
+// decoder turns it into a triangle mesh by FlexiCubes. The radiance-field
+// decoder is not ported.
 type TrellisPipeline struct {
 	Flow    *models.TrellisFlow
 	Decoder *models.TrellisSSDecoder
@@ -36,8 +38,9 @@ type TrellisPipeline struct {
 	// Stage 2; nil with TrellisLoadOptions.SparseStructureOnly.
 	SLatFlow    *models.TrellisSLatFlow
 	SLatDecoder *models.TrellisSLatDecoder
-	SLatSampler models.TrellisSampleOptions // pipeline.json's slat_sampler.params
-	SLatMean    []float64                   // slat_normalization
+	MeshDecoder *models.TrellisSLatMeshDecoder // nil unless TrellisLoadOptions.Mesh
+	SLatSampler models.TrellisSampleOptions    // pipeline.json's slat_sampler.params
+	SLatMean    []float64                      // slat_normalization
 	SLatStd     []float64
 	// BiRefNet cuts out images without alpha (TRELLIS uses rembg's u2net
 	// there); nil unless TrellisLoadOptions.Matte names it, and such images
@@ -57,6 +60,9 @@ type TrellisLoadOptions struct {
 	// SparseStructureOnly loads stage 1 only (no SLat flow model or
 	// Gaussian decoder).
 	SparseStructureOnly bool
+	// Mesh also loads pipeline.json's slat_decoder_mesh: Generate then
+	// returns a mesh too.
+	Mesh bool
 	// Matte names BiRefNet weights for images without alpha: a .safetensors
 	// file, or a Hub repo / folder with birefnet.safetensors (speridlabs/idol)
 	// or model.safetensors (ZhengPeng7/BiRefNet). Empty: no background
@@ -111,7 +117,8 @@ type trellisPipelineConfig struct {
 
 // LoadTrellisPipeline loads TRELLIS (a microsoft/TRELLIS-image-* repo or
 // folder: pipeline.json and, under ckpts/, the sparse-structure flow model
-// and decoder, the SLat flow model and the Gaussian decoder) and its DINOv2
+// and decoder, the SLat flow model, the Gaussian decoder and, with
+// TrellisLoadOptions.Mesh, the mesh decoder) and its DINOv2
 // image encoder onto dev.
 func LoadTrellisPipeline(repo string, dev device.Device, opts ...TrellisLoadOptions) (*TrellisPipeline, error) {
 	var o TrellisLoadOptions
@@ -151,6 +158,16 @@ func LoadTrellisPipeline(repo string, dev device.Device, opts ...TrellisLoadOpti
 		}
 		files = append(files, slatName+".json", slatName+".safetensors", gsName+".json", gsName+".safetensors")
 	}
+	meshName := a.Models["slat_decoder_mesh"]
+	if o.Mesh {
+		if o.SparseStructureOnly {
+			return nil, fmt.Errorf("trellis: the mesh decoder needs stage 2 (SparseStructureOnly is set)")
+		}
+		if meshName == "" {
+			return nil, fmt.Errorf("trellis: pipeline.json names no slat_decoder_mesh")
+		}
+		files = append(files, meshName+".json", meshName+".safetensors")
+	}
 	if dir, err = fetchFiles(repo, files...); err != nil {
 		return nil, err
 	}
@@ -186,6 +203,17 @@ func LoadTrellisPipeline(repo string, dev device.Device, opts ...TrellisLoadOpti
 			return
 		}); err != nil {
 			return nil, err
+		}
+		if o.Mesh {
+			if err := load(func() (err error) {
+				p.MeshDecoder, err = models.LoadTrellisSLatMeshDecoder(filepath.Join(dir, filepath.FromSlash(meshName)), dev)
+				return
+			}); err != nil {
+				return nil, err
+			}
+			if p.MeshDecoder.Args.LatentChannels != p.SLatFlow.Args.OutChannels {
+				return nil, fmt.Errorf("trellis: the mesh decoder takes %d latent channels, the SLat has %d", p.MeshDecoder.Args.LatentChannels, p.SLatFlow.Args.OutChannels)
+			}
 		}
 		if c := p.SLatFlow.Args.OutChannels; len(p.SLatMean) != c || len(p.SLatStd) != c {
 			return nil, fmt.Errorf("trellis: slat_normalization has %d / %d values for %d channels", len(p.SLatMean), len(p.SLatStd), c)
@@ -311,6 +339,22 @@ func (p *TrellisPipeline) DecodeGaussians(g *models.TrellisGrid, slat *tensor.Te
 	return feats, gs, err
 }
 
+// DecodeMesh is decode_slat's mesh decoder on the structured latent slat
+// (N, 8) of the voxels of g: the per-cube outputs (64N, 101) and the mesh
+// SparseFeatures2Mesh extracts (z up, inside [-0.5, 0.5]³, six colour
+// channels per vertex with RGB first; mesh.Mesh.YUp turns it as to_glb).
+func (p *TrellisPipeline) DecodeMesh(g *models.TrellisGrid, slat *tensor.Tensor) (*tensor.Tensor, *mesh.Mesh, error) {
+	if p.MeshDecoder == nil {
+		return nil, nil, fmt.Errorf("trellis: the mesh decoder is not loaded (TrellisLoadOptions.Mesh)")
+	}
+	feats, fine, err := p.MeshDecoder.Forward(g, slat)
+	if err != nil {
+		return nil, nil, err
+	}
+	m, err := p.MeshDecoder.Mesh(fine, feats)
+	return feats, m, err
+}
+
 // TrellisOptions control one run.
 type TrellisOptions struct {
 	Image image.Image // an object with its background removed (alpha)
@@ -348,6 +392,7 @@ type TrellisResult struct {
 	TrellisSparseStructure
 	SLat      []float32 // the structured latent (N x 8, un-normalised)
 	Gaussians *splat.Gaussians
+	Mesh      *mesh.Mesh // with the mesh decoder loaded (DecodeMesh)
 }
 
 // SparseStructure runs stage 1 on one image.
@@ -359,7 +404,8 @@ func (p *TrellisPipeline) SparseStructure(o TrellisOptions) (*TrellisSparseStruc
 	return &r.TrellisSparseStructure, nil
 }
 
-// Generate runs both stages on one image: its 3D Gaussians.
+// Generate runs both stages on one image: its 3D Gaussians (and its mesh
+// when the mesh decoder is loaded).
 func (p *TrellisPipeline) Generate(o TrellisOptions) (*TrellisResult, error) {
 	return p.run(o, true)
 }
@@ -457,6 +503,11 @@ func (p *TrellisPipeline) run(o TrellisOptions, stage2 bool) (*TrellisResult, er
 	}
 	if _, res.Gaussians, err = p.DecodeGaussians(g, slat); err != nil {
 		return nil, err
+	}
+	if p.MeshDecoder != nil {
+		if _, res.Mesh, err = p.DecodeMesh(g, slat); err != nil {
+			return nil, err
+		}
 	}
 	sh, err := slat.To(device.CPU())
 	if err != nil {

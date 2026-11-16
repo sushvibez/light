@@ -48,6 +48,9 @@ type TrellisGrid struct {
 	poolInv  *tensor.Tensor    // (M, 1) 1 / (children + 1)
 	pe       map[int]*tensor.Tensor
 	windows  map[[2]int]*trellisWindows
+
+	sub       *TrellisGrid   // the grid subdivided by 2 (SparseSubdivide)
+	subParent *tensor.Tensor // (8N,) I64: each child's voxel in this grid
 }
 
 // trellisPairs is one kernel offset's neighbour pairs: src (P,) indices of

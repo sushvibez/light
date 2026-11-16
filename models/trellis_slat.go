@@ -399,14 +399,60 @@ type trellisSwinBlock struct {
 	Shift        int
 }
 
+// trellisSwinTorso is SparseTransformerBase with attn_mode "swin" and APE,
+// shared by the SLat decoders: input layer plus the coords' position
+// embedding, then the blocks (window W, odd blocks shifted by W / 2).
+type trellisSwinTorso struct {
+	Input  *nn.Linear
+	Blocks []*trellisSwinBlock
+	window int
+	c      *idolCommon
+}
+
+// swinTorso loads input_layer and blocks.0 ... blocks.<n-1>.
+func (l *idolLoader) swinTorso(C, H, n, window int, qk bool, dev device.Device) (trellisSwinTorso, error) {
+	c, err := newIdolCommon(C, H, dev)
+	if err != nil {
+		return trellisSwinTorso{}, err
+	}
+	t := trellisSwinTorso{Input: l.linear("input_layer"), window: window, c: c}
+	for i := range n {
+		p := fmt.Sprintf("blocks.%d", i)
+		b := &trellisSwinBlock{QKV: l.linear(p + ".attn.to_qkv"), Out: l.linear(p + ".attn.to_out"),
+			FFN: l.ffn(p + ".mlp"), Shift: window / 2 * (i % 2)}
+		if qk {
+			b.QNorm, b.KNorm = l.param(p+".attn.q_rms_norm.gamma"), l.param(p+".attn.k_rms_norm.gamma")
+		}
+		t.Blocks = append(t.Blocks, b)
+	}
+	return t, nil
+}
+
+// forward runs the torso on x (N, in) on the voxels of g: (N, C).
+func (t *trellisSwinTorso) forward(o *iop, g *TrellisGrid, x *tensor.Tensor) *tensor.Tensor {
+	c := t.c
+	N, C, H := g.N(), c.C, c.H
+	h := o.add(o.lin(t.Input, x), g.posEmbed(o, C))
+	for _, b := range t.Blocks {
+		qkv := o.lin(b.QKV, c.norm(o, idolNorm{}, h))
+		if b.QNorm != nil {
+			s := o.reshape(qkv, N, 3, H, C/H)
+			q := c.mhRMS(o, o.reshape(o.narrow(s, 1, 0, 1), N, 1, H, C/H), b.QNorm)
+			k := c.mhRMS(o, o.reshape(o.narrow(s, 1, 1, 1), N, 1, H, C/H), b.KNorm)
+			qkv = o.reshape(o.cat(1, q, k, o.narrow(s, 1, 2, 1)), N, 3*C)
+		}
+		h = o.add(h, o.lin(b.Out, g.windowedAttend(o, qkv, H, t.window, b.Shift)))
+		h = o.add(h, b.FFN.forward(o, c.norm(o, idolNorm{}, h)))
+	}
+	return h
+}
+
 // TrellisSLatDecoder is SLatGaussianDecoder.
 type TrellisSLatDecoder struct {
-	Args         TrellisSLatDecoderArgs
-	Input        *nn.Linear
-	Blocks       []*trellisSwinBlock
+	Args TrellisSLatDecoderArgs
+	trellisSwinTorso
 	Out          *nn.Linear
 	Perturbation []float32 // (G, 3) offset_perturbation
-	c            *idolCommon
 }
 
 // trellisHammersley is hammersley_sequence(3, n, num): (n / num,
@@ -450,20 +496,11 @@ func LoadTrellisSLatDecoder(base string, dev device.Device) (*TrellisSLatDecoder
 		return nil, err
 	}
 	l.dev = dev
-	c, err := newIdolCommon(a.ModelChannels, a.NumHeads, dev)
+	torso, err := l.swinTorso(a.ModelChannels, a.NumHeads, a.NumBlocks, a.WindowSize, a.QKRMSNorm, dev)
 	if err != nil {
 		return nil, err
 	}
-	m := &TrellisSLatDecoder{Args: a, c: c, Input: l.linear("input_layer"), Out: l.linear("out_layer")}
-	for i := range a.NumBlocks {
-		p := fmt.Sprintf("blocks.%d", i)
-		b := &trellisSwinBlock{QKV: l.linear(p + ".attn.to_qkv"), Out: l.linear(p + ".attn.to_out"),
-			FFN: l.ffn(p + ".mlp"), Shift: a.WindowSize / 2 * (i % 2)}
-		if a.QKRMSNorm {
-			b.QNorm, b.KNorm = l.param(p+".attn.q_rms_norm.gamma"), l.param(p+".attn.k_rms_norm.gamma")
-		}
-		m.Blocks = append(m.Blocks, b)
-	}
+	m := &TrellisSLatDecoder{Args: a, trellisSwinTorso: torso, Out: l.linear("out_layer")}
 	G := r.NumGaussians
 	if _, ok := l.hf["offset_perturbation"]; ok {
 		m.Perturbation = l.host("offset_perturbation")
@@ -496,21 +533,8 @@ func (m *TrellisSLatDecoder) Forward(g *TrellisGrid, x *tensor.Tensor) (*tensor.
 		return nil, fmt.Errorf("trellis gaussian decoder: input %v, want (%d, %d)", x.Shape(), g.N(), a.LatentChannels)
 	}
 	o := &iop{}
-	c := m.c
-	h := o.add(o.lin(m.Input, x), g.posEmbed(o, a.ModelChannels))
-	N, C, H := g.N(), a.ModelChannels, a.NumHeads
-	for _, b := range m.Blocks {
-		qkv := o.lin(b.QKV, c.norm(o, idolNorm{}, h))
-		if b.QNorm != nil {
-			s := o.reshape(qkv, N, 3, H, C/H)
-			q := c.mhRMS(o, o.reshape(o.narrow(s, 1, 0, 1), N, 1, H, C/H), b.QNorm)
-			k := c.mhRMS(o, o.reshape(o.narrow(s, 1, 1, 1), N, 1, H, C/H), b.KNorm)
-			qkv = o.reshape(o.cat(1, q, k, o.narrow(s, 1, 2, 1)), N, 3*C)
-		}
-		h = o.add(h, o.lin(b.Out, g.windowedAttend(o, qkv, H, a.WindowSize, b.Shift)))
-		h = o.add(h, b.FFN.forward(o, c.norm(o, idolNorm{}, h)))
-	}
-	out := o.lin(m.Out, c.norm(o, idolFinalNorm, h))
+	h := m.trellisSwinTorso.forward(o, g, x)
+	out := o.lin(m.Out, m.c.norm(o, idolFinalNorm, h))
 	return out, o.err
 }
 

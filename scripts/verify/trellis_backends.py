@@ -3,9 +3,10 @@ modules call, so TRELLIS's own module code runs on a CPU (imported by
 ref_trellis_slat.py and, as a fallback, scripts/colab/trellis_check.py).
 
 Call install(spconv=True, xformers=True, utils3d=True) before importing
-trellis.modules.sparse. Each substitution covers exactly the calls TRELLIS
-makes in the stage-2 Gaussian path (SPARSE_BACKEND=spconv,
-SPARSE_ATTN_BACKEND=xformers); anything else raises.
+trellis.modules.sparse (kaolin=True too for the mesh decoder). Each
+substitution covers exactly the calls TRELLIS makes in the stage-2 Gaussian
+and mesh paths (SPARSE_BACKEND=spconv, SPARSE_ATTN_BACKEND=xformers);
+anything else raises.
 
 spconv.pytorch (trellis/modules/sparse/{basic,conv/conv_spconv}.py)
   SparseConvTensor   a plain holder of what basic.py reads and writes:
@@ -25,9 +26,12 @@ spconv.pytorch (trellis/modules/sparse/{basic,conv/conv_spconv}.py)
                      parameters are weight (out, k, k, k, in) and bias
                      (out,), spconv 2.x's state-dict layout (the released
                      TRELLIS checkpoints store [128, 3, 3, 3, 128]).
+                     Grids whose dense copy would exceed 2^28 values (the
+                     mesh decoder at 256^3) sum the same products per
+                     kernel offset through a (B, X, Y, Z) row lookup.
   SparseConv3d, SparseInverseConv3d, ConvAlgo   strided / inverse convs
-                     are not used by the SLat flow model or the Gaussian
-                     decoder; constructing one raises.
+                     are not used by the SLat flow model or the Gaussian /
+                     mesh decoders; constructing one raises.
 xformers.ops (trellis/modules/sparse/attention/{full,windowed}_attn.py)
   memory_efficient_attention(q, k, v, attn_bias)   (B, M, H, K) layout,
                      softmax(q k^T / sqrt(K)) v per head, by
@@ -39,6 +43,9 @@ utils3d.numpy (trellis/representations/gaussian/gaussian_model.py save_ply)
   quaternion_to_matrix, matrix_to_quaternion   copied verbatim from
                      EasternJournalist/utils3d@9a4eb15e (the commit TRELLIS's
                      setup.sh pins), utils3d/numpy/transforms.py.
+kaolin.utils.testing (trellis/representations/mesh/flexicubes/flexicubes.py)
+  check_tensor(tensor, shape, dtype, device, throw)   FlexiCubes' argument
+                     asserts only: rank and the non-None sizes of shape.
 Gaussian on the CPU (cpu_gaussian(Gaussian))
   Gaussian.setup_functions moves its biases with .cuda() and its default
   device is 'cuda'; cpu_gaussian makes the default device 'cpu' and turns
@@ -110,6 +117,8 @@ class SubMConv3d(nn.Module):
         f = x.features
         shape = [int(v) for v in (idx[:, 1:].max(0).values + 1).tolist()]
         shape = [max(a, b) for a, b in zip(shape, x.spatial_shape)]
+        if x.batch_size * f.shape[1] * shape[0] * shape[1] * shape[2] > 1 << 28:
+            return x.replace_feature(self._gather(idx, f, shape, x.batch_size))
         dense = f.new_zeros(x.batch_size, f.shape[1], *shape)
         dense[idx[:, 0], :, idx[:, 1], idx[:, 2], idx[:, 3]] = f
         w = self.weight.permute(0, 4, 1, 2, 3)
@@ -119,6 +128,28 @@ class SubMConv3d(nn.Module):
         if self.bias is not None:
             o = o + self.bias
         return x.replace_feature(o)
+
+    def _gather(self, idx, f, shape, batch):
+        """The same sum per kernel offset over a (B, X, Y, Z) row lookup:
+        for grids whose dense copy would not fit (the mesh decoder at 256^3)."""
+        lut = torch.full((batch, *shape), -1, dtype=torch.long, device=f.device)
+        lut[idx[:, 0], idx[:, 1], idx[:, 2], idx[:, 3]] = torch.arange(f.shape[0], device=f.device)
+        out = f.new_zeros(f.shape[0], self.out_channels)
+        lim = torch.tensor(shape, device=f.device)
+        for kx in range(self.kernel_size[0]):
+            for ky in range(self.kernel_size[1]):
+                for kz in range(self.kernel_size[2]):
+                    d = torch.tensor([(k - kk // 2) * dd for k, kk, dd in
+                                      zip((kx, ky, kz), self.kernel_size, self.dilation)], device=f.device)
+                    nb = idx[:, 1:] + d
+                    ok = ((nb >= 0) & (nb < lim)).all(1)
+                    j = torch.full_like(ok, -1, dtype=torch.long)
+                    j[ok] = lut[idx[ok, 0], nb[ok, 0], nb[ok, 1], nb[ok, 2]]
+                    m = j >= 0
+                    out[m] += f[j[m]] @ self.weight[:, kx, ky, kz, :].t()
+        if self.bias is not None:
+            out = out + self.bias
+        return out
 
 
 def _unsupported(name):
@@ -209,7 +240,16 @@ def matrix_to_quaternion(rot_mat: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     return quat
 
 
-def install(spconv=True, xformers=True, utils3d=True):
+def check_tensor(tensor, shape=None, dtype=None, device=None, throw=True):
+    ok = shape is None or (tensor.dim() == len(shape) and
+                           all(s is None or s == t for s, t in zip(shape, tensor.shape)))
+    ok = ok and (dtype is None or tensor.dtype == dtype)
+    if not ok and throw:
+        raise ValueError(f"check_tensor: {tuple(tensor.shape)} {tensor.dtype}, want {shape} {dtype}")
+    return ok
+
+
+def install(spconv=True, xformers=True, utils3d=True, kaolin=False):
     """Registers the stand-in modules in sys.modules (only those asked for)."""
     if spconv:
         sp = types.ModuleType("spconv")
@@ -235,6 +275,13 @@ def install(spconv=True, xformers=True, utils3d=True):
         un.matrix_to_quaternion = matrix_to_quaternion
         u.numpy = un
         sys.modules["utils3d"], sys.modules["utils3d.numpy"] = u, un
+    if kaolin:
+        k = types.ModuleType("kaolin")
+        ku = types.ModuleType("kaolin.utils")
+        kt = types.ModuleType("kaolin.utils.testing")
+        kt.check_tensor = check_tensor
+        k.utils, ku.testing = ku, kt
+        sys.modules["kaolin"], sys.modules["kaolin.utils"], sys.modules["kaolin.utils.testing"] = k, ku, kt
 
 
 def cpu_gaussian(Gaussian):
