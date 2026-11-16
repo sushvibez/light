@@ -6,6 +6,7 @@ import (
 
 	"light/device"
 	"light/ops"
+	"light/quant"
 	"light/tensor"
 )
 
@@ -18,12 +19,22 @@ import (
 // token chunks that each fit.
 //
 // Prefetch(ids) starts loading experts in the background (a later layer's
-// predicted picks); a forward that needs one waits for it.
+// predicted picks); a forward that needs one waits for it. Only the
+// experts the next forward of this layer needs are kept: a mispredicted
+// prefetch is dropped there, so memory stays at Slots experts plus at most
+// one prediction in flight.
+//
+// A stream from NewExpertStreamQ4 keeps its slots 4-bit (quant.Int4 per
+// slot: half a byte per weight plus an F32 scale and zero per group) and
+// runs them through ops.MoEInt4, the kernels resident 4-bit experts use.
 type ExpertStream struct {
 	// Load returns expert e's stacked gate+up (2I, H) and down (H, I)
 	// weights at the slot dtype (any device).
-	Load  func(e int) (gateUp, down *tensor.Tensor, err error)
-	Slots int
+	Load func(e int) (gateUp, down *tensor.Tensor, err error)
+	// LoadQ4, instead of Load, returns expert e as 4-bit weights (host or
+	// slot device); they are copied into the slot's own buffers.
+	LoadQ4 func(e int) (gateUp, down quant.Int4, err error)
+	Slots  int
 	// Loads counts experts read in; Hits experts already resident.
 	// Prefetched counts background loads Prefetch started; PrefetchUsed
 	// those a forward then needed (the prediction's hit count).
@@ -32,6 +43,8 @@ type ExpertStream struct {
 	mu      sync.Mutex
 	dev     device.Device
 	gu, dn  *tensor.Tensor // (Slots, 2I, H), (Slots, H, I)
+	gu4     []quant.Int4   // LoadQ4: per slot (2I, H) and (H, I)
+	dn4     []quant.Int4
 	slotOf  map[int]int
 	owner   []int
 	used    []uint64
@@ -41,9 +54,10 @@ type ExpertStream struct {
 }
 
 type expertLoad struct {
-	done   chan struct{}
-	gu, dn *tensor.Tensor
-	err    error
+	done     chan struct{}
+	gu, dn   *tensor.Tensor
+	gu4, dn4 quant.Int4
+	err      error
 }
 
 // prefetchMaxTokens bounds the batches that predict the next layer: decode
@@ -83,12 +97,63 @@ func NewExpertStream(slots int, dev device.Device, load func(e int) (*tensor.Ten
 	if slots < 1 || load == nil {
 		return nil, fmt.Errorf("nn.ExpertStream: need ≥ 1 slot and a loader")
 	}
-	s := &ExpertStream{Load: load, Slots: slots, dev: dev, slotOf: map[int]int{}, owner: make([]int, slots),
+	return newExpertStream(slots, dev, load, nil), nil
+}
+
+// NewExpertStreamQ4 returns a stream with slots resident 4-bit experts on
+// dev: load returns expert e's gate+up (2I, H) and down (H, I) as
+// quant.Int4 (e.g. quant.FromMLX on the mapped checkpoint), copied into
+// per-slot packed buffers. Forward needs the activations ops.MoEInt4
+// takes (F32 or BF16).
+func NewExpertStreamQ4(slots int, dev device.Device, load func(e int) (gateUp, down quant.Int4, err error)) (*ExpertStream, error) {
+	if slots < 1 || load == nil {
+		return nil, fmt.Errorf("nn.ExpertStream: need ≥ 1 slot and a loader")
+	}
+	s := newExpertStream(slots, dev, nil, load)
+	s.gu4, s.dn4 = make([]quant.Int4, slots), make([]quant.Int4, slots)
+	return s, nil
+}
+
+func newExpertStream(slots int, dev device.Device, load func(e int) (*tensor.Tensor, *tensor.Tensor, error),
+	loadQ4 func(e int) (quant.Int4, quant.Int4, error)) *ExpertStream {
+	s := &ExpertStream{Load: load, LoadQ4: loadQ4, Slots: slots, dev: dev, slotOf: map[int]int{}, owner: make([]int, slots),
 		used: make([]uint64, slots), pending: map[int]*expertLoad{}, fromPF: map[int]bool{}}
 	for i := range s.owner {
 		s.owner[i] = -1
 	}
-	return s, nil
+	return s
+}
+
+// SlotBytes is the device memory the slot buffers hold now (allocated on
+// first use: all at once for stacked Load slots, slot by slot for 4-bit
+// ones).
+func (s *ExpertStream) SlotBytes() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	add := func(t *tensor.Tensor) {
+		if t != nil {
+			n += int64(t.DType().ByteSize(t.NumElements()))
+		}
+	}
+	add(s.gu)
+	add(s.dn)
+	for i := range s.gu4 {
+		for _, w := range []quant.Int4{s.gu4[i], s.dn4[i]} {
+			add(w.Codes)
+			add(w.Scales)
+			add(w.Zeros)
+			add(w.Perm)
+		}
+	}
+	return n
+}
+
+// Pending is the number of loads started and not yet installed.
+func (s *ExpertStream) Pending() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.pending)
 }
 
 // Prefetch starts reading the given experts in the background unless they
@@ -115,6 +180,11 @@ func (s *ExpertStream) start(e int) *expertLoad {
 	s.pending[e] = l
 	go func() {
 		defer close(l.done)
+		if s.LoadQ4 != nil {
+			// Host results are copied straight into the slot on install.
+			l.gu4, l.dn4, l.err = s.LoadQ4(e)
+			return
+		}
 		gu, dn, err := s.Load(e)
 		if err == nil && !gu.Device().SameAs(s.dev) {
 			if gu, err = gu.To(s.dev); err == nil {
@@ -136,6 +206,15 @@ func (s *ExpertStream) ensure(need []int) (map[int]int, error) {
 	keep := map[int]bool{}
 	for _, e := range need {
 		keep[e] = true
+	}
+	// A prefetch this forward does not need was mispredicted: drop it (a
+	// load still running finishes into nothing), or every miss would stay
+	// pending with its weights for as long as the model lives.
+	for e := range s.pending {
+		if !keep[e] {
+			delete(s.pending, e)
+			delete(s.fromPF, e)
+		}
 	}
 	var waits []int
 	for _, e := range need {
@@ -166,7 +245,7 @@ func (s *ExpertStream) ensure(need []int) (map[int]int, error) {
 			s.mu.Unlock()
 			return nil, fmt.Errorf("nn.ExpertStream: expert %d: %w", e, l.err)
 		}
-		if err := s.install(e, l.gu, l.dn, keep); err != nil {
+		if err := s.install(e, l, keep); err != nil {
 			s.mu.Unlock()
 			return nil, err
 		}
@@ -184,8 +263,9 @@ func (s *ExpertStream) ensure(need []int) (map[int]int, error) {
 
 // install copies an expert into the least recently used slot not in keep
 // (s.mu held).
-func (s *ExpertStream) install(e int, gu, dn *tensor.Tensor, keep map[int]bool) error {
-	if s.gu == nil {
+func (s *ExpertStream) install(e int, l *expertLoad, keep map[int]bool) error {
+	gu, dn := l.gu, l.dn
+	if s.LoadQ4 == nil && s.gu == nil {
 		var err error
 		if s.gu, err = tensor.Zeros(gu.DType(), append([]int{s.Slots}, gu.Shape().Dims()...), s.dev); err != nil {
 			return err
@@ -223,11 +303,20 @@ func (s *ExpertStream) install(e int, gu, dn *tensor.Tensor, keep map[int]bool) 
 		}
 		return err
 	}
-	if err := put(s.gu, gu); err != nil {
-		return err
-	}
-	if err := put(s.dn, dn); err != nil {
-		return err
+	if s.LoadQ4 != nil {
+		if err := s.putQ4(&s.gu4[best], l.gu4); err != nil {
+			return fmt.Errorf("nn.ExpertStream: expert %d gate-up: %w", e, err)
+		}
+		if err := s.putQ4(&s.dn4[best], l.dn4); err != nil {
+			return fmt.Errorf("nn.ExpertStream: expert %d down: %w", e, err)
+		}
+	} else {
+		if err := put(s.gu, gu); err != nil {
+			return err
+		}
+		if err := put(s.dn, dn); err != nil {
+			return err
+		}
 	}
 	if o := s.owner[best]; o >= 0 {
 		delete(s.slotOf, o)
@@ -236,6 +325,35 @@ func (s *ExpertStream) install(e int, gu, dn *tensor.Tensor, keep map[int]bool) 
 	s.owner[best], s.slotOf[e] = e, best
 	s.clock++
 	s.used[best] = s.clock
+	return nil
+}
+
+// putQ4 copies w into the slot weight dst, allocating dst's buffers on
+// s.dev the first time (or when the shapes change).
+func (s *ExpertStream) putQ4(dst *quant.Int4, w quant.Int4) error {
+	if w.Codes == nil || w.Scales == nil || w.Zeros == nil {
+		return fmt.Errorf("incomplete 4-bit weight")
+	}
+	src := []*tensor.Tensor{w.Codes, w.Scales, w.Zeros, w.Perm}
+	to := []**tensor.Tensor{&dst.Codes, &dst.Scales, &dst.Zeros, &dst.Perm}
+	for i, t := range src {
+		d := to[i]
+		if t == nil {
+			*d = nil
+			continue
+		}
+		if *d == nil || (*d).DType() != t.DType() || !(*d).Shape().Equal(t.Shape()) {
+			z, err := tensor.Zeros(t.DType(), t.Shape().Dims(), s.dev)
+			if err != nil {
+				return err
+			}
+			*d = z
+		}
+		if err := (*d).CopyFrom(t); err != nil {
+			return err
+		}
+	}
+	dst.Group = w.Group
 	return nil
 }
 
@@ -319,10 +437,20 @@ func (m *SparseMoE) forwardStreamed(flat *tensor.Tensor, route *ops.MoERouting) 
 				return nil, err
 			}
 		}
-		s.mu.Lock()
-		gu, dn := s.gu, s.dn
-		s.mu.Unlock()
-		y, err := m.runExperts(x, gu, dn, sub)
+		var y *tensor.Tensor
+		if s.LoadQ4 != nil {
+			act := m.Act
+			if act == nil {
+				act = ops.SiLU
+			}
+			gu, dn := s.slotsQ4()
+			y, err = ops.MoEInt4(x, gu, dn, sub, K, act)
+		} else {
+			s.mu.Lock()
+			gu, dn := s.gu, s.dn
+			s.mu.Unlock()
+			y, err = m.runExperts(x, gu, dn, sub)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -333,4 +461,26 @@ func (m *SparseMoE) forwardStreamed(flat *tensor.Tensor, route *ops.MoERouting) 
 		return outs[0], nil
 	}
 	return ops.Concat(outs, 0)
+}
+
+// slotsQ4 snapshots the 4-bit slots for ops.MoEInt4; slots never filled
+// (not referenced by the routing) borrow a filled one's weights so every
+// entry has the shapes MoEInt4 checks.
+func (s *ExpertStream) slotsQ4() ([]quant.Int4, []quant.Int4) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	gu, dn := append([]quant.Int4(nil), s.gu4...), append([]quant.Int4(nil), s.dn4...)
+	fill := -1
+	for i := range gu {
+		if gu[i].Codes != nil {
+			fill = i
+			break
+		}
+	}
+	for i := range gu {
+		if gu[i].Codes == nil && fill >= 0 {
+			gu[i], dn[i] = gu[fill], dn[fill]
+		}
+	}
+	return gu, dn
 }

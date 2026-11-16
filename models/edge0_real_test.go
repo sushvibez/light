@@ -38,8 +38,8 @@ import (
 // routed experts with LIGHT_EXPERT_SLOTS; LIGHT_EDGE0_W16=1 narrows the
 // dense weights to BF16 storage (the CLI's CPU default);
 // LIGHT_EDGE0_HEAPPROF=<file> writes heap profiles after load and decode.
-// Go heap about 21 GB resident; streamed, 2.3 GB plus the F32 slots (200 MB
-// a layer for 16). Select a case with -run 'TestEdge0Real/lora$'.
+// Go heap about 21 GB resident; streamed, 2.3 GB plus the 4-bit slots
+// (1.9 MB an expert: 31 MB a layer for 16). Select a case with -run 'TestEdge0Real/lora$'.
 func TestEdge0Real(t *testing.T) {
 	dir := os.Getenv("LIGHT_EDGE0_REF")
 	if dir == "" {
@@ -150,14 +150,15 @@ func runEdge0Real(t *testing.T, model string, ids, tokens []int64, want []float3
 	dec := time.Since(t2).Seconds()
 	tps := float64(len(tokens)-1) / dec
 	var stream string
-	var loads, hits int64
+	var loads, hits, pf, pfUsed, slotBytes int64
 	for _, bl := range m.Blocks {
 		if s := bl.MoE.Stream; s != nil {
-			loads, hits = loads+s.Loads, hits+s.Hits
+			loads, hits, pf, pfUsed, slotBytes = loads+s.Loads, hits+s.Hits, pf+s.Prefetched, pfUsed+s.PrefetchUsed, slotBytes+s.SlotBytes()
 		}
 	}
-	if b.MoE.Stream != nil {
-		stream = fmt.Sprintf(", expert loads %d, hits %d", loads, hits)
+	if s := b.MoE.Stream; s != nil {
+		stream = fmt.Sprintf(", expert loads %d, hits %d, prefetched %d (used %d), 4-bit slots %v, slot buffers %.2f GB",
+			loads, hits, pf, pfUsed, s.LoadQ4 != nil, float64(slotBytes)/(1<<30))
 	}
 	t.Logf("greedy agreement %d/%d; decode rows max |Δlogit| top-5 %.3g, vocab %.3g; %.2f tok/s%s; %s",
 		agree, len(tokens), worstTop5, worst, tps, stream, edge0Mem())

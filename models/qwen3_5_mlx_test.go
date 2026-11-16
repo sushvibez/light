@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"math"
 	"os"
+	"strconv"
 	"testing"
 
 	"light/device"
 	"light/dtype"
+	"light/tensor"
 )
 
 // Tiny Edge0-35B-A3B-shaped checkpoint from scripts/verify/make_edge0_tiny.py:
@@ -115,5 +117,85 @@ func TestEdge0TinyLoRAMatchesTransformers(t *testing.T) {
 			lastLogits(t, m, ref.IDs[:n-1], cache, cpu)
 			checkEdge0Logits(t, lastLogits(t, m, ref.IDs[n-1:], cache, cpu), ref.LoRA, 1e-4)
 		})
+	}
+}
+
+// The 4-bit experts streamed through slots run the kernels the resident
+// 4-bit experts run: with a slot per expert (no token chunks) the same
+// logits bit for bit on the prompt and on single-token decode steps; with
+// 3 for the adapter's top-3 (the prompt runs in token chunks, so the
+// fused kernel's row tiling differs; evictions, decode-step prefetch)
+// within 1e-5. The slots stay packed (15 KB an expert here, 6.4x less
+// than F32) and no mispredicted prefetch lingers.
+func TestEdge0TinyStreamedQ4MatchesResident(t *testing.T) {
+	ref := loadEdge0TinyRef(t)
+	cpu := device.CPU()
+	run := func(m *Qwen35) [][]float32 {
+		cache := NewKVCache(m.NumLayers())
+		n := len(ref.IDs) - 3
+		rows := [][]float32{append([]float32(nil), lastLogits(t, m, ref.IDs[:n], cache, cpu)...)}
+		for _, id := range ref.IDs[n:] {
+			rows = append(rows, append([]float32(nil), lastLogits(t, m, []int64{id}, cache, cpu)...))
+		}
+		return rows
+	}
+	t.Setenv("LIGHT_EXPERT_SLOTS", "")
+	res, err := LoadQwen35FromHF(edge0TinyDir, cpu, dtype.F32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := run(res)
+	checkEdge0Logits(t, want[len(want)-1], ref.LoRA, 1e-4)
+	for _, slots := range []int{2, 3, 8} {
+		// Top-3 routing needs 3 slots; 2 must be refused.
+		t.Setenv("LIGHT_EXPERT_SLOTS", strconv.Itoa(slots))
+		m, err := LoadQwen35FromHF(edge0TinyDir, cpu, dtype.F32)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if slots < m.Blocks[0].MoE.TopK {
+			x, _ := tensor.New(ref.IDs[:1], []int{1, 1}, cpu)
+			if _, err := m.ForwardWithCache(x, NewKVCache(m.NumLayers())); err == nil {
+				t.Errorf("%d slots for top-%d routing should fail", slots, m.Blocks[0].MoE.TopK)
+			}
+			continue
+		}
+		got := run(m)
+		tol, md := 1e-5, 0.0
+		if slots == m.Cfg.NumExperts {
+			tol = 0
+		}
+		for i := range want {
+			for j := range want[i] {
+				md = math.Max(md, math.Abs(float64(got[i][j]-want[i][j])))
+			}
+		}
+		if md > tol {
+			t.Errorf("%d slots: max |Δlogit| %.3g against resident (tolerance %g)", slots, md, tol)
+		}
+		var loads, hits, pf, pfUsed, bytes int64
+		for _, b := range m.Blocks {
+			s := b.MoE.Stream
+			if s == nil || s.LoadQ4 == nil {
+				t.Fatalf("layer experts not streamed 4-bit")
+			}
+			loads, hits, pf, pfUsed, bytes = loads+s.Loads, hits+s.Hits, pf+s.Prefetched, pfUsed+s.PrefetchUsed, bytes+s.SlotBytes()
+			if n := len(s.Resident()); n > slots {
+				t.Fatalf("%d experts resident in %d slots", n, slots)
+			}
+			if p := s.Pending(); p > slots {
+				t.Fatalf("%d loads pending for %d slots", p, slots)
+			}
+		}
+		// Per expert: gate-up codes (128, 16) U32 + 2 x (128, 2) F32, down
+		// codes (128, 8) + 2 x (128, 1).
+		const perExpert = 128*16*4 + 2*128*2*4 + 128*8*4 + 2*128*1*4
+		t.Logf("%d slots: max |Δlogit| %.3g vs resident; %d loads, %d hits, %d prefetched (%d used); slots %d B (%d B an expert, F32 %d)",
+			slots, md, loads, hits, pf, pfUsed, bytes, perExpert, (128*128+128*64)*4)
+		if bytes > int64(len(m.Blocks)*slots*perExpert) || loads == 0 || hits == 0 || pfUsed > pf ||
+			(pf == 0) != (slots == m.Cfg.NumExperts) { // all resident after the prompt: nothing to prefetch
+			t.Errorf("slots %d B (budget %d), loads %d, hits %d, prefetched %d / used %d",
+				bytes, len(m.Blocks)*slots*perExpert, loads, hits, pf, pfUsed)
+		}
 	}
 }

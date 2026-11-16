@@ -158,9 +158,10 @@ func mlxExpert(w, s, b *tensor.Tensor, e int) (we, se, be *tensor.Tensor, err er
 
 // installMLXExperts fills moe from MLX's stacked experts under p
 // (`switch_mlp.{gate,up,down}_proj`, each (E, N, ·)): with StreamSlots an
-// ExpertStream expanding each expert to dt when the router first picks it
-// (the packed stacks stay memory-mapped), else 4-bit experts kept packed
-// (GateUpQ4 / DownQ4), else expanded stacks at dt.
+// ExpertStream reading each expert when the router first picks it (the
+// packed stacks stay memory-mapped) into 4-bit slots, or slots expanded to
+// dt for other widths; else 4-bit experts kept packed (GateUpQ4 /
+// DownQ4), else expanded stacks at dt.
 func installMLXExperts(moe *nn.SparseMoE, hf map[string]*tensor.Tensor, p string, q *mlxQuant, dt dtype.DType, dev device.Device) error {
 	type stack struct {
 		w, s, b     *tensor.Tensor
@@ -222,35 +223,48 @@ func installMLXExperts(moe *nn.SparseMoE, hf map[string]*tensor.Tensor, p string
 		d, err = d.To(dev)
 		return gu, d, err
 	}
+	packed := st[0].bits == 4 && st[1].bits == 4 && st[2].bits == 4 && st[0].group == st[1].group
+	// load4 returns expert e packed on the host: the codes copied out of
+	// the mapping, the affine pair rewritten (quant.FromMLX).
+	load4 := func(e int) (quant.Int4, quant.Int4, error) {
+		var w4 [3]quant.Int4
+		for i := range st {
+			w, s, b, err := mlxExpert(st[i].w, st[i].s, st[i].b, e)
+			if err != nil {
+				return quant.Int4{}, quant.Int4{}, err
+			}
+			if w4[i], err = quant.FromMLX(w, s, b, st[i].group); err != nil {
+				return quant.Int4{}, quant.Int4{}, fmt.Errorf("%sswitch_mlp expert %d: %w", p, e, err)
+			}
+		}
+		gu, err := concatInt4(w4[0], w4[1])
+		return gu, w4[2], err
+	}
 	if moe.StreamSlots > 0 {
-		s, err := nn.NewExpertStream(moe.StreamSlots, dev, load)
+		var s *nn.ExpertStream
+		var err error
+		if packed {
+			s, err = nn.NewExpertStreamQ4(moe.StreamSlots, dev, load4)
+		} else {
+			s, err = nn.NewExpertStream(moe.StreamSlots, dev, load)
+		}
 		if err != nil {
 			return err
 		}
 		moe.Stream = s
 		return nil
 	}
-	if st[0].bits == 4 && st[1].bits == 4 && st[2].bits == 4 && st[0].group == st[1].group {
+	if packed {
 		gu, dn := make([]quant.Int4, E), make([]quant.Int4, E)
 		for e := range E {
-			var w4 [3]quant.Int4
-			for i := range st {
-				w, s, b, err := mlxExpert(st[i].w, st[i].s, st[i].b, e)
-				if err != nil {
-					return err
-				}
-				if w4[i], err = quant.FromMLX(w, s, b, st[i].group); err != nil {
-					return fmt.Errorf("%sswitch_mlp expert %d: %w", p, e, err)
-				}
-			}
-			c, err := concatInt4(w4[0], w4[1])
+			g, d, err := load4(e)
 			if err != nil {
 				return err
 			}
-			if gu[e], err = int4To(c, dev); err != nil {
+			if gu[e], err = int4To(g, dev); err != nil {
 				return err
 			}
-			if dn[e], err = int4To(w4[2], dev); err != nil {
+			if dn[e], err = int4To(d, dev); err != nil {
 				return err
 			}
 		}
