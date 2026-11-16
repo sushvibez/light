@@ -126,7 +126,8 @@ Light already has. Sizes are BF16 safetensors.
    code on Colab; `light energraft`).
 4. **LLaDA 8B Instruct**, **Dream 7B**: done (real weights match on Colab;
    engine chat).
-5. **TRELLIS (image-large, v1)**: image → 3D; sparse 3D convolutions.
+5. **TRELLIS (image-large, v1)**: done for Gaussians (real weights match on
+   the L4; `light trellis`). Next: the mesh decoder (FlexiCubes), rembg.
 6. **FLUX.2-klein-4B**: done (real weights on CPU and the L4).
 7. **flux-3-image-klein**: text-to-image and editing done (tiny-verified).
    Next: a real-weights run (11 GB DiT + 8.9 GB Qwen3-VL-4B), Lanczos for
