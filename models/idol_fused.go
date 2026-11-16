@@ -116,9 +116,8 @@ func (r *idolRePo) ropeTables(o *iop, c *idolCommon) (freq, axis *tensor.Tensor)
 }
 
 // offsets returns RePo's per-head 3-D offsets (rows, H·3) without the final
-// bias (the head kernel adds it).
-func (r *idolRePo) offsets(o *iop, c *idolCommon, h *tensor.Tensor) *tensor.Tensor {
-	n := c.lnMod16(o, r.Norm, h, nil, nil)
+// bias (the head kernel adds it), from its normalised input n (F16).
+func (r *idolRePo) offsets(o *iop, c *idolCommon, n *tensor.Tensor) *tensor.Tensor {
 	g, u := c.gemm(o, r.Gate, n), c.gemm(o, r.Content, n)
 	bg, bu := c.bias(o, r.Gate), c.bias(o, r.Content)
 	s := o.do(func() (*tensor.Tensor, error) { return ops.IdolSiLUMulF16(g, u, bg, bu) })
@@ -204,27 +203,78 @@ func (c *idolCommon) modTable(o *iop, tmod, table *tensor.Tensor) []*tensor.Tens
 	return out
 }
 
-// forwardFused is forward on the fused kernels.
-func (b *idolUnifiedBlock) forwardFused(o *iop, c *idolCommon, x, tmod *tensor.Tensor) *tensor.Tensor {
+// ln is n as an IdolResLN LayerNorm, modulated by scale / shift when set.
+func (c *idolCommon) ln(o *iop, n idolNorm, scale, shift *tensor.Tensor) ops.IdolLN {
+	eps := n.Eps
+	if eps == 0 {
+		eps = 1e-6
+	}
+	return ops.IdolLN{W: c.f32(o, n.W), B: c.f32(o, n.B), Scale: scale, Shift: shift, Eps: eps}
+}
+
+// resLN is ops.IdolResLN in the op chain (y reshaped as x).
+func resLN(o *iop, x, y, bias, gate *tensor.Tensor, a ops.IdolLN, b *ops.IdolLN) (xo, oa, ob *tensor.Tensor) {
+	if o.err != nil {
+		return nil, nil, nil
+	}
+	if y != nil { // a GEMM output (rows, C)
+		if y, o.err = y.Reshape(x.Shape().Dims()...); o.err != nil {
+			return nil, nil, nil
+		}
+	}
+	xo, oa, ob, o.err = ops.IdolResLN(x, y, bias, gate, a, b)
+	return xo, oa, ob
+}
+
+// unifiedFusedOK reports whether these blocks run on the fused kernels.
+func (c *idolCommon) unifiedFusedOK(x *tensor.Tensor, blocks []*idolUnifiedBlock) bool {
+	for _, b := range blocks {
+		if !c.fusedOK(x, b.QKV, b.Out, b.FFN.L1, b.FFN.L2, b.RePo.Gate, b.RePo.Content, b.RePo.Final) {
+			return false
+		}
+	}
+	return len(blocks) > 0
+}
+
+// unifiedFused runs consecutive blocks on the fused kernels: each block's
+// end (the gated FFN residual) and the next one's start (RePo's and the
+// attention's LayerNorms of the result) are one IdolResLN pass.
+func (c *idolCommon) unifiedFused(o *iop, blocks []*idolUnifiedBlock, x, tmod *tensor.Tensor) *tensor.Tensor {
 	if o.err != nil {
 		return nil
 	}
-	B, L := x.Dim(0), x.Dim(1)
-	var m []*tensor.Tensor
-	if b.ShiftTable != nil {
-		m = c.modTable(o, tmod, b.ShiftTable)
-	} else {
-		m = make([]*tensor.Tensor, 6)
+	B, L, C := x.Dim(0), x.Dim(1), c.C
+	mods := make([][]*tensor.Tensor, len(blocks))
+	for i, b := range blocks {
+		if b.ShiftTable != nil {
+			mods[i] = c.modTable(o, tmod, b.ShiftTable)
+		} else {
+			mods[i] = make([]*tensor.Tensor, 6)
+		}
 	}
-	d := b.RePo.offsets(o, c, x)
-	h := c.lnMod16(o, b.Norm1, x, m[1], m[0])
-	qkv := c.gemmH(o, b.QKV, h)
-	C := c.C
-	t := c.heads(o, b.QKV, qkv, B, L, []int{0, C, 2 * C}, []*tensor.Tensor{b.QNorm, b.KNorm, nil}, b.RePo, d)
-	a := c.flash(o, t[0], t[1], t[2])
-	x = c.gateRes(o, x, c.gemmH(o, b.Out, a), c.bias(o, b.Out), m[2])
-	h = c.lnMod16(o, b.Norm2, x, m[4], m[3])
-	return c.gateRes(o, x, c.ffn16(o, b.FFN, h), c.bias(o, b.FFN.L2), m[5])
+	// inputs returns block i's RePo and attention LayerNorms.
+	inputs := func(i int) (ops.IdolLN, *ops.IdolLN) {
+		b, m := blocks[i], mods[i]
+		n1 := c.ln(o, b.Norm1, m[1], m[0])
+		return c.ln(o, b.RePo.Norm, nil, nil), &n1
+	}
+	ra, n1 := inputs(0)
+	_, nr, h := resLN(o, x, nil, nil, nil, ra, n1)
+	for i, b := range blocks {
+		m := mods[i]
+		d := b.RePo.offsets(o, c, nr)
+		t := c.heads(o, b.QKV, c.gemmH(o, b.QKV, h), B, L, []int{0, C, 2 * C}, []*tensor.Tensor{b.QNorm, b.KNorm, nil}, b.RePo, d)
+		a := c.gemmH(o, b.Out, c.flash(o, t[0], t[1], t[2]))
+		x, h, _ = resLN(o, x, a, c.bias(o, b.Out), m[2], c.ln(o, b.Norm2, m[4], m[3]), nil)
+		f := c.ffn16(o, b.FFN, h)
+		if i+1 < len(blocks) {
+			ra, n1 := inputs(i + 1)
+			x, nr, h = resLN(o, x, f, c.bias(o, b.FFN.L2), m[5], ra, n1)
+		} else {
+			x = c.gateRes(o, x, f, c.bias(o, b.FFN.L2), m[5])
+		}
+	}
+	return x
 }
 
 // cross is cross attention from h16 (B, L, C) F16 to the context ctx16
@@ -257,11 +307,9 @@ func (b *idolCrossBlock) forwardFused(o *iop, c *idolCommon, x, ctx *tensor.Tens
 	a := b.SelfAttn
 	h := c.lnMod16(o, idolNorm{}, x, nil, nil)
 	t := c.heads(o, a.QKV, c.gemmH(o, a.QKV, h), B, L, []int{0, c.C, 2 * c.C}, []*tensor.Tensor{a.QNorm, a.KNorm, nil}, nil, nil)
-	x = c.gateRes(o, x, c.gemmH(o, a.Out, c.flash(o, t[0], t[1], t[2])), c.bias(o, a.Out), nil)
-	h = c.lnMod16(o, b.Norm2, x, nil, nil)
+	x, h, _ = resLN(o, x, c.gemmH(o, a.Out, c.flash(o, t[0], t[1], t[2])), c.bias(o, a.Out), nil, c.ln(o, b.Norm2, nil, nil), nil)
 	ca := b.CrossAttn
-	x = c.gateRes(o, x, c.gemmH(o, ca.Out, c.cross(o, ca, h, cast16(o, ctx))), c.bias(o, ca.Out), nil)
-	h = c.lnMod16(o, idolNorm{}, x, nil, nil)
+	x, h, _ = resLN(o, x, c.gemmH(o, ca.Out, c.cross(o, ca, h, cast16(o, ctx))), c.bias(o, ca.Out), nil, c.ln(o, idolNorm{}, nil, nil), nil)
 	return c.gateRes(o, x, c.ffn16(o, b.FFN, h), c.bias(o, b.FFN.L2), nil)
 }
 
@@ -274,8 +322,7 @@ func (b *idolCrossBlock) forwardFusedMod(o *iop, c *idolCommon, x, ctx, mod *ten
 	m := c.modTable(o, mod, nil)
 	h := c.lnMod16(o, idolNorm{}, x, m[1], m[0])
 	ca := b.CrossAttn
-	x = c.gateRes(o, x, c.gemmH(o, ca.Out, c.cross(o, ca, h, cast16(o, ctx))), c.bias(o, ca.Out), m[2])
-	h = c.lnMod16(o, idolNorm{}, x, m[4], m[3])
+	x, h, _ = resLN(o, x, c.gemmH(o, ca.Out, c.cross(o, ca, h, cast16(o, ctx))), c.bias(o, ca.Out), m[2], c.ln(o, idolNorm{}, m[4], m[3]), nil)
 	return c.gateRes(o, x, c.ffn16(o, b.FFN, h), c.bias(o, b.FFN.L2), m[5])
 }
 

@@ -83,6 +83,111 @@ func IdolLNModF16(x, w, b, scale, shift *tensor.Tensor, eps float64) (*tensor.Te
 	return out, idolRun("idol_ln_mod_f16", out, map[string]any{"rows": rows, "cols": C, "rpb": rpb, "eps": eps}, -1, x, w, b, scale, shift)
 }
 
+// IdolLN is one LayerNorm of IdolResLN: affine W, B and per-batch
+// modulation Scale, Shift ((B, C)), each pair optional.
+type IdolLN struct {
+	W, B, Scale, Shift *tensor.Tensor
+	Eps                float64
+}
+
+// IdolResLN is a block boundary in one pass: x' = x + (y + bias)·gate
+// (when y is set: F32 or F16, bias and per-batch gate optional; else x' =
+// x), then LayerNorm a of x' (and b, when set) as IdolLNModF16 does.
+// Returns x' (x itself without y) and the F16 norms (ob nil without b).
+func IdolResLN(x, y, bias, gate *tensor.Tensor, a IdolLN, b *IdolLN) (xo, oa, ob *tensor.Tensor, err error) {
+	C := x.Dim(-1)
+	rows := x.NumElements() / C
+	bad := C%4 != 0 || C > 4096 || x.DType() != dtype.F32 || (y != nil && !y.Shape().Equal(x.Shape()))
+	lns := []IdolLN{a}
+	if b != nil {
+		lns = append(lns, *b)
+	}
+	tab := gate
+	for _, l := range lns {
+		bad = bad || (l.W == nil) != (l.B == nil) || (l.Scale == nil) != (l.Shift == nil)
+		if l.Scale != nil {
+			tab = l.Scale
+		}
+	}
+	if bad {
+		ys := "none"
+		if y != nil {
+			ys = fmt.Sprint(y.Shape())
+		}
+		return nil, nil, nil, fmt.Errorf("IdolResLN: unsupported x %v %v, y %v, or norm arguments", x.Shape(), x.DType(), ys)
+	}
+	rpb, err := batchRows("IdolResLN", rows, C, tab)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	dt := dtype.F32
+	if y != nil {
+		dt = y.DType()
+	}
+	k, err := registry.Lookup(registry.Key{Op: "idol_res_ln_f16", Dev: x.Device().Kind(), DType: dt})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	contig := func(t *tensor.Tensor, want dtype.DType) *tensor.Tensor {
+		if t == nil || err != nil {
+			return nil
+		}
+		if t.DType() != want {
+			err = fmt.Errorf("IdolResLN: %v input, want %v", t.DType(), want)
+			return nil
+		}
+		var c *tensor.Tensor
+		c, err = ensureContig(t)
+		return c
+	}
+	ins := make([]*tensor.Tensor, 15)
+	ins[0] = contig(x, dtype.F32)
+	if y != nil {
+		ins[1] = contig(y, y.DType())
+		if y.DType() != dtype.F32 && y.DType() != dtype.F16 {
+			return nil, nil, nil, fmt.Errorf("IdolResLN: y %v", y.DType())
+		}
+	}
+	ins[2], ins[3] = contig(bias, dtype.F32), contig(gate, dtype.F32)
+	for i, l := range lns {
+		ins[4+4*i], ins[5+4*i], ins[6+4*i], ins[7+4*i] = contig(l.W, dtype.F32), contig(l.B, dtype.F32), contig(l.Scale, dtype.F32), contig(l.Shift, dtype.F32)
+	}
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	empty := func(dt dtype.DType) *tensor.Tensor {
+		if err != nil {
+			return nil
+		}
+		var t *tensor.Tensor
+		t, err = tensor.Empty(dt, x.Shape().Dims(), x.Device())
+		return t
+	}
+	oa = empty(dtype.F16)
+	if b != nil {
+		ob = empty(dtype.F16)
+	}
+	xo = x
+	if y != nil {
+		xo = empty(dtype.F32)
+	}
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	ins[12], ins[13] = oa, ob
+	if y != nil {
+		ins[14] = xo
+	}
+	attrs := map[string]any{"rows": rows, "cols": C, "rpb": rpb, "epsa": a.Eps, "epsb": 0.0}
+	if b != nil {
+		attrs["epsb"] = b.Eps
+	}
+	if err := k(&registry.Context{Inputs: ins, Output: oa, Attrs: attrs}); err != nil {
+		return nil, nil, nil, err
+	}
+	return xo, oa, ob, nil
+}
+
 // IdolHeadF16 takes one of q / k / v from a projection output x (rows,
 // W) F32 or F16: columns [off, off + H·64) plus bias[off:] (bias (W,), nil:
 // none), turned by RePo's rotary angles when ropeD (rows, H, 3) is set

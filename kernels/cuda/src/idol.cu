@@ -5,6 +5,8 @@
 //
 // idol_ln_mod_f16     LayerNorm (optional affine) and adaLN modulation
 //                     x̂·(1 + scale) + shift, rounded to F16 for the GEMM.
+// idol_res_ln_f16     the gated residual, then one or two such LayerNorms
+//                     of the result (a block's end and the next's start).
 // idol_head_f16      one of q / k / v from a projection's F32 output:
 //                     bias, RePo rotary (angles from the RePo offsets and
 //                     learned frequencies), MultiHeadRMSNorm, F16 out for
@@ -91,6 +93,105 @@ idol_ln_mod_f16(const float *x, const float *w, const float *b, const float *sca
       o[2 * j + 1] = __floats2half2_rn(y[2], y[3]);
     }
   }
+}
+
+// The block boundary in one pass: x' = x + (y + bias) * gate (when y is
+// set; y F32 or F16, bias / gate optional, x' written to xout), then up to
+// two LayerNorms of x' sharing its mean and variance, each with its own
+// affine (w, b; optional), modulation (scale, shift per batch; optional)
+// and eps, rounded to F16 (outa; outb when set). One block (256 threads)
+// per row; cols a multiple of 4, at most 4096.
+template <typename T>
+__device__ __forceinline__ void idol_res_ln(const float *x, const T *y, const float *bias, const float *gate,
+                                            float *xout, const float *wa, const float *ba, const float *sca,
+                                            const float *sha, float epsa, __half *outa, const float *wb,
+                                            const float *bb, const float *scb, const float *shb, float epsb,
+                                            __half *outb, long rows, int cols, long rows_per_batch) {
+  __shared__ float sh[32];
+  long row = blockIdx.x;
+  if (row >= rows) return;
+  int n4 = cols / 4;
+  long bi = row / rows_per_batch;
+  float4 v[4];
+  float s = 0.f;
+#pragma unroll
+  for (int i = 0; i < 4; i++) {
+    int j = threadIdx.x + i * blockDim.x;
+    if (j < n4) {
+      long e = row * cols + 4 * j;
+      v[i] = *reinterpret_cast<const float4 *>(x + e);
+      if (y) {
+        float4 u = idol_ld4(y + e);
+        if (bias) {
+          float4 t = *reinterpret_cast<const float4 *>(bias + 4 * j);
+          u.x += t.x; u.y += t.y; u.z += t.z; u.w += t.w;
+        }
+        if (gate) {
+          float4 g = *reinterpret_cast<const float4 *>(gate + bi * cols + 4 * j);
+          u.x *= g.x; u.y *= g.y; u.z *= g.z; u.w *= g.w;
+        }
+        v[i].x += u.x; v[i].y += u.y; v[i].z += u.z; v[i].w += u.w;
+        *reinterpret_cast<float4 *>(xout + e) = v[i];
+      }
+      s += v[i].x + v[i].y + v[i].z + v[i].w;
+    }
+  }
+  float mean = idol_block_sum(s, sh) / (float)cols;
+  float q = 0.f;
+#pragma unroll
+  for (int i = 0; i < 4; i++) {
+    int j = threadIdx.x + i * blockDim.x;
+    if (j < n4) {
+      float a = v[i].x - mean, c = v[i].y - mean, d = v[i].z - mean, e = v[i].w - mean;
+      q += a * a + c * c + d * d + e * e;
+    }
+  }
+  float var = idol_block_sum(q, sh) / (float)cols;
+#pragma unroll
+  for (int k = 0; k < 2; k++) {
+    __half *out = k == 0 ? outa : outb;
+    if (!out) continue;
+    const float *w = k == 0 ? wa : wb, *b = k == 0 ? ba : bb;
+    const float *sc = k == 0 ? sca : scb, *sf = k == 0 ? sha : shb;
+    float inv = rsqrtf(var + (k == 0 ? epsa : epsb));
+    if (sc) {
+      sc += bi * cols;
+      sf += bi * cols;
+    }
+    __half2 *o = reinterpret_cast<__half2 *>(out + row * cols);
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+      int j = threadIdx.x + i * blockDim.x;
+      if (j < n4) {
+        float z[4] = {(v[i].x - mean) * inv, (v[i].y - mean) * inv, (v[i].z - mean) * inv, (v[i].w - mean) * inv};
+#pragma unroll
+        for (int e = 0; e < 4; e++) {
+          int c = 4 * j + e;
+          if (w) z[e] = z[e] * w[c] + b[c];
+          if (sc) z[e] = z[e] * (sc[c] + 1.0f) + sf[c];
+        }
+        o[2 * j] = __floats2half2_rn(z[0], z[1]);
+        o[2 * j + 1] = __floats2half2_rn(z[2], z[3]);
+      }
+    }
+  }
+}
+
+extern "C" __global__ void __launch_bounds__(256)
+idol_res_ln_f16(const float *x, const float *y, const float *bias, const float *gate, float *xout, const float *wa,
+                const float *ba, const float *sca, const float *sha, float epsa, __half *outa, const float *wb,
+                const float *bb, const float *scb, const float *shb, float epsb, __half *outb, long rows, int cols,
+                long rows_per_batch) {
+  idol_res_ln<float>(x, y, bias, gate, xout, wa, ba, sca, sha, epsa, outa, wb, bb, scb, shb, epsb, outb, rows, cols,
+                     rows_per_batch);
+}
+extern "C" __global__ void __launch_bounds__(256)
+idol_res_ln_f16_h(const float *x, const __half *y, const float *bias, const float *gate, float *xout,
+                  const float *wa, const float *ba, const float *sca, const float *sha, float epsa, __half *outa,
+                  const float *wb, const float *bb, const float *scb, const float *shb, float epsb, __half *outb,
+                  long rows, int cols, long rows_per_batch) {
+  idol_res_ln<__half>(x, y, bias, gate, xout, wa, ba, sca, sha, epsa, outa, wb, bb, scb, shb, epsb, outb, rows, cols,
+                      rows_per_batch);
 }
 
 // A warp per (row, head), lane j owning the pair (2j, 2j + 1) of the 64

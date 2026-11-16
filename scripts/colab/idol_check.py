@@ -7,7 +7,9 @@ models.TestIdolRealMatchesSDK.
 Runs idol-sdk's own networks on the speridlabs/idol weights with fixed
 inputs and saves them with the outputs to <out_dir>/ref.safetensors:
 
-  feature1, feature2   the SDK's image tokens for <image.png> (preprocessed)
+  pixels               <image.png> preprocessed by the SDK (1, 3, 1024, 1024)
+  feature1, feature2   the SDK's image tokens for them (DINOv3 in BF16, its
+                       default), feature1_f32 with DINOv3 in F32
   latent0, camera0     seeded noise
   fwd_*                one denoiser forward at t = 700 (cond tokens)
   sample_*             50 Euler steps, CFG 3, shift 3 from the noise
@@ -20,6 +22,8 @@ torch.compile) and *_f32 the same networks with every block in F32 (no TF32),
 the closest thing to the exact result. Light's error against *_f32 next to
 the SDK's own (f16 vs f32) shows whether Light is as accurate as upstream.
 Also prints the SDK's 50-step sampling time with torch.compile (warm).
+With COND_ONLY=1 it only adds pixels / feature1_f32 to an existing
+ref.safetensors (the image tokens are deterministic; the rest is kept).
 """
 import os, sys, time
 
@@ -68,9 +72,25 @@ prepared = preprocess_image(Image.open(image), background_remover=None, image_si
 pixels = torch.from_numpy(np.array(prepared)).permute(2, 0, 1).float().div(255.0)[None].to(dev)
 with torch.no_grad():
     cond = enc(pixels)
+    # DINOv3 in F32 (its checkpoint's dtype), no TF32: the exact tokens.
+    from transformers import AutoModel
+    enc.dinov3 = AutoModel.from_pretrained(cfg["image_encoders"]["dinov3"], dtype=torch.float32).eval().to(dev)
+    torch.backends.cudnn.allow_tf32, cudnn_tf32 = False, torch.backends.cudnn.allow_tf32
+    feature1_f32 = enc._dinov3_tokens(pixels).float().cpu()
+    torch.backends.cudnn.allow_tf32 = cudnn_tf32
 cond = TensorDict({k: v.float() for k, v in cond.items()}, batch_size=1, device=dev)
 del enc
 torch.cuda.empty_cache()
+os.makedirs(out_dir, exist_ok=True)
+ref_path = os.path.join(out_dir, "ref.safetensors")
+if os.environ.get("COND_ONLY"):
+    ref = load_file(ref_path)
+    d = (ref["feature1"] - cond["feature1"].cpu()).abs().max()
+    print(f"feature1 vs the existing reference: max diff {d:.3g}")
+    ref.update(pixels=pixels.cpu(), feature1_f32=feature1_f32)
+    save_file({k: v.contiguous() for k, v in ref.items()}, ref_path)
+    print("updated", ref_path)
+    sys.exit()
 
 a = cfg["denoiser"]["args"]
 g = torch.Generator().manual_seed(1)
@@ -78,7 +98,7 @@ latent0 = torch.randn(1, a["q_token_length"], a["in_channels"], generator=g)
 camera0 = torch.randn(1, 1, a["cam_channels"], generator=g)
 anchors = torch.rand(1, 8192, 3, generator=g)
 out = {"feature1": cond["feature1"].cpu(), "feature2": cond["feature2"].cpu(), "latent0": latent0, "camera0": camera0,
-       "anchors": anchors}
+       "anchors": anchors, "pixels": pixels.cpu(), "feature1_f32": feature1_f32}
 noise = TensorDict({"latent": latent0.to(dev), "camera": camera0.to(dev)}, batch_size=1, device=dev)
 neg = cond.apply(torch.zeros_like)
 
@@ -118,6 +138,7 @@ for tag, f16 in [("f16", True), ("f32", False)]:
 for k in ["fwd_latent", "fwd_camera", "sample_latent", "sample_camera", "gs"]:
     d = (out[f"{k}_f16"] - out[f"{k}_f32"]).abs()
     print(f"sdk f16 vs f32 {k}: max {d.max():.4g} mean {d.mean():.4g} (|ref| mean {out[k + '_f32'].abs().mean():.4g})")
-os.makedirs(out_dir, exist_ok=True)
-save_file({k: v.contiguous() for k, v in out.items()}, os.path.join(out_dir, "ref.safetensors"))
-print("wrote", os.path.join(out_dir, "ref.safetensors"))
+d = (out["feature1"] - out["feature1_f32"]).abs()
+print(f"sdk dinov3 bf16 vs f32 feature1: max {d.max():.4g} mean {d.mean():.4g}")
+save_file({k: v.contiguous() for k, v in out.items()}, ref_path)
+print("wrote", ref_path)

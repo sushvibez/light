@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"light/device"
+	"light/dtype"
 	"light/nn"
 	"light/ops"
 	"light/safetensors"
@@ -33,12 +34,15 @@ type DINOv3Config struct {
 // pre-norm blocks with 2-D rotary attention on the patch tokens and
 // LayerScale, and a final LayerNorm (last_hidden_state).
 type DINOv3 struct {
-	Cfg       DINOv3Config
-	Patch     *nn.Linear     // the stride-P conv as a linear over (c, ky, kx) patches
-	Prefix    *tensor.Tensor // (1, 1 + registers, D): CLS then registers
-	Layers    []*dinov3Layer
-	NormW     *tensor.Tensor
-	NormB     *tensor.Tensor
+	Cfg    DINOv3Config
+	Patch  *nn.Linear     // the stride-P conv as a linear over (c, ky, kx) patches
+	Prefix *tensor.Tensor // (1, 1 + registers, D): CLS then registers
+	Layers []*dinov3Layer
+	NormW  *tensor.Tensor
+	NormB  *tensor.Tensor
+	// Attn16 runs the attention on FP16 tensor cores (CUDA, head dim 64;
+	// the rest stays as loaded): Idol sets it. F32 SDPA otherwise.
+	Attn16    bool
 	dev       device.Device
 	ropeCache map[[2]int][2]*tensor.Tensor
 }
@@ -204,8 +208,34 @@ func (m *DINOv3) Forward(pixels *tensor.Tensor) (*tensor.Tensor, error) {
 		q := dinov3Rotate(o, heads(o.lin(ly.Q, n)), cos, sin)
 		k := dinov3Rotate(o, heads(o.lin(ly.K, n)), cos, sin)
 		v := heads(o.lin(ly.V, n))
-		a := o.do(func() (*tensor.Tensor, error) { return nn.SDPA(q, k, v, nil) })
-		a = o.lin(ly.O, o.reshape(o.perm(a, 0, 2, 1, 3), B, L, D))
+		var a *tensor.Tensor
+		if m.Attn16 && device.IsCUDA(x.Device()) && Dh == 64 && o.err == nil {
+			// FP16 flash attention on the sequence-major views.
+			sq := func(t *tensor.Tensor) *tensor.Tensor {
+				return o.do(func() (*tensor.Tensor, error) {
+					p, err := t.Permute(0, 2, 1, 3)
+					if err != nil {
+						return nil, err
+					}
+					return ops.Cast(p, dtype.F16)
+				})
+			}
+			qh, kh, vh := sq(q), sq(k), sq(v)
+			a = o.do(func() (*tensor.Tensor, error) {
+				r, err := ops.FlashAttentionF16SeqMajor(qh, kh, vh, false)
+				if err != nil {
+					return nil, err
+				}
+				if r, err = ops.Cast(r, dtype.F32); err != nil {
+					return nil, err
+				}
+				return r.Reshape(B, L, D)
+			})
+		} else {
+			a = o.do(func() (*tensor.Tensor, error) { return nn.SDPA(q, k, v, nil) })
+			a = o.reshape(o.perm(a, 0, 2, 1, 3), B, L, D)
+		}
+		a = o.lin(ly.O, a)
 		x = o.add(x, o.mul(a, ly.LS1))
 		n = o.do(func() (*tensor.Tensor, error) { return ops.LayerNorm(x, ly.Norm2W, ly.Norm2B, cfg.LayerNormEps) })
 		var f *tensor.Tensor

@@ -153,6 +153,27 @@ func TestIdolFusedMatchesUnfused(t *testing.T) {
 	yyh, yy32 := h16(yy)
 	cmp("IdolGateRes (F16 y)", must(ops.IdolGateRes(up(x), yyh, up(b), up(gate))), must(must(ops.IdolGateRes(up(x), yy32, up(b), up(gate))).To(cpu)), 0)
 	cmp("IdolBiasGeluF16 (F16 y)", must(ops.IdolBiasGeluF16(yyh, up(b))), must(must(ops.IdolBiasGeluF16(yy32, up(b))).To(cpu)), 0)
+
+	// IdolResLN: the gated residual and two LayerNorms (eps 1e-5 affine,
+	// 1e-6 modulated) in one pass, against IdolGateRes then IdolLNModF16.
+	xr := must(ops.IdolGateRes(up(x), yyh, up(b), up(gate)))
+	la := ops.IdolLN{W: up(w), B: up(b), Eps: 1e-5}
+	lb := ops.IdolLN{Scale: up(scale), Shift: up(shift), Eps: 1e-6}
+	xo, oa, ob := func() (*tensor.Tensor, *tensor.Tensor, *tensor.Tensor) {
+		xo, oa, ob, err := ops.IdolResLN(up(x), yyh, up(b), up(gate), la, &lb)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return xo, oa, ob
+	}()
+	cmp("IdolResLN x", xo, must(xr.To(cpu)), 0)
+	cmp("IdolResLN a", oa, must(must(ops.IdolLNModF16(xr, la.W, la.B, nil, nil, 1e-5)).To(cpu)), 2e-3)
+	cmp("IdolResLN b", ob, must(must(ops.IdolLNModF16(xr, nil, nil, lb.Scale, lb.Shift, 1e-6)).To(cpu)), 2e-3)
+	_, oa2, _, err := ops.IdolResLN(up(x), nil, nil, nil, la, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmp("IdolResLN (no residual)", oa2, must(must(ops.IdolLNModF16(up(x), la.W, la.B, nil, nil, 1e-5)).To(cpu)), 2e-3)
 }
 
 // idolAttRef is softmax(q·kᵀ/8)·v in F64 for (B, L, H, 64) q and (B, S, H,
@@ -204,4 +225,31 @@ func idolAttRef(t *testing.T, q, k, v *tensor.Tensor) *tensor.Tensor {
 		t.Fatal(err)
 	}
 	return r
+}
+
+// BenchmarkFlashAttentionF16Idol is one of Idol's denoiser attentions:
+// batched CFG (2) x 16 heads of 64 over 12,294 tokens, FP16.
+func BenchmarkFlashAttentionF16Idol(b *testing.B) {
+	gpu := gpuOrSkip(b)
+	rng := rand.New(rand.NewPCG(1, 1))
+	dims := []int{2, 12294, 16, 64}
+	var x [3]*tensor.Tensor
+	for i := range x {
+		c, err := ops.Cast(randTensorB(b, rng, dims, dtype.F32), dtype.F16)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if x[i], err = c.To(gpu); err != nil {
+			b.Fatal(err)
+		}
+	}
+	for b.Loop() {
+		o, err := ops.FlashAttentionF16SeqMajor(x[0], x[1], x[2], false)
+		if err != nil {
+			b.Fatal(err)
+		}
+		syncGPU(b, o)
+	}
+	flops := 4.0 * 2 * 16 * 12294 * 12294 * 64
+	b.ReportMetric(flops*float64(b.N)/b.Elapsed().Seconds()/1e12, "TFLOPS")
 }

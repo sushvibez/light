@@ -94,7 +94,9 @@ func LoadIdolPipeline(repo string, dev device.Device, o IdolLoadOptions) (*IdolP
 		return nil, fmt.Errorf("idol: DINOv3 (gated: accept its licence on the Hub and log in): %w", err)
 	}
 	// DINOv3 runs in BF16 upstream, not FP16 (ViT activation outliers): its
-	// 16-bit weights keep F32 compute.
+	// 16-bit weights keep F32 compute (tokens within 5e-4 of F32; BF16
+	// compute, as the SDK, is 20x further). Its attention runs on FP16
+	// tensor cores (q / k / v well inside FP16's range).
 	exact := func(f func() error) error {
 		if o.Storage16 {
 			return nn.WithWeightStorage16(dtype.F16, f)
@@ -104,6 +106,7 @@ func LoadIdolPipeline(repo string, dev device.Device, o IdolLoadOptions) (*IdolP
 	if err := exact(func() (err error) { p.DINO, err = models.LoadDINOv3(ddir, dev); return }); err != nil {
 		return nil, err
 	}
+	p.DINO.Attn16 = o.Storage16
 	vae := o.FluxVAE
 	if vae == "" {
 		vae = cfg.ImageEncoders["flux2_vae"]
@@ -277,11 +280,13 @@ func (p *IdolPipeline) Generate(o IdolOptions) (*IdolResult, error) {
 	for range len(vs.Down) - 1 {
 		scale *= 2
 	}
+	endTrace := spanProfile("condition", p.Dev)
 	f1, f2, err := p.Condition(pixels, S, normal(vs.Cfg.LatentChannels*(S/scale)*(S/scale)))
 	if err != nil {
 		return nil, err
 	}
 	pt.mark("condition", f2)
+	endTrace()
 	a := cfg.Denoiser.Args
 	lat, err := tensor.New(normal(a.QTokenLength*a.InChannels), []int{1, a.QTokenLength, a.InChannels}, p.Dev)
 	if err != nil {
@@ -300,7 +305,7 @@ func (p *IdolPipeline) Generate(o IdolOptions) (*IdolResult, error) {
 	pt.mark("sample", lat)
 	G := p.Model.Gaussian.Args.Representation.NumGaussians
 	nAnchors := max(1, o.NumGaussians/G)
-	endTrace := spanProfile("decode", p.Dev)
+	endTrace = spanProfile("decode", p.Dev)
 	anchors, err := models.IdolSampleAnchors(p.Model.Octree, lat, nAnchors, cfg.MaxVoxelLevel, rng.Float32)
 	if err != nil {
 		return nil, err

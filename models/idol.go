@@ -360,8 +360,8 @@ func (b *idolUnifiedBlock) forward(o *iop, c *idolCommon, x, tmod *tensor.Tensor
 	if o.err != nil {
 		return nil
 	}
-	if c.fusedOK(x, b.QKV, b.Out, b.FFN.L1, b.FFN.L2, b.RePo.Gate, b.RePo.Content, b.RePo.Final) {
-		return b.forwardFused(o, c, x, tmod)
+	if bs := []*idolUnifiedBlock{b}; c.unifiedFusedOK(x, bs) {
+		return c.unifiedFused(o, bs, x, tmod)
 	}
 	cos, sin := b.RePo.angles(o, c, x)
 	if b.ShiftTable == nil {
@@ -373,6 +373,18 @@ func (b *idolUnifiedBlock) forward(o *iop, c *idolCommon, x, tmod *tensor.Tensor
 	x = o.add(x, o.mul(b.attn(o, c, h, cos, sin), m[2]))
 	h = idolModulate(o, c.norm(o, b.Norm2, x), m[3], m[4])
 	return o.add(x, o.mul(b.FFN.forward(o, h), m[5]))
+}
+
+// unifiedBlocks runs blocks in order (on the fused kernels together when
+// they can).
+func (c *idolCommon) unifiedBlocks(o *iop, blocks []*idolUnifiedBlock, x, tmod *tensor.Tensor) *tensor.Tensor {
+	if o.err == nil && c.unifiedFusedOK(x, blocks) {
+		return c.unifiedFused(o, blocks, x, tmod)
+	}
+	for _, b := range blocks {
+		x = b.forward(o, c, x, tmod)
+	}
+	return x
 }
 
 // IdolDenoiser is LatentSeqMMFlowModel.
@@ -408,12 +420,8 @@ func (m *IdolDenoiser) Forward(in IdolInputs) (vLatent, vCamera *tensor.Tensor, 
 	freq := o.do(func() (*tensor.Tensor, error) { return idolSinusoidal(in.T, 10000, false, c.dev) })
 	temb := m.TEmbed.forward(o, freq)
 	tmod := o.lin(m.AdaLN, o.un(ops.SiLU, temb))
-	for _, b := range m.NoiseRefiner {
-		hx = b.forward(o, c, hx, tmod)
-	}
-	for _, b := range m.CtxRefiner {
-		hc = b.forward(o, c, hc, nil)
-	}
+	hx = c.unifiedBlocks(o, m.NoiseRefiner, hx, tmod)
+	hc = c.unifiedBlocks(o, m.CtxRefiner, hc, nil)
 	hcam := in.Camera
 	for i, l := range m.CamRefiner {
 		if i > 0 {
@@ -421,10 +429,7 @@ func (m *IdolDenoiser) Forward(in IdolInputs) (vLatent, vCamera *tensor.Tensor, 
 		}
 		hcam = o.lin(l, hcam)
 	}
-	h := o.cat(1, hx, hc, hcam)
-	for _, b := range m.Blocks {
-		h = b.forward(o, c, h, tmod)
-	}
+	h := c.unifiedBlocks(o, m.Blocks, o.cat(1, hx, hc, hcam), tmod)
 	if o.err != nil {
 		return nil, nil, o.err
 	}

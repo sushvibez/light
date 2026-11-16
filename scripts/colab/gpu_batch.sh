@@ -16,7 +16,9 @@
 # moshi (per-stage frame profile + CPU profile, 8.2 GB + Mimi), speech
 # (end-to-end speech-to-speech through the engine's OpenAI handler, same
 # checkpoints; not in the default set), trellis (TRELLIS image to Gaussians / mesh against
-# TRELLIS's own code). NO_UPDATE=1 runs the checkout in $WORK as is.
+# TRELLIS's own code), idol (three demo objects) and idolcheck (Idol's
+# real weights against idol-sdk; after idol). NO_UPDATE=1 runs the
+# checkout in $WORK as is.
 # Everything fits an L4 (24 GB); an A100 is not needed.
 # Hugging Face downloads use $HF_TOKEN when set.
 set -uo pipefail
@@ -265,6 +267,20 @@ PY
 ' | grep -v '^step' | tee "$LOGS/idol-$ex.log"
 			SUMMARY+=("idol $ex: $(grep -oE '(loaded idol|generated [0-9]+ Gaussians) in [0-9.]+ s' "$LOGS/idol-$ex.log" | paste -sd ' ')  wall $((SECONDS - t0))s")
 		done
+		;;
+	idolcheck)
+		# Idol on the real weights against idol-sdk: scripts/colab/idol_check.py
+		# records the SDK's FP16 networks as shipped and in F32 for fig-fox
+		# (~10 min; torch keeps the original LD_LIBRARY_PATH), then the
+		# models / diffusion TestIdol*RealMatchesSDK compare Light's CUDA
+		# path. Run after the idol group (its cut-out fig-fox.png, downloads).
+		[ -f "$LOGS/idol/fig-fox.png" ] || { SUMMARY+=("idolcheck SKIP (run the idol group first)"); continue; }
+		[ -d /content/idol-sdk ] || git clone -q --depth 1 https://github.com/speridlabs/idol-sdk /content/idol-sdk
+		pip install -q tensordict plyfile 2>&1 | tail -1
+		LD_LIBRARY_PATH=$ORIG_LD_LIBRARY_PATH python3 scripts/colab/idol_check.py /content/idol-sdk "$LOGS/idol/fig-fox.png" /content/idol_ref 2>&1 |
+			grep -v 'it/s\]$' | tee "$LOGS/$STAMP-idol-ref.log" | tail -12
+		W=$(ls -d "$HF_HUB"/models--speridlabs--idol/snapshots/*/ | head -1)
+		LIGHT_IDOL_REF=/content/idol_ref LIGHT_IDOL_DIR=$W run idolcheck './models ./diffusion' 'TestIdolRealMatchesSDK|TestIdolConditionRealMatchesSDK' -p 1
 		;;
 	examples)
 		# Example images for scratch/examples: 1024^2 generations kept in
