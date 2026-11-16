@@ -86,6 +86,9 @@ var decodeAttnPTX []byte
 //go:embed ptx/gemv.ptx
 var gemvPTX []byte
 
+//go:embed ptx/idol.ptx
+var idolPTX []byte
+
 type lazyModule struct {
 	name string
 	data []byte
@@ -143,6 +146,7 @@ var modules = []*lazyModule{
 	{name: "kv_ring", data: kvRingPTX},
 	{name: "decode_attn", data: decodeAttnPTX},
 	{name: "gemv", data: gemvPTX},
+	{name: "idol", data: idolPTX},
 }
 
 var (

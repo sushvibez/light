@@ -258,10 +258,12 @@ func (p *IdolPipeline) Generate(o IdolOptions) (*IdolResult, error) {
 	if p.BiRefNet != nil {
 		matte = p.BiRefNet.RemoveBackground
 	}
+	pt := newPhaseTimer()
 	pixels, prepared, err := idolPreprocess(o.Image, S, margin, matte)
 	if err != nil {
 		return nil, err
 	}
+	pt.mark("preprocess", nil)
 	rng := rand.New(rand.NewPCG(o.Seed, o.Seed^0x9e3779b97f4a7c15))
 	normal := func(n int) []float32 {
 		v := make([]float32, n)
@@ -279,6 +281,7 @@ func (p *IdolPipeline) Generate(o IdolOptions) (*IdolResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	pt.mark("condition", f2)
 	a := cfg.Denoiser.Args
 	lat, err := tensor.New(normal(a.QTokenLength*a.InChannels), []int{1, a.QTokenLength, a.InChannels}, p.Dev)
 	if err != nil {
@@ -289,16 +292,20 @@ func (p *IdolPipeline) Generate(o IdolOptions) (*IdolResult, error) {
 		return nil, err
 	}
 	lat, cam, err = models.IdolSample(p.Model.Denoiser, lat, cam, f1, f2,
-		models.IdolSampleOptions{Steps: o.Steps, CFG: o.CFG, Shift: o.Shift, Step: o.Step})
+		models.IdolSampleOptions{Steps: o.Steps, CFG: o.CFG, Shift: o.Shift, Step: o.Step,
+			Profile: func(i int) func() { return stepProfile(i, p.Dev) }})
 	if err != nil {
 		return nil, err
 	}
+	pt.mark("sample", lat)
 	G := p.Model.Gaussian.Args.Representation.NumGaussians
 	nAnchors := max(1, o.NumGaussians/G)
+	endTrace := spanProfile("decode", p.Dev)
 	anchors, err := models.IdolSampleAnchors(p.Model.Octree, lat, nAnchors, cfg.MaxVoxelLevel, rng.Float32)
 	if err != nil {
 		return nil, err
 	}
+	pt.mark("anchors", nil)
 	pts, err := tensor.New(anchors, []int{1, nAnchors, 3}, p.Dev)
 	if err != nil {
 		return nil, err
@@ -307,10 +314,13 @@ func (p *IdolPipeline) Generate(o IdolOptions) (*IdolResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	pt.mark("gaussian decoder", feats)
+	endTrace()
 	g, err := p.Model.Gaussian.ToGaussians(anchors, feats)
 	if err != nil {
 		return nil, err
 	}
+	pt.mark("to gaussians", nil)
 	cc, err := cam.To(device.CPU())
 	if err != nil {
 		return nil, err

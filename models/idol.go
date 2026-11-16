@@ -164,7 +164,8 @@ type idolCommon struct {
 	ones, zeros *tensor.Tensor // (C,)
 	onesD       *tensor.Tensor // (head dim,)
 	dev         device.Device
-	normCache   map[int][2]*tensor.Tensor // normN's ones / zeros per width
+	normCache   map[int][2]*tensor.Tensor         // normN's ones / zeros per width
+	f32Cache    map[*tensor.Tensor]*tensor.Tensor // F32 copies of 16-bit biases (fused path)
 }
 
 func newIdolCommon(C, H int, dev device.Device) (*idolCommon, error) {
@@ -290,6 +291,7 @@ type idolRePo struct {
 	Gate, Content, Final *nn.Linear
 	Freqs                [3]*tensor.Tensor // learned, F32
 	freqsPi              [3]*tensor.Tensor // × π, built on first use
+	freqTab, axisTab     *tensor.Tensor    // fused path: per-pair frequency × π and axis
 }
 
 // angles returns cos and sin (B, L, H, D/2) for hidden states h (B, L, C).
@@ -357,6 +359,9 @@ func (b *idolUnifiedBlock) attn(o *iop, c *idolCommon, h, cos, sin *tensor.Tenso
 func (b *idolUnifiedBlock) forward(o *iop, c *idolCommon, x, tmod *tensor.Tensor) *tensor.Tensor {
 	if o.err != nil {
 		return nil
+	}
+	if c.fusedOK(x, b.QKV, b.Out, b.FFN.L1, b.FFN.L2, b.RePo.Gate, b.RePo.Content, b.RePo.Final) {
+		return b.forwardFused(o, c, x, tmod)
 	}
 	cos, sin := b.RePo.angles(o, c, x)
 	if b.ShiftTable == nil {
@@ -515,11 +520,17 @@ func (b *idolCrossBlock) forward(o *iop, c *idolCommon, x, ctx, mod *tensor.Tens
 		return nil
 	}
 	if mod != nil {
+		if b.crossFusedOK(c, x, ctx) {
+			return b.forwardFusedMod(o, c, x, ctx, mod)
+		}
 		m := idolChunks(o, mod, 6)
 		h := idolModulate(o, c.norm(o, idolNorm{}, x), m[0], m[1])
 		x = o.add(x, o.mul(b.CrossAttn.forward(o, c, h, ctx), m[2]))
 		h = idolModulate(o, c.norm(o, idolNorm{}, x), m[3], m[4])
 		return o.add(x, o.mul(b.FFN.forward(o, h), m[5]))
+	}
+	if a := b.SelfAttn; a.QNorm != nil && c.fusedOK(x, a.QKV, a.Out) && b.crossFusedOK(c, x, ctx) {
+		return b.forwardFused(o, c, x, ctx)
 	}
 	x = o.add(x, b.SelfAttn.forward(o, c, c.norm(o, idolNorm{}, x), nil))
 	x = o.add(x, b.CrossAttn.forward(o, c, c.norm(o, b.Norm2, x), ctx))

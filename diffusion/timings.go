@@ -105,3 +105,19 @@ func stepProfile(i int, dev device.Device) func() {
 		fmt.Fprintf(os.Stderr, "gpu trace, step %d:\n%s\n", i, cudart.GPUTraceTop(t, 40))
 	}
 }
+
+// spanProfile is stepProfile for a whole phase (name in the report).
+func spanProfile(name string, dev device.Device) func() {
+	if os.Getenv("LIGHT_PROFILE_GPU") == "" || !device.IsCUDA(dev) {
+		return func() {}
+	}
+	cudart.StartGPUTrace()
+	return func() {
+		t, err := cudart.StopGPUTrace()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "gpu trace: %v\n", err)
+			return
+		}
+		fmt.Fprintf(os.Stderr, "gpu trace, %s:\n%s\n", name, cudart.GPUTraceTop(t, 25))
+	}
+}
