@@ -127,7 +127,7 @@ Light already has. Sizes are BF16 safetensors.
 4. **LLaDA 8B Instruct**, **Dream 7B**: done (real weights match on Colab;
    engine chat).
 5. **TRELLIS (image-large, v1)**: done for Gaussians and the mesh (real weights match on
-   the L4; `light trellis`). Images without alpha are cut out by BiRefNet (rembg's u2net in TRELLIS). Mesh: FlexiCubes on the CPU, `light trellis -mesh`. Next: to_glb (simplify + baked texture).
+   the L4; `light trellis`). Images without alpha are cut out by BiRefNet (rembg's u2net in TRELLIS). Mesh: FlexiCubes on the CPU, `light trellis -mesh` (OBJ / PLY / vertex-coloured GLB). Next: to_glb (simplify + baked texture).
 6. **FLUX.2-klein-4B**: done (real weights on CPU and the L4).
 7. **flux-3-image-klein**: text-to-image and editing done (tiny-verified).
    Next: a real-weights run (11 GB DiT + 8.9 GB Qwen3-VL-4B), Lanczos for

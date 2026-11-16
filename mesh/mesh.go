@@ -1,5 +1,5 @@
 // Package mesh holds triangle meshes with per-vertex colours and writes
-// them as Wavefront OBJ or binary PLY.
+// them as Wavefront OBJ, binary PLY or binary glTF (GLB).
 package mesh
 
 import (
@@ -66,15 +66,18 @@ func (m *Mesh) rgb(i int) [3]float32 {
 	return c
 }
 
-// Write writes m as OBJ or PLY by the extension of path (.obj, .ply).
+// Write writes m as OBJ, PLY or GLB by the extension of path (.obj, .ply,
+// .glb).
 func Write(path string, m *Mesh) error {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".obj":
 		return WriteOBJ(path, m)
 	case ".ply":
 		return WritePLY(path, m)
+	case ".glb":
+		return WriteGLB(path, m)
 	}
-	return fmt.Errorf("mesh: %s: unknown format (want .obj or .ply)", path)
+	return fmt.Errorf("mesh: %s: unknown format (want .obj, .ply or .glb)", path)
 }
 
 // WriteOBJ writes m as Wavefront OBJ: "v x y z [r g b]" lines (the vertex

@@ -33,7 +33,7 @@ func cmdTrellis(args []string) error {
 	pre := fs.Bool("preprocessed", false, "the image is already TRELLIS's 518 x 518 composited input (skip the alpha crop)")
 	f32 := fs.Bool("f32", false, "keep F32 weights (default: 16-bit weight storage, F32 compute)")
 	matte := fs.String("matte", "speridlabs/idol", "BiRefNet weights for images without a transparent background: a repo or folder with birefnet.safetensors or model.safetensors, or a .safetensors file (empty refuses such images; TRELLIS itself uses rembg's u2net)")
-	meshOut := fs.String("mesh", "", "also decode a triangle mesh (TRELLIS's mesh decoder, FlexiCubes) and write it here: .obj (vertex colours) or .ply; y up as TRELLIS's GLB")
+	meshOut := fs.String("mesh", "", "also decode a triangle mesh (TRELLIS's mesh decoder, FlexiCubes) and write it here: .obj, .ply or .glb (vertex colours); y up as TRELLIS's GLB")
 	views := fs.Int("views", 4, "also render this many turntable views into <name>_views.png (0: none)")
 	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, "usage: light trellis [flags] <image>\n\nOne image of an object to a 3D Gaussian splat (.ply, the 3DGS layout TRELLIS's save_ply writes, y up) and, with -mesh, a vertex-coloured triangle mesh. An image with a transparent background is cropped by its alpha; any other has its background removed by BiRefNet first (-matte; TRELLIS uses rembg's u2net there, so the cut-out can differ).\n\nflags:")
@@ -50,8 +50,8 @@ func cmdTrellis(args []string) error {
 	if *out == "" {
 		*out = strings.TrimSuffix(in, ext(in)) + ".ply"
 	}
-	if e := strings.ToLower(ext(*meshOut)); *meshOut != "" && e != ".obj" && e != ".ply" {
-		return fmt.Errorf("-mesh %s: want a .obj or .ply file", *meshOut)
+	if e := strings.ToLower(ext(*meshOut)); *meshOut != "" && e != ".obj" && e != ".ply" && e != ".glb" {
+		return fmt.Errorf("-mesh %s: want a .obj, .ply or .glb file", *meshOut)
 	}
 	d, err := engine.PickDevice(*dev)
 	if err != nil {
