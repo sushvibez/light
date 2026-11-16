@@ -40,21 +40,21 @@ func TestDeepseekV41TinyMatchesReference(t *testing.T) {
 	}
 	for _, dev := range devs {
 		t.Run(fmt.Sprint(dev), func(t *testing.T) {
-			m, err := LoadDeepseekV41("testdata/deepseek-v41-tiny", dev)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if device.IsCPU(dev) && m.Layers[0].WqA.WBlockScale == nil {
-				t.Fatalf("FP8 projections did not load block-scaled")
-			}
 			tok, err := tensor.New(ids, []int{B, S}, dev)
 			if err != nil {
 				t.Fatal(err)
 			}
-			// Every routed expert resident, then at most 3 (re-read from the
-			// checkpoint as the router picks them).
-			for _, budget := range []int{0, 3} {
-				m.ExpertBudget = budget
+			// Every routed expert resident, then at most 3 per layer (re-read
+			// from the checkpoint as the router picks them).
+			for _, slots := range []int{0, 3} {
+				t.Setenv("LIGHT_EXPERT_SLOTS", fmt.Sprint(slots))
+				m, err := LoadDeepseekV41("testdata/deepseek-v41-tiny", dev)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if device.IsCPU(dev) && m.Layers[0].WqA.WBlockScale == nil {
+					t.Fatalf("FP8 projections did not load block-scaled")
+				}
 				out, err := m.Forward(tok)
 				if err != nil {
 					t.Fatal(err)
@@ -68,12 +68,12 @@ func TestDeepseekV41TinyMatchesReference(t *testing.T) {
 				for i := range got {
 					md = math.Max(md, math.Abs(float64(got[i]-ref.Logits[i])))
 				}
-				t.Logf("expert budget %d (%d resident): logits max diff %.3g over %d", budget, m.ResidentExperts(), md, len(got))
+				t.Logf("expert slots %d (%d resident): logits max diff %.3g over %d", slots, m.ResidentExperts(), md, len(got))
 				if !(md <= 1e-4) { // NaN fails too
 					t.Errorf("logits differ by %.3g", md)
 				}
-				if budget > 0 && m.ResidentExperts() > budget {
-					t.Errorf("%d experts resident over a budget of %d", m.ResidentExperts(), budget)
+				if slots > 0 && m.ResidentExperts() > slots*len(m.Layers) {
+					t.Errorf("%d experts resident over %d slots in %d layers", m.ResidentExperts(), slots, len(m.Layers))
 				}
 			}
 		})

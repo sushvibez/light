@@ -112,3 +112,29 @@ func TestGLM5StreamedExperts(t *testing.T) {
 		})
 	}
 }
+
+// DeepSeek-V4.1 with its FP4 routed experts streamed through 2 slots per
+// layer equals the model that keeps every expert once loaded.
+func TestDeepseekV41StreamedExperts(t *testing.T) {
+	ref, err := LoadDeepseekV41("testdata/deepseek-v41-tiny", device.CPU())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LIGHT_EXPERT_SLOTS", "2")
+	m, err := LoadDeepseekV41("testdata/deepseek-v41-tiny", device.CPU())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var caches []*nn.ExpertCache[*v41Expert]
+	for i, ly := range m.Layers {
+		if ly.Experts.Slots != 2 || ref.Layers[i].Experts.Slots != ref.Cfg.NRoutedExperts {
+			t.Fatalf("layer %d: %d slots streamed, %d resident", i, ly.Experts.Slots, ref.Layers[i].Experts.Slots)
+		}
+		caches = append(caches, ly.Experts)
+	}
+	if m.Layers[0].next != m.Layers[1] {
+		t.Fatal("layers not linked for prefetch")
+	}
+	md := checkStreamedMoE(t, ref.ForwardWithCache, m.ForwardWithCache, ref.NewCache, m.NewCache)
+	checkExpertCaches(t, caches, 2, md)
+}

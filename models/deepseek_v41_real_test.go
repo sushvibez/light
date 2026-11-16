@@ -15,7 +15,8 @@ import (
 // DeepSeek-V4.1-Flash on real weights, truncated to its first layers
 // (scripts/colab/deepseek_v41_check.py writes the folder and the reference:
 // DeepSeek's model.py on the dequantized weights in F32): the last
-// position's logits and top-10, with at most 64 routed experts resident.
+// position's logits and top-10, with 16 routed experts per layer resident
+// (LIGHT_EXPERT_SLOTS unless set).
 // Runs when LIGHT_V41_TRUNC names that folder.
 func TestDeepseekV41TruncatedMatchesReference(t *testing.T) {
 	dir := os.Getenv("LIGHT_V41_TRUNC")
@@ -34,11 +35,13 @@ func TestDeepseekV41TruncatedMatchesReference(t *testing.T) {
 	if err := json.Unmarshal(raw, &ref); err != nil {
 		t.Fatal(err)
 	}
+	if os.Getenv("LIGHT_EXPERT_SLOTS") == "" {
+		t.Setenv("LIGHT_EXPERT_SLOTS", "16")
+	}
 	m, err := LoadDeepseekV41(dir, device.CPU())
 	if err != nil {
 		t.Fatal(err)
 	}
-	m.ExpertBudget = 64
 	ids, err := tensor.New(ref.IDs, []int{1, len(ref.IDs)}, device.CPU())
 	if err != nil {
 		t.Fatal(err)

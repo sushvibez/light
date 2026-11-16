@@ -3,7 +3,6 @@ package models
 import (
 	"fmt"
 	"math"
-	"slices"
 	"sort"
 
 	"light/device"
@@ -92,44 +91,19 @@ type DeepseekV41 struct {
 	engram *v41Engram
 	hc     *GLM5 // the hyper-connection helpers (hcWeights / hcCombine / rms)
 	dev    device.Device
-	// ExpertBudget, when positive, is how many routed experts stay widened
-	// at once; the least recently used are dropped (and re-read from the
-	// checkpoint when picked again). 0 keeps every expert once loaded.
-	ExpertBudget int
-	src          *idolLoader  // the checkpoint, for routed experts
-	resident     []*v41Expert // loaded routed experts, least recent first
 }
 
-// v41Expert is an MLP; a routed one (name set) is nil until first picked.
-type v41Expert struct {
-	W1, W2, W3 *nn.Linear
-	name       string
-}
-
-// routed returns routed expert e of ly, loading it if needed.
-func (m *DeepseekV41) routed(ly *v41Layer, e int) (*v41Expert, error) {
-	ex := ly.Experts[e]
-	if ex.name == "" { // loaded eagerly
-		return ex, nil
-	}
-	if i := slices.Index(m.resident, ex); i >= 0 {
-		m.resident = append(slices.Delete(m.resident, i, i+1), ex)
-	} else {
-		if err := m.loadExpert(ex); err != nil {
-			return nil, err
-		}
-		m.resident = append(m.resident, ex)
-	}
-	for m.ExpertBudget > 0 && len(m.resident) > m.ExpertBudget {
-		old := m.resident[0]
-		old.W1, old.W2, old.W3 = nil, nil, nil
-		m.resident = m.resident[1:]
-	}
-	return ex, nil
-}
+// v41Expert is an MLP (w1 gate, w3 up, w2 down).
+type v41Expert struct{ W1, W2, W3 *nn.Linear }
 
 // ResidentExperts is how many routed experts are widened in memory.
-func (m *DeepseekV41) ResidentExperts() int { return len(m.resident) }
+func (m *DeepseekV41) ResidentExperts() int {
+	n := 0
+	for _, ly := range m.Layers {
+		n += len(ly.Experts.Resident())
+	}
+	return n
+}
 
 type v41Layer struct {
 	ID, Ratio             int
@@ -151,7 +125,11 @@ type v41Layer struct {
 	GateW    *tensor.Tensor // (E, D)
 	GateBias []float32
 	Shared   *v41Expert
-	Experts  []*v41Expert
+	// Experts reads the routed experts from the checkpoint when picked and
+	// keeps up to its Slots of them; next is the following layer, whose
+	// picks a decode step prefetches.
+	Experts *nn.ExpertCache[*v41Expert]
+	next    *v41Layer
 	// Engram (EngramIdx ≥ 0): the table stays on the host.
 	EngramIdx      int
 	EWkv           *nn.Linear
@@ -603,16 +581,35 @@ func (m *DeepseekV41) expert(o *iop, e *v41Expert, x, weight *tensor.Tensor) *te
 	return o.lin(e.W2, a)
 }
 
-// moe is the routed experts (host routing: scores by scoring_func, the
-// correction bias picks, the unbiased scores weigh) plus the shared expert.
+// moe is the routed experts plus the shared expert on x (B, S, D).
 func (m *DeepseekV41) moe(o *iop, ly *v41Layer, x *tensor.Tensor) *tensor.Tensor {
 	if o.err != nil {
 		return nil
 	}
-	cfg := m.Cfg
 	B, S, D := x.Dim(0), x.Dim(1), x.Dim(2)
-	T := B * S
-	flat := o.reshape(x, T, D)
+	flat := o.reshape(x, B*S, D)
+	if o.err != nil {
+		return nil
+	}
+	if nx := ly.next; nx != nil {
+		moePrefetch(nx.Experts, flat, func(o *iop, x *tensor.Tensor) [][]moeHit { return m.route(o, nx, x) })
+	}
+	byExpert := m.route(o, ly, flat)
+	out := m.expert(o, ly.Shared, flat, nil)
+	out = moeRun(o, m.dev, flat, byExpert, out, ly.Experts, nil, func(e *v41Expert, xs, wt *tensor.Tensor) *tensor.Tensor {
+		return m.expert(o, e, xs, wt)
+	})
+	return o.reshape(out, B, S, D)
+}
+
+// route is the host routing on flat (T, D): scores by scoring_func, the
+// correction bias picks the top k, the unbiased scores weigh them.
+func (m *DeepseekV41) route(o *iop, ly *v41Layer, flat *tensor.Tensor) [][]moeHit {
+	if o.err != nil {
+		return nil
+	}
+	cfg := m.Cfg
+	T := flat.Dim(0)
 	logits := o.do(func() (*tensor.Tensor, error) {
 		wt, err := ly.GateW.Transpose(0, 1)
 		if err != nil {
@@ -625,11 +622,7 @@ func (m *DeepseekV41) moe(o *iop, ly *v41Layer, x *tensor.Tensor) *tensor.Tensor
 		return nil
 	}
 	E, K := cfg.NRoutedExperts, cfg.ExpertsPerTok
-	type hit struct {
-		tok int
-		w   float32
-	}
-	byExpert := make([][]hit, E)
+	byExpert := make([][]moeHit, E)
 	sc, idx := make([]float32, E), make([]int, E)
 	for t := range T {
 		row := lv[t*E : (t+1)*E]
@@ -673,39 +666,10 @@ func (m *DeepseekV41) moe(o *iop, ly *v41Layer, x *tensor.Tensor) *tensor.Tensor
 			if cfg.NormTopkProb && K > 1 {
 				w /= sum + 1e-20
 			}
-			byExpert[e] = append(byExpert[e], hit{t, w * float32(cfg.RoutedScaling)})
+			byExpert[e] = append(byExpert[e], moeHit{t, w * float32(cfg.RoutedScaling)})
 		}
 	}
-	out := m.expert(o, ly.Shared, flat, nil)
-	for e, hs := range byExpert {
-		if len(hs) == 0 || o.err != nil {
-			continue
-		}
-		tok := make([]int64, len(hs))
-		wv := make([]float32, len(hs))
-		for i, h := range hs {
-			tok[i], wv[i] = int64(h.tok), h.w
-		}
-		ti := o.do(func() (*tensor.Tensor, error) { return tensor.New(tok, []int{len(tok)}, m.dev) })
-		wt := o.do(func() (*tensor.Tensor, error) { return tensor.New(wv, []int{len(wv), 1}, m.dev) })
-		xs := o.do(func() (*tensor.Tensor, error) { return ops.IndexSelect(flat, ti) })
-		ex, err := m.routed(ly, e)
-		if err != nil {
-			o.err = err
-			return nil
-		}
-		y := m.expert(o, ex, xs, wt)
-		// Scatter back with a one-hot (T, n) product.
-		oh := o.do(func() (*tensor.Tensor, error) {
-			v := make([]float32, T*len(tok))
-			for i, t := range tok {
-				v[int(t)*len(tok)+i] = 1
-			}
-			return tensor.New(v, []int{T, len(tok)}, m.dev)
-		})
-		out = o.add(out, o.do(func() (*tensor.Tensor, error) { return ops.MatMul(oh, y) }))
-	}
-	return o.reshape(out, B, S, D)
+	return byExpert
 }
 
 // engramApply adds the gated n-gram value into the streams (B, S, N, D):
