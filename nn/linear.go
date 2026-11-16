@@ -39,6 +39,9 @@ type Linear struct {
 	// W4 holds a group-quantized 4-bit weight (GPTQ / AWQ, converted to
 	// quant.Int4) instead of W; Forward runs ops.MatMulInt4.
 	W4 *quant.Int4
+	// LoRA, when set, adds a low-rank adapter on top of the base weight
+	// (whatever its format); see LoRA.
+	LoRA *LoRA
 	// Mixed16 lets F32 activations against a BF16 / F16 weight round to the
 	// weight's type for a tensor-core GEMM (F32 accumulate and output) on
 	// devices that have one (CUDA); elsewhere the product stays exact.
@@ -188,6 +191,14 @@ func newLinearImpl(inFeatures, outFeatures int, bias bool, wdt dtype.DType, dev 
 // the cublasGemmEx BF16-tensor-core path automatically when W is BF16 (via
 // `ops.MatMulMixed`); F32 / F64 weights route through the regular GEMM.
 func (l *Linear) Forward(x *tensor.Tensor) (*tensor.Tensor, error) {
+	y, err := l.forward(x)
+	if err != nil || l.LoRA == nil {
+		return y, err
+	}
+	return l.LoRA.add(x, y)
+}
+
+func (l *Linear) forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 	if l.W4 != nil {
 		return l.forwardInt4(x)
 	}
@@ -502,4 +513,89 @@ func (l *Linear) forwardInt4(x *tensor.Tensor) (*tensor.Tensor, error) {
 	}
 	dims[len(dims)-1] = l.outFeatures
 	return autograd.Reshape(y, dims...)
+}
+
+// LoRA is a low-rank adapter: y += Scale · (x Aᵀ) Bᵀ, with A (r, in) and
+// B (out, r) as PEFT and the edge0 adapters store them (mlx-lm's lora_a /
+// lora_b are their transposes). The side path runs in F32 from F32 copies
+// held transposed, AT (in, r) and BT (r, out), and is added to the base
+// output at its dtype; the base weight stays as loaded (e.g. 4-bit).
+type LoRA struct {
+	AT, BT *tensor.Tensor
+	Scale  float64
+}
+
+// NewLoRA builds the adapter from A (r, in) and B (out, r), any float
+// dtype, on dev.
+func NewLoRA(a, b *tensor.Tensor, scale float64, dev device.Device) (*LoRA, error) {
+	if a.Rank() != 2 || b.Rank() != 2 || a.Dim(0) != b.Dim(1) {
+		return nil, fmt.Errorf("nn.NewLoRA: A %v, B %v: want (r, in) and (out, r)", a.Shape(), b.Shape())
+	}
+	tr := func(t *tensor.Tensor) (*tensor.Tensor, error) {
+		var err error
+		if t.DType() != dtype.F32 {
+			if t, err = ops.Cast(t, dtype.F32); err != nil {
+				return nil, err
+			}
+		}
+		if t, err = t.Transpose(0, 1); err != nil {
+			return nil, err
+		}
+		if t, err = t.Contiguous(); err != nil {
+			return nil, err
+		}
+		return t.To(dev)
+	}
+	at, err := tr(a)
+	if err != nil {
+		return nil, err
+	}
+	bt, err := tr(b)
+	if err != nil {
+		return nil, err
+	}
+	return &LoRA{AT: at, BT: bt, Scale: scale}, nil
+}
+
+// add returns y + Scale · (x Aᵀ) Bᵀ for the base output y of x.
+func (a *LoRA) add(x, y *tensor.Tensor) (*tensor.Tensor, error) {
+	in := a.AT.Dim(0)
+	if x.Dim(-1) != in || y.Dim(-1) != a.BT.Dim(1) {
+		return nil, fmt.Errorf("nn.LoRA: x %v, y %v for an adapter (%d → %d)", x.Shape(), y.Shape(), in, a.BT.Dim(1))
+	}
+	flat, err := x.Contiguous()
+	if err == nil {
+		flat, err = flat.Reshape(-1, in)
+	}
+	if err == nil && flat.DType() != dtype.F32 {
+		flat, err = ops.Cast(flat, dtype.F32)
+	}
+	if err != nil {
+		return nil, err
+	}
+	h, err := ops.MatMul(flat, a.AT)
+	if err != nil {
+		return nil, err
+	}
+	if h, err = ops.MatMul(h, a.BT); err != nil {
+		return nil, err
+	}
+	if h, err = ops.Affine(h, a.Scale, 0); err != nil {
+		return nil, err
+	}
+	if h, err = h.Reshape(y.Shape().Dims()...); err != nil {
+		return nil, err
+	}
+	if y.DType() == dtype.F32 {
+		return ops.Add(y, h)
+	}
+	// Sum in F32, round once.
+	y32, err := ops.Cast(y, dtype.F32)
+	if err != nil {
+		return nil, err
+	}
+	if y32, err = ops.Add(y32, h); err != nil {
+		return nil, err
+	}
+	return ops.Cast(y32, y.DType())
 }
