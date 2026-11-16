@@ -19,8 +19,56 @@ type Embedding struct {
 	// WidenF32 casts the gathered rows to F32: a 16-bit table kept for
 	// memory under an F32 model (exact widening).
 	WidenF32 bool
+	// Packed, when set, holds the table quantized on the host (Weight is
+	// then its packed codes): Forward expands only the looked-up rows, as
+	// F32 cast to OutDType (inference only).
+	Packed   PackedTable
+	OutDType dtype.DType
 	numEmb   int
 	embDim   int
+}
+
+// PackedTable is a quantized (N, K) table that dequantizes rows on demand.
+type PackedTable interface {
+	Rows(ids []int64, out []float32) error
+}
+
+// NewEmbeddingPacked wraps a packed table of n rows of dim values; codes is
+// its packed weight (Weight, for device and parameter listings) and out the
+// dtype Forward returns.
+func NewEmbeddingPacked(p PackedTable, codes *tensor.Tensor, n, dim int, out dtype.DType) *Embedding {
+	return &Embedding{Weight: codes, Packed: p, OutDType: out, numEmb: n, embDim: dim}
+}
+
+// packedForward gathers rows ids from the packed table on the host and
+// returns them on dev at OutDType, shaped ids.Shape + (EmbDim,).
+func (e *Embedding) packedForward(indices *tensor.Tensor) (*tensor.Tensor, error) {
+	ids, err := indices.To(device.CPU())
+	if err == nil {
+		ids, err = ids.Contiguous()
+	}
+	if err == nil && ids.DType() != dtype.I64 {
+		ids, err = ops.Cast(ids, dtype.I64)
+	}
+	if err != nil {
+		return nil, err
+	}
+	idv := tensor.MustSlice[int64](ids)
+	out := make([]float32, len(idv)*e.embDim)
+	if err := e.Packed.Rows(idv, out); err != nil {
+		return nil, err
+	}
+	shape := append(append([]int{}, indices.Shape().Dims()...), e.embDim)
+	t, err := tensor.New(out, shape, device.CPU())
+	if err != nil {
+		return nil, err
+	}
+	if e.OutDType != dtype.F32 {
+		if t, err = ops.Cast(t, e.OutDType); err != nil {
+			return nil, err
+		}
+	}
+	return t.To(indices.Device())
 }
 
 // NewEmbedding initialises a table with small uniform values so the network
@@ -69,6 +117,9 @@ func NewEmbeddingUninit(numEmbeddings, embDim int, wdt dtype.DType, dev device.D
 // Forward looks up embeddings by the given I64 indices tensor of arbitrary
 // shape. Output shape = indices.Shape + (EmbDim,).
 func (e *Embedding) Forward(indices *tensor.Tensor) (*tensor.Tensor, error) {
+	if e.Packed != nil {
+		return e.packedForward(indices)
+	}
 	// Flatten indices, do IndexSelect, then reshape.
 	flatLen := indices.NumElements()
 	flat, err := indices.Contiguous()

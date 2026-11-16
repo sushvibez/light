@@ -11,6 +11,7 @@ import (
 	"light/hub"
 	"light/nn"
 	"light/ops"
+	"light/quant"
 	"light/safetensors"
 	"light/tensor"
 )
@@ -255,16 +256,28 @@ func LoadQwen35FromHF(repo string, dev device.Device, weightDT dtype.DType) (*Qw
 			return nil, err
 		}
 		g, bits := cfg.mlx.params(embMod)
-		if emb, err = mlxDense(w, s, b, g, bits, nn.WeightStorageDType(act, cfg.HiddenSize), dev); err != nil {
-			return nil, fmt.Errorf("%s: %w", embMod, err)
+		if cfg.TieEmbed {
+			// The head reuses the table: it needs it dense.
+			if emb, err = mlxDense(w, s, b, g, bits, nn.WeightStorageDType(act, cfg.HiddenSize), dev); err != nil {
+				return nil, fmt.Errorf("%s: %w", embMod, err)
+			}
+		} else {
+			// Kept packed on the host; only looked-up rows are expanded.
+			tab, err := quant.NewMLXTable(w, s, b, g, bits)
+			if err != nil {
+				return nil, fmt.Errorf("%s: %w", embMod, err)
+			}
+			m.TokenEmb = nn.NewEmbeddingPacked(tab, tab.Codes, tab.N, tab.K, act)
 		}
 	} else if emb, err = toDev(embMod+".weight", nn.WeightStorageDType(act, cfg.HiddenSize)); err != nil {
 		return nil, err
 	}
-	if m.TokenEmb, err = nn.NewEmbeddingFromWeight(emb); err != nil {
-		return nil, err
+	if emb != nil {
+		if m.TokenEmb, err = nn.NewEmbeddingFromWeight(emb); err != nil {
+			return nil, err
+		}
+		m.TokenEmb.WidenF32 = emb.DType() != act
 	}
-	m.TokenEmb.WidenF32 = emb.DType() != act
 	// setLinear installs module mod's weight: MLX-quantized (see
 	// installMLXLinear), block-scaled FP8 as stored when the checkpoint has
 	// its weight_scale_inv, else at the activation dtype.

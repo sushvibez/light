@@ -160,3 +160,59 @@ func DequantMLXRows(out []float32, codes []uint32, scales, biases []float32, N, 
 		}
 	})
 }
+
+// MLXTable is an MLX-quantized (N, K) table kept packed on the host, for
+// embeddings: Rows expands only the looked-up rows, exactly as DequantMLX
+// would.
+type MLXTable struct {
+	codes             []uint32
+	scales, biases    []float32
+	N, K, Group, Bits int
+	Codes             *tensor.Tensor // the packed weight (U32, host)
+}
+
+// NewMLXTable keeps an MLX weight / scales / biases triple packed (scales
+// and biases widened to F32).
+func NewMLXTable(w, scales, biases *tensor.Tensor, group, bits int) (*MLXTable, error) {
+	N, K, err := mlxShape(w, scales, biases, group, bits)
+	if err != nil {
+		return nil, err
+	}
+	if w.DType() != dtype.U32 {
+		return nil, fmt.Errorf("quant.NewMLXTable: weight is %v, want U32", w.DType())
+	}
+	codes, err := w.To(device.CPU())
+	if err == nil {
+		codes, err = codes.Contiguous()
+	}
+	if err != nil {
+		return nil, err
+	}
+	c := tensor.MustSlice[uint32](codes) // shares codes' storage (mapped or copied once)
+	sc, err := hostF32(scales)
+	if err != nil {
+		return nil, err
+	}
+	bi, err := hostF32(biases)
+	if err != nil {
+		return nil, err
+	}
+	return &MLXTable{codes: c, scales: append([]float32(nil), sc...), biases: append([]float32(nil), bi...),
+		N: N, K: K, Group: group, Bits: bits, Codes: codes}, nil
+}
+
+// Rows writes the dequantized rows ids into out (len(ids)·K).
+func (t *MLXTable) Rows(ids []int64, out []float32) error {
+	if len(out) != len(ids)*t.K {
+		return fmt.Errorf("quant.MLXTable.Rows: %d values for %d rows of %d", len(out), len(ids), t.K)
+	}
+	words, G := t.K*t.Bits/32, t.K/t.Group
+	for i, id := range ids {
+		if id < 0 || int(id) >= t.N {
+			return fmt.Errorf("quant.MLXTable.Rows: row %d outside [0, %d)", id, t.N)
+		}
+		n := int(id)
+		DequantMLXRows(out[i*t.K:(i+1)*t.K], t.codes[n*words:(n+1)*words], t.scales[n*G:(n+1)*G], t.biases[n*G:(n+1)*G], 1, t.K, t.Group, t.Bits)
+	}
+	return nil
+}

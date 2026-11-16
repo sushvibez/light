@@ -112,3 +112,43 @@ func TestMLXDequant(t *testing.T) {
 		t.Logf("4-bit: max |dq − w| %.4f, Int4 vs MLX %.2g", step, diff)
 	}
 }
+
+// MLXTable.Rows expands looked-up rows exactly as DequantMLX does.
+func TestMLXTableRows(t *testing.T) {
+	const N, K, G = 7, 128, 64
+	r := rand.New(rand.NewSource(2))
+	w := make([]float32, N*K)
+	for i := range w {
+		w[i] = float32(r.NormFloat64())
+	}
+	for _, bits := range []int{2, 4, 8} {
+		codes, sc, bi := mlxQuantize(w, N, K, G, bits)
+		ct, _ := tensor.New(codes, []int{N, K * bits / 32}, device.CPU())
+		st, _ := tensor.New(sc, []int{N, K / G}, device.CPU())
+		bt, _ := tensor.New(bi, []int{N, K / G}, device.CPU())
+		dq, err := quant.DequantMLX(ct, st, bt, G, bits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		full := tensor.MustSlice[float32](dq)
+		tab, err := quant.NewMLXTable(ct, st, bt, G, bits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids := []int64{6, 0, 3, 3}
+		out := make([]float32, len(ids)*K)
+		if err := tab.Rows(ids, out); err != nil {
+			t.Fatal(err)
+		}
+		for i, id := range ids {
+			for k := range K {
+				if out[i*K+k] != full[int(id)*K+k] {
+					t.Fatalf("%d-bit: row %d col %d = %g, want %g", bits, id, k, out[i*K+k], full[int(id)*K+k])
+				}
+			}
+		}
+		if err := tab.Rows([]int64{N}, make([]float32, K)); err == nil {
+			t.Errorf("%d-bit: row %d accepted", bits, N)
+		}
+	}
+}
