@@ -3,6 +3,7 @@ package cpu
 import (
 	"light/device"
 	"light/dtype"
+	"light/internal/parallel"
 	"light/internal/registry"
 )
 
@@ -30,16 +31,24 @@ func int4DequantCPU(ctx *registry.Context) error {
 	} else {
 		b16 = asSlice[uint16](out)[off:]
 	}
-	for n := range N {
-		for k := range K {
-			g := n*ng + k/G
-			v := s[g] * (float32((codes[n*(K/8)+k/8]>>(4*(k%8)))&0xF) - z[g])
-			if f32 != nil {
-				f32[n*K+k] = v
-			} else {
-				b16[n*K+k] = uint16(dtype.BF16FromF32(v))
+	// Parallel over rows; F32 rows go through the AVX2 row decoder that the
+	// fused int4_gemv kernel uses.
+	parallel.For(N, max(1, parallel.Grain/(K+1)), func(lo, hi int) {
+		for n := lo; n < hi; n++ {
+			if f32 != nil && decodeAVX2 && G%8 == 0 {
+				int4RowAVX2(&codes[n*(K/8)], &s[n*ng], &z[n*ng], &f32[n*K], ng, G/8)
+				continue
+			}
+			for k := range K {
+				g := n*ng + k/G
+				v := s[g] * (float32((codes[n*(K/8)+k/8]>>(4*(k%8)))&0xF) - z[g])
+				if f32 != nil {
+					f32[n*K+k] = v
+				} else {
+					b16[n*K+k] = uint16(dtype.BF16FromF32(v))
+				}
 			}
 		}
-	}
+	})
 	return nil
 }

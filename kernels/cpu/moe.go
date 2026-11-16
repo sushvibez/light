@@ -5,7 +5,9 @@ import (
 
 	"light/device"
 	"light/dtype"
+	"light/internal/parallel"
 	"light/internal/registry"
+	"light/internal/simd"
 	"light/tensor"
 )
 
@@ -66,6 +68,33 @@ func moeGemmKernel(ctx *registry.Context) error {
 	N, K := w.Dim(1), w.Dim(2)
 	pairS, expS := asSlice[int64](pairs), asSlice[int64](experts)
 	sizeM := out.Dim(0)
+	// rowOf is pair p's input row.
+	rowOf := func(p int) int {
+		if rowPerPair {
+			return p
+		}
+		return p / topk
+	}
+	if in.DType() == dtype.F32 && w.DType() == dtype.F32 {
+		// F32: every (pair, output) dot product in parallel, SIMD.
+		xs, ws := asSlice[float32](in), asSlice[float32](w)
+		parallel.For(len(pairS)*N, max(1, 16384/(K+1)), func(lo, hi int) {
+			for idx := lo; idx < hi; idx++ {
+				i, n := idx/N, idx%N
+				p := int(pairS[i])
+				if p < 0 || p >= sizeM {
+					continue
+				}
+				r, e := rowOf(p), int(expS[i])
+				acc := simd.Dot(xs[r*K:(r+1)*K], ws[(e*N+n)*K:(e*N+n+1)*K])
+				if topkW != nil {
+					acc *= topkW[p]
+				}
+				store(p*N+n, acc)
+			}
+		})
+		return nil
+	}
 	row := make([]float32, K)
 	for i, p64 := range pairS {
 		p := int(p64)
@@ -73,10 +102,7 @@ func moeGemmKernel(ctx *registry.Context) error {
 			continue
 		}
 		e := int(expS[i])
-		r := p
-		if !rowPerPair {
-			r = p / topk
-		}
+		r := rowOf(p)
 		for k := range K {
 			row[k] = rin(r*K + k)
 		}

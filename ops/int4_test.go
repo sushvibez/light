@@ -1,6 +1,7 @@
 package ops_test
 
 import (
+	"math"
 	"math/rand"
 	"testing"
 
@@ -138,6 +139,67 @@ func TestMatMulInt4(t *testing.T) {
 						t.Fatalf("%v M=%d %v: [%d] = %g, want %g", dev, M, dt, i, got[i], want[i])
 					}
 				}
+			}
+		}
+	}
+}
+
+// MoEInt4 with F32 activations on the CPU (each expert's rows through the
+// fused int4 kernel) against Σ_k w_k · down_e(silu(gate_e x) · up_e x) in
+// F64 on the dequantized experts.
+func TestMoEInt4MatchesDense(t *testing.T) {
+	const T, H, I, E, topk, G = 5, 64, 32, 4, 2, 32
+	rng := rand.New(rand.NewSource(7))
+	cpu := device.CPU()
+	gu, dn := make([]quant.Int4, E), make([]quant.Int4, E)
+	for e := range E {
+		gu[e], dn[e] = randomInt4(t, rng, 2*I, H, G, cpu), randomInt4(t, rng, H, I, G, cpu)
+	}
+	x := make([]float32, T*H)
+	for i := range x {
+		x[i] = float32(rng.NormFloat64())
+	}
+	ids := []int64{0, 2, 2, 1, 3, 0, 2, 3, 1, 2}
+	ws := make([]float32, T*topk)
+	for i := range ws {
+		ws[i] = float32(rng.Float64())
+	}
+	route, err := ops.MoERouteFromIDs(ids, ws, T, topk, cpu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	xt, _ := tensor.New(x, []int{T, H}, cpu)
+	out, err := ops.MoEInt4(xt, gu, dn, route, topk, ops.SiLU)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := tensor.MustSlice[float32](out)
+	for tk := range T {
+		want := make([]float64, H)
+		for j := range topk {
+			e := ids[tk*topk+j]
+			wg, _ := gu[e].Dequant()
+			wd, _ := dn[e].Dequant()
+			h := make([]float64, I)
+			for i := range I {
+				var g, u float64
+				for k := range H {
+					g += float64(wg[i*H+k]) * float64(x[tk*H+k])
+					u += float64(wg[(I+i)*H+k]) * float64(x[tk*H+k])
+				}
+				h[i] = g / (1 + math.Exp(-g)) * u
+			}
+			for n := range H {
+				var y float64
+				for i := range I {
+					y += float64(wd[n*I+i]) * h[i]
+				}
+				want[n] += float64(ws[tk*topk+j]) * y
+			}
+		}
+		for n := range H {
+			if d := math.Abs(float64(got[tk*H+n]) - want[n]); d > 1e-4*(1+math.Abs(want[n])) {
+				t.Fatalf("token %d [%d] = %g, want %g", tk, n, got[tk*H+n], want[n])
 			}
 		}
 	}

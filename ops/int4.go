@@ -195,6 +195,9 @@ func MoEInt4(x *tensor.Tensor, gateUp, down []quant.Int4, route *MoERouting, top
 		}
 		compact[i] = int64(s)
 	}
+	if device.IsCPU(x.Device()) && x.DType() == dtype.F32 && int4Fused(gateUp[used[0]]) && int4Fused(down[used[0]]) {
+		return moeInt4Rows(x, gateUp, down, used, idv, wv, topk, act)
+	}
 	U, dt, dev := len(used), x.DType(), x.Device()
 	fp8ScratchMu.Lock()
 	defer fp8ScratchMu.Unlock()
@@ -257,4 +260,86 @@ func MoEInt4(x *tensor.Tensor, gateUp, down []quant.Int4, route *MoERouting, top
 		return nil, err
 	}
 	return MoECombine(pair, topk)
+}
+
+// int4Fused reports whether MatMulInt4 takes w through the fused
+// row-decode kernel on the CPU (no act-order permutation, 32-aligned).
+func int4Fused(w quant.Int4) bool {
+	return w.Perm == nil && w.K()%32 == 0 && w.Group%32 == 0
+}
+
+// moeInt4Rows is MoEInt4 on the CPU with F32 activations: each used expert
+// multiplies the rows routed to it through MatMulInt4's fused kernel, which
+// decodes the packed codes row by row (half a byte per weight read, every
+// core busy) instead of expanding every picked expert to F32 first. The
+// weighted pairs are summed per token in routing order, as MoECombine does.
+func moeInt4Rows(x *tensor.Tensor, gateUp, down []quant.Int4, used, idv []int64, wv []float32, topk int,
+	act func(*tensor.Tensor) (*tensor.Tensor, error)) (*tensor.Tensor, error) {
+	xc, err := x.Contiguous()
+	if err != nil {
+		return nil, err
+	}
+	xs := tensor.MustSlice[float32](xc)
+	T, H, I := x.Dim(0), x.Dim(1), down[0].K()
+	rows := make(map[int64][]int, len(used)) // expert → pair indices t·topk + j
+	for i, e := range idv {
+		rows[e] = append(rows[e], i)
+	}
+	pair := make([]float32, len(idv)*H)
+	for _, e := range used {
+		r := rows[e]
+		xg := make([]float32, len(r)*H)
+		for j, i := range r {
+			t := i / topk
+			copy(xg[j*H:(j+1)*H], xs[t*H:(t+1)*H])
+		}
+		xt, err := tensor.New(xg, []int{len(r), H}, x.Device())
+		if err != nil {
+			return nil, err
+		}
+		gu, err := MatMulInt4(xt, gateUp[e]) // (R, 2I)
+		if err != nil {
+			return nil, err
+		}
+		g, err := gu.Narrow(1, 0, I)
+		if err != nil {
+			return nil, err
+		}
+		u, err := gu.Narrow(1, I, I)
+		if err != nil {
+			return nil, err
+		}
+		if g, err = g.Contiguous(); err != nil {
+			return nil, err
+		}
+		if g, err = act(g); err != nil {
+			return nil, err
+		}
+		h, err := Mul(g, u)
+		if err != nil {
+			return nil, err
+		}
+		y, err := MatMulInt4(h, down[e]) // (R, H)
+		if err != nil {
+			return nil, err
+		}
+		ys := tensor.MustSlice[float32](y)
+		for j, i := range r {
+			w, dst, src := wv[i], pair[i*H:(i+1)*H], ys[j*H:(j+1)*H]
+			for k := range dst {
+				dst[k] = w * src[k]
+			}
+		}
+	}
+	out := make([]float32, T*H)
+	for t := range T {
+		o := out[t*H : (t+1)*H]
+		for j := range topk {
+			p := pair[(t*topk+j)*H:]
+			for k := range o {
+				o[k] += p[k]
+			}
+		}
+	}
+	return tensor.New(out, []int{T, H}, x.Device())
 }

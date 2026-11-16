@@ -5,6 +5,7 @@ import (
 
 	"light/device"
 	"light/dtype"
+	"light/internal/parallel"
 	"light/tensor"
 )
 
@@ -144,16 +145,18 @@ func DequantMLX(w, scales, biases *tensor.Tensor, group, bits int) (*tensor.Tens
 // and biases (N·K/G) into out (N·K).
 func DequantMLXRows(out []float32, codes []uint32, scales, biases []float32, N, K, group, bits int) {
 	per, mask, G := 32/bits, uint32(1)<<bits-1, K/group
-	for n := range N {
-		row := codes[n*K/per : (n+1)*K/per]
-		o := out[n*K : (n+1)*K]
-		for k := 0; k < K; k += per {
-			word := row[k/per]
-			g := n*G + k/group
-			s, b := scales[g], biases[g]
-			for j := range per {
-				o[k+j] = s*float32(word>>(bits*j)&mask) + b
+	parallel.For(N, max(1, parallel.Grain/(K+1)), func(lo, hi int) {
+		for n := lo; n < hi; n++ {
+			row := codes[n*K/per : (n+1)*K/per]
+			o := out[n*K : (n+1)*K]
+			for k := 0; k < K; k += per {
+				word := row[k/per]
+				g := n*G + k/group
+				s, b := scales[g], biases[g]
+				for j := range per {
+					o[k+j] = s*float32(word>>(bits*j)&mask) + b
+				}
 			}
 		}
-	}
+	})
 }
