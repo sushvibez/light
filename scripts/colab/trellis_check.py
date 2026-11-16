@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """TRELLIS-image-large full-pipeline real-weight check (Colab GPU): image ->
-sparse structure -> structured latent -> 3D Gaussians.
+sparse structure -> structured latent -> 3D Gaussians and mesh.
 
     python scripts/colab/trellis_check.py <work_dir> [image.png] [seed]
 
 Run from a checkout of the repo (it imports scripts/verify/trellis_backends.py
 for the backend cross-check and the fallbacks). Downloads into <work_dir>:
-  TRELLIS-image-large/            pipeline.json and the four checkpoints of
-                                  the Gaussian path (ss_flow_img_dit_L_16l8,
-                                  ss_dec_conv3d_16l8, slat_flow_img_dit_L_64l8p2,
-                                  slat_dec_gs_swin8_B_64l8gs32; ~2.6 GB)
+  TRELLIS-image-large/            pipeline.json and the five checkpoints of
+                                  the Gaussian and mesh paths
+                                  (ss_flow_img_dit_L_16l8, ss_dec_conv3d_16l8,
+                                  slat_flow_img_dit_L_64l8p2,
+                                  slat_dec_gs_swin8_B_64l8gs32,
+                                  slat_dec_mesh_swin8_B_64l8m256c; ~2.8 GB)
   dinov2-with-registers-large/    the transformers port of dinov2_vitl14_reg
                                   (~1.2 GB), for Light
-  trellis_src/                    TRELLIS's .py files the Gaussian path
-                                  imports (no git clone)
+  trellis_src/                    TRELLIS's .py files the Gaussian and mesh
+                                  paths import, FlexiCubes from the commit
+                                  TRELLIS pins as a submodule (no git clone)
 Backends: TRELLIS's real ones - spconv (SubMConv3d) and xformers
 (memory_efficient_attention) - pip-installed here if missing (spconv-cu12x
 matching torch's CUDA; xformers with --no-deps so torch is not replaced).
@@ -30,8 +33,8 @@ matmuls at F32.
 Then runs TRELLIS's own TrellisImageTo3DPipeline methods as run() chains
 them - preprocess_image, get_cond (torch.hub DINOv2), torch.manual_seed(seed)
 (default 42), sample_sparse_structure, sample_slat, decode_slat(['gaussian'])
-- on <image.png> (RGBA with the object cut out; default: a synthetic object
-drawn here, saved as object.png), the models in F32 (TRELLIS_FP16=1: their
+and decode_slat(['mesh']) - on <image.png> (RGBA with the object cut out;
+default: a synthetic object drawn here, saved as object.png), the models in F32 (TRELLIS_FP16=1: their
 native FP16 torsos). Records in <work_dir>/ref.safetensors:
   pixels, cond, noise, latent, logits, coords    stage 1, as trellis_ss_check.py
   slat_noise     (N, 8)        sample_slat's torch.randn draw
@@ -43,15 +46,22 @@ native FP16 torsos). Records in <work_dir>/ref.safetensors:
                                the Gaussian's get_xyz, _features_dc,
                                get_scaling, get_rotation, get_opacity
   gs_ply         (32 N, 17)    the rows Gaussian.save_ply writes (ref.ply)
-and ref.json (settings, counts, backends, backend_check).
+  mesh_feats     (64 N, 101)   the mesh decoder's out_layer output (rows in
+                               SparseSubdivide's order)
+  mesh_vertices, mesh_faces, mesh_colors   its MeshExtractResult (vertices
+                               (V, 3), faces (F, 3) I32, vertex_attrs (V, 6))
+and ref.json (settings, counts, backends, backend_check). kaolin is not
+installed: FlexiCubes only calls its check_tensor (argument asserts), which
+trellis_backends.py provides.
 
 TRELLIS_CHECK_CPU=1 is a plumbing dry run (CPU, stand-ins, no pip installs),
 meant for tiny local models with the downloads patched out.
 
 Then, with Light:
-    LIGHT_TRELLIS_DIR=<work_dir> go test -p 1 -run TrellisReal -v ./diffusion
-(diffusion/trellis_real_test.go: stage 1 and, from ref.safetensors' slat
-keys, stage 2; it also writes light.ply and light_views.png there).
+    LIGHT_TRELLIS_DIR=<work_dir> go test -p 1 -run 'TrellisReal|TrellisGaussiansReal|TrellisMeshReal' -v ./diffusion
+(diffusion/trellis_real_test.go: stage 1; trellis_gs_real_test.go: stage 2
+and the Gaussians, writing light.ply and light_views.png there;
+trellis_mesh_real_test.go: the mesh decoder, writing light.obj).
 """
 import importlib, json, os, subprocess, sys, types, urllib.request
 
@@ -163,6 +173,10 @@ print("backend check:", backend_check)
 trellis_backends.install(spconv=backends["spconv"] == "stand-in", xformers=backends["xformers"] == "stand-in",
                          utils3d=False)
 try:
+    import kaolin.utils.testing  # noqa: F401
+except ImportError:
+    trellis_backends.install(spconv=False, xformers=False, utils3d=False, kaolin=True)
+try:
     import utils3d  # noqa: F401
 except ImportError:
     if DRY or not pip("git+https://github.com/EasternJournalist/utils3d.git@9a4eb15e4021b67b12c460c7057d642626897ec8"):
@@ -189,7 +203,7 @@ for mod in ("plyfile", "easydict"):
 from huggingface_hub import snapshot_download  # noqa: E402
 
 ck = ["ss_flow_img_dit_L_16l8_fp16", "ss_dec_conv3d_16l8_fp16", "slat_flow_img_dit_L_64l8p2_fp16",
-      "slat_dec_gs_swin8_B_64l8gs32_fp16"]
+      "slat_dec_gs_swin8_B_64l8gs32_fp16", "slat_dec_mesh_swin8_B_64l8m256c_fp16"]
 root = snapshot_download("microsoft/TRELLIS-image-large", local_dir=os.path.join(work, "TRELLIS-image-large"),
                          allow_patterns=["pipeline.json"] + [f"ckpts/{c}.*" for c in ck])
 dino_dir = snapshot_download("facebook/dinov2-with-registers-large",
@@ -215,11 +229,18 @@ trellis/modules/sparse/attention/modules.py trellis/modules/sparse/transformer/_
 trellis/modules/sparse/transformer/blocks.py trellis/modules/sparse/transformer/modulated.py
 trellis/representations/gaussian/__init__.py trellis/representations/gaussian/gaussian_model.py
 trellis/representations/gaussian/general_utils.py trellis/utils/__init__.py trellis/utils/random_utils.py
-trellis/utils/elastic_utils.py""".split():
+trellis/utils/elastic_utils.py trellis/models/structured_latent_vae/decoder_mesh.py
+trellis/representations/mesh/__init__.py trellis/representations/mesh/cube2mesh.py
+trellis/representations/mesh/utils_cube.py""".split() + [
+        "https://raw.githubusercontent.com/MaxtirError/FlexiCubes/815e075a2a400d06c48d94c347674344ed6ae5c5/" + f
+        for f in ("flexicubes.py", "tables.py")]:
+    url = f if f.startswith("https://") else base + f
+    if f.startswith("https://"):
+        f = "trellis/representations/mesh/flexicubes/" + f.rsplit("/", 1)[1]
     p = os.path.join(src, f)
     if not os.path.exists(p):
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        open(p, "wb").write(urllib.request.urlopen(base + f, timeout=60).read())
+        open(p, "wb").write(urllib.request.urlopen(url, timeout=60).read())
 
 
 # --- TRELLIS's modules without the heavy package __init__s -----------------------------------
@@ -242,6 +263,13 @@ sys.modules.setdefault("rembg", types.ModuleType("rembg"))
 from trellis.representations.gaussian import Gaussian  # noqa: E402
 
 reps.Gaussian = Gaussian
+from trellis.representations.mesh import cube2mesh  # noqa: E402
+
+reps.MeshExtractResult = cube2mesh.MeshExtractResult
+if DRY:  # SparseFeatures2Mesh builds its grids on "cuda" by default
+    _s2m = cube2mesh.SparseFeatures2Mesh.__init__
+    cube2mesh.SparseFeatures2Mesh.__init__ = lambda self, device="cpu", res=64, use_color=True: _s2m(
+        self, device=device, res=res, use_color=use_color)
 if DRY:
     trellis_backends.cpu_gaussian(Gaussian)
 from PIL import Image, ImageDraw  # noqa: E402
@@ -251,13 +279,15 @@ from trellis.models.sparse_structure_flow import SparseStructureFlowModel  # noq
 from trellis.models.sparse_structure_vae import SparseStructureDecoder  # noqa: E402
 from trellis.models.structured_latent_flow import SLatFlowModel  # noqa: E402
 from trellis.models.structured_latent_vae.decoder_gs import SLatGaussianDecoder  # noqa: E402
+from trellis.models.structured_latent_vae.decoder_mesh import SLatMeshDecoder  # noqa: E402
 from trellis.modules import sparse as sp  # noqa: E402
 from trellis.pipelines import samplers  # noqa: E402
 from trellis.pipelines.trellis_image_to_3d import TrellisImageTo3DPipeline  # noqa: E402
 
 args = json.load(open(os.path.join(root, "pipeline.json")))["args"]
 classes = {"SparseStructureFlowModel": SparseStructureFlowModel, "SparseStructureDecoder": SparseStructureDecoder,
-           "SLatFlowModel": SLatFlowModel, "SLatGaussianDecoder": SLatGaussianDecoder}
+           "SLatFlowModel": SLatFlowModel, "SLatGaussianDecoder": SLatGaussianDecoder,
+           "SLatMeshDecoder": SLatMeshDecoder}
 
 
 def load(name):
@@ -275,7 +305,7 @@ def load(name):
 
 pipe = TrellisImageTo3DPipeline()
 pipe.models = {n: load(n) for n in ("sparse_structure_flow_model", "sparse_structure_decoder", "slat_flow_model",
-                                    "slat_decoder_gs")}
+                                    "slat_decoder_gs", "slat_decoder_mesh")}
 pipe._init_image_cond_model(args["image_cond_model"])  # torch.hub, as TRELLIS
 pipe.models["image_cond_model"].to(dev)
 for k in ("sparse_structure_sampler", "slat_sampler"):
@@ -329,12 +359,15 @@ with torch.no_grad():
     recorder(pipe.slat_sampler, "slat")
     feats = {}
     pipe.models["slat_decoder_gs"].out_layer.register_forward_hook(lambda m, i, o: feats.__setitem__("h", o.feats.clone()))
+    pipe.models["slat_decoder_mesh"].out_layer.register_forward_hook(
+        lambda m, i, o: feats.__setitem__("mesh", o.feats.clone()))
     torch.manual_seed(seed)
     torch.randn = randn_rec
     coords = pipe.sample_sparse_structure(cond, 1)
     slat = pipe.sample_slat(cond, coords)
     torch.randn = _randn
     gs = pipe.decode_slat(slat, ["gaussian"])["gaussian"][0]
+    mesh = pipe.decode_slat(slat, ["mesh"])["mesh"][0]
     logits = pipe.models["sparse_structure_decoder"](zs["ss"]).float()
     v0 = pipe.models["slat_flow_model"](sp.SparseTensor(feats=noises[1].to(dev), coords=coords),
                                         torch.tensor([1000.0], device=dev), cond["cond"])
@@ -345,7 +378,9 @@ with torch.no_grad():
                 "slat_raw": f32(zs["slat"].feats), "slat": f32(slat.feats), "gs_feats": f32(feats["h"]),
                 "gs_xyz": f32(gs.get_xyz), "gs_features_dc": f32(gs._features_dc.reshape(-1, 3)),
                 "gs_scaling": f32(gs.get_scaling), "gs_rotation": f32(gs.get_rotation),
-                "gs_opacity": f32(gs.get_opacity)})
+                "gs_opacity": f32(gs.get_opacity), "mesh_feats": f32(feats["mesh"]),
+                "mesh_vertices": f32(mesh.vertices), "mesh_faces": mesh.faces.int().cpu().contiguous(),
+                "mesh_colors": f32(mesh.vertex_attrs)})
 assert torch.equal(slat.coords, coords)
 ply = os.path.join(work, "ref.ply")
 gs.save_ply(ply)
@@ -353,11 +388,13 @@ with open(ply, "rb") as fh:
     v = PlyData.read(fh).elements[0]
     out["gs_ply"] = torch.from_numpy(np.stack([np.array(v[p.name], dtype=np.float32) for p in v.properties], 1))
 print("occupied", coords.shape[0], "slat |x| max", slat.feats.abs().max().item(), "gaussians", gs.get_xyz.shape[0],
-      "opacity", gs.get_opacity.min().item(), gs.get_opacity.max().item())
+      "opacity", gs.get_opacity.min().item(), gs.get_opacity.max().item(), "mesh", mesh.vertices.shape[0], "vertices,",
+      mesh.faces.shape[0], "faces")
 save_file(out, os.path.join(work, "ref.safetensors"))
 json.dump({"seed": seed, "fp16": FP16, "device": dev, "sampler": args["sparse_structure_sampler"],
            "slat_sampler": args["slat_sampler"], "occupied": int(coords.shape[0]),
-           "gaussians": int(gs.get_xyz.shape[0]), "backends": backends, "backend_check": backend_check,
+           "gaussians": int(gs.get_xyz.shape[0]), "mesh_vertices": int(mesh.vertices.shape[0]),
+           "mesh_faces": int(mesh.faces.shape[0]), "backends": backends, "backend_check": backend_check,
            "spconv_algo": os.environ["SPCONV_ALGO"], "image": "object.png"},
           open(os.path.join(work, "ref.json"), "w"), indent=2)
 print("wrote", os.path.join(work, "ref.safetensors"), "and ref.ply")

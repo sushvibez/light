@@ -15,7 +15,7 @@
 # ~2 GB), mimo (MiMo-7B-RL MTP speculative decoding in the engine, 15.6 GB),
 # moshi (per-stage frame profile + CPU profile, 8.2 GB + Mimi), speech
 # (end-to-end speech-to-speech through the engine's OpenAI handler, same
-# checkpoints; not in the default set), trellis (TRELLIS image to Gaussians against
+# checkpoints; not in the default set), trellis (TRELLIS image to Gaussians / mesh against
 # TRELLIS's own code). NO_UPDATE=1 runs the checkout in $WORK as is.
 # Everything fits an L4 (24 GB); an A100 is not needed.
 # Hugging Face downloads use $HF_TOKEN when set.
@@ -223,14 +223,14 @@ for g in "${SEL[@]}"; do
 		SUMMARY+=("zperf $(grep -c '^timing' "$LOGS/zperf.log") phases, $(grep -oE 'generated in [0-9.]+ s' "$LOGS/zperf.log")")
 		;;
 	trellis)
-		# TRELLIS image -> sparse structure -> structured latent -> Gaussians
+		# TRELLIS image -> sparse structure -> structured latent -> Gaussians / mesh
 		# on real weights: TRELLIS's own code with its real spconv /
 		# xformers backends (pip-installed if missing) writes the reference
 		# (~3.8 GB of downloads), then Light's CUDA build compares both
 		# stages and writes light.ply / light_views.png next to ref.ply.
 		# torch brings its own cuDNN: not the one LD_LIBRARY_PATH points cgo at.
 		LD_LIBRARY_PATH=$ORIG_LD_LIBRARY_PATH python3 scripts/colab/trellis_check.py /content/trellis_work 2>&1 | tee "$LOGS/$STAMP-trellis-ref.log" | tail -8
-		LIGHT_TRELLIS_DIR=/content/trellis_work run trellis ./diffusion 'TrellisReal|TrellisGaussiansReal'
+		LIGHT_TRELLIS_DIR=/content/trellis_work run trellis ./diffusion 'TrellisReal|TrellisGaussiansReal|TrellisMeshReal'
 		cp /content/trellis_work/light_views.png /content/trellis_work/ref.json "$LOGS/" 2>/dev/null
 		;;
 	idol)
