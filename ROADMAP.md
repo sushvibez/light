@@ -151,6 +151,10 @@ Light already has. Sizes are BF16 safetensors.
     proves the video path.
 16. **PixelGen** (queued): an SDXL fine-tune; works once SDXL lands
     (desktop).
+17. **LocateAnything-3B** (nvidia, open weights, NVIDIA License:
+    non-commercial / research only): grounding VLM (detection, referring,
+    pointing, layout OCR) on a Qwen2 LM; needs its vision tower and Parallel
+    Box Decoding (block-wise multi-token box prediction). BF16, ~8 GB.
 
 ## 4. Backends
 
