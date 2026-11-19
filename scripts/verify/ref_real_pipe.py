@@ -53,14 +53,30 @@ elif which in ("schnell", "flux1dev"):
     pipe = FluxPipeline.from_pretrained(repo, torch_dtype=torch.bfloat16)
     m.randn_tensor = patched_randn
     pipe.enable_sequential_cpu_offload()
+    seq = 256 if which == "schnell" else 512
+    # Intermediates for the Go test: text conditioning and the latents after
+    # the first step, so a mismatch can be placed.
+    extra = {}
+    def on_step(p, i, t, kw):
+        if i == 0:
+            extra["latents_step0"] = kw["latents"].float().cpu()
+        return {}
+    with torch.no_grad():
+        pe, pooled, _ = pipe.encode_prompt(prompt, None, max_sequence_length=seq)
+    extra["prompt_embeds"], extra["pooled"] = pe.float().cpu(), pooled.float().cpu()
     img = pipe(prompt=prompt, height=size, width=size, num_inference_steps=steps, guidance_scale=guidance,
-               max_sequence_length=256 if which == "schnell" else 512, output_type="pt").images
+               max_sequence_length=seq, output_type="pt", callback_on_step_end=on_step,
+               callback_on_step_end_tensor_inputs=["latents"]).images
+    extra["sigmas"] = pipe.scheduler.sigmas.float().cpu()
 else:
     sys.exit("zimage, klein, schnell or flux1dev")
 
 lat = captured["latents"]
 img = img[0].float().clamp(0, 1).cpu()
-json.dump({"repo": repo, "prompt": prompt, "height": size, "width": size, "steps": steps, "guidance": guidance,
-           "latents": lat.flatten().tolist(), "latents_shape": list(lat.shape),
-           "image": img.flatten().tolist(), "image_shape": list(img.shape)}, open(out_json, "w"))
+out = {"repo": repo, "prompt": prompt, "height": size, "width": size, "steps": steps, "guidance": guidance,
+       "latents": lat.flatten().tolist(), "latents_shape": list(lat.shape),
+       "image": img.flatten().tolist(), "image_shape": list(img.shape)}
+for k, v in globals().get("extra", {}).items():
+    out[k], out[k + "_shape"] = v.flatten().tolist(), list(v.shape)
+json.dump(out, open(out_json, "w"))
 print("wrote", out_json, "latents", list(lat.shape), "image", list(img.shape))

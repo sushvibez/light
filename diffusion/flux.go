@@ -60,6 +60,8 @@ type FluxLoadOptions struct {
 	// KeepFP8 keeps an FP8 transformer checkpoint's weights at 8 bits
 	// (models.FluxTransformerLoadOptions.KeepFP8).
 	KeepFP8 bool
+	// StreamSlots is how many streamed blocks stay on the device (default 2).
+	StreamSlots int
 	// Components overrides where a component folder comes from, by its
 	// model_index name ("transformer", "vae", "text_encoder",
 	// "text_encoder_2", "scheduler", "tokenizer", "tokenizer_2"): a local
@@ -115,7 +117,7 @@ func (p *Flux) loadEncoders() error {
 
 func (p *Flux) loadTransformer() error {
 	return p.load16(func() (err error) {
-		o := models.FluxTransformerLoadOptions{Stream: p.opts.StreamBlocks, KeepFP8: p.opts.KeepFP8}
+		o := models.FluxTransformerLoadOptions{Stream: p.opts.StreamBlocks, KeepFP8: p.opts.KeepFP8, Slots: p.opts.StreamSlots}
 		if p.Transformer, err = models.LoadFluxTransformerOpts(p.sub("transformer"), p.Dev, o); err != nil {
 			return fmt.Errorf("flux transformer: %w", err)
 		}
@@ -211,6 +213,10 @@ type FluxOptions struct {
 	// unpacked (1, C, h, w) noise (seeded when nil).
 	Img2Img Img2Img
 	Noise   *tensor.Tensor
+	// OnStep, when set, sees the packed latents after each step and the
+	// velocity the transformer predicted (for comparisons against a
+	// reference run).
+	OnStep func(step int, x, v *tensor.Tensor)
 }
 
 // FluxResult is a generated image and what produced it.
@@ -395,11 +401,15 @@ func (p *Flux) Generate(o FluxOptions) (*FluxResult, error) {
 		if err != nil {
 			return nil, err
 		}
+		vel := v
 		if v, err = ops.Mul(v, dt); err != nil {
 			return nil, err
 		}
 		if x, err = ops.Add(x, v); err != nil {
 			return nil, err
+		}
+		if o.OnStep != nil {
+			o.OnStep(i, x, vel)
 		}
 	}
 

@@ -46,6 +46,11 @@ type FluxTransformer struct {
 	NormOut, ProjOut     *nn.Linear
 	ones, zeros          *tensor.Tensor // LayerNorm without affine
 	stream               *fluxStream    // nil: Double / Single are resident
+	// Trace, when set, sees each block's output ("double" i: image then
+	// text stream; "single" i: the joint sequence), for comparisons; an
+	// error it returns ends the forward pass with that error.
+	Trace       func(kind string, i int, x, ctx *tensor.Tensor) error
+	firstDouble *fluxDoubleBlock // the block fluxDebug reports
 }
 
 // fluxStream is the streamed form of the blocks (FluxTransformerLoadOptions.
@@ -57,7 +62,7 @@ type fluxStream struct {
 	dev    device.Device
 	wdt    dtype.DType // block Linear weight storage (nn.WeightStorage at load)
 	mixed  bool
-	fp8    bool // KeepFP8 with an FP8 checkpoint: F8 weights, F32 biases
+	mode   fluxWeightMode
 	double *nn.ExpertCache[*fluxDoubleBlock]
 	single *nn.ExpertCache[*fluxSingleBlock]
 	loras  []fluxLoRAUse // applied to each block as it is built
@@ -107,8 +112,17 @@ func (c FluxConfig) inner() int { return c.NumHeads * c.HeadDim }
 
 // NewFluxTransformer allocates an uninitialised F32 model.
 func NewFluxTransformer(cfg FluxConfig, dev device.Device) (*FluxTransformer, error) {
-	return newFluxTransformer(cfg, dev, false)
+	return newFluxTransformer(cfg, dev, fluxWeightsF32)
 }
+
+// fluxWeightMode is how a loader wants the linears built.
+type fluxWeightMode int
+
+const (
+	fluxWeightsF32         fluxWeightMode = iota // F32 (16-bit under WithWeightStorage16)
+	fluxWeightsFP8                               // F8E4M3 weight, F32 bias, widened per matmul
+	fluxWeightsPlaceholder                       // no weight: the loader sets a quantized one
+)
 
 // fp8Linear builds a Linear with an F8E4M3 weight (filled by the loader)
 // and an F32 bias, widened per matmul.
@@ -128,12 +142,15 @@ func fp8Linear(in, out int, mixed bool, dev device.Device) (*nn.Linear, error) {
 	return l, nil
 }
 
-func newFluxTransformer(cfg FluxConfig, dev device.Device, fp8 bool) (*FluxTransformer, error) {
+func newFluxTransformer(cfg FluxConfig, dev device.Device, mode fluxWeightMode) (*FluxTransformer, error) {
 	if cfg.PatchSize == 0 {
 		cfg.PatchSize = 1
 	}
 	if cfg.OutChannels == 0 {
 		cfg.OutChannels = cfg.InChannels
+	}
+	if len(cfg.AxesDims) == 0 { // diffusers' default (16, 56, 56) for 128-wide heads
+		cfg.AxesDims = []int{16, (cfg.HeadDim - 16) / 2, (cfg.HeadDim - 16) / 2}
 	}
 	sum := 0
 	for _, d := range cfg.AxesDims {
@@ -150,9 +167,12 @@ func newFluxTransformer(cfg FluxConfig, dev device.Device, fp8 bool) (*FluxTrans
 			return nil
 		}
 		var l *nn.Linear
-		if fp8 {
+		switch mode {
+		case fluxWeightsFP8:
 			l, err = fp8Linear(in, out, mixed, dev)
-		} else {
+		case fluxWeightsPlaceholder:
+			l, err = nn.NewLinearPlaceholder(in, out, true, dev)
+		default:
 			l, err = nn.NewLinearUninit(in, out, true, dtype.F32, dev)
 		}
 		return l
@@ -213,8 +233,15 @@ func (s *fluxStream) blockBuilders(headDim int, err *error) (func(in, out int) *
 		if *err != nil {
 			return nil
 		}
-		if s.fp8 {
+		switch s.mode {
+		case fluxWeightsFP8:
 			l, e := fp8Linear(in, out, s.mixed, s.dev)
+			if e != nil {
+				*err = e
+			}
+			return l
+		case fluxWeightsPlaceholder:
+			l, e := nn.NewLinearPlaceholder(in, out, true, s.dev)
 			if e != nil {
 				*err = e
 			}
@@ -224,7 +251,16 @@ func (s *fluxStream) blockBuilders(headDim int, err *error) (func(in, out int) *
 		if in%2 != 0 {
 			dt = dtype.F32
 		}
-		l, e := nn.NewLinearUninit(in, out, true, dt, s.dev)
+		// As the loader's scope would build it: the weight at the storage
+		// dtype, the bias F32 (NewLinearUninit at a 16-bit dtype would make
+		// the bias 16-bit too).
+		l, e := nn.NewLinearPlaceholder(in, out, true, s.dev)
+		if e == nil {
+			var w *tensor.Tensor
+			if w, e = tensor.Zeros(dt, []int{out, in}, s.dev); e == nil {
+				e = l.SetWeight(w)
+			}
+		}
 		if e != nil {
 			*err = e
 			return nil
@@ -401,6 +437,15 @@ func attendOpt(q, k, v, cos, sin *tensor.Tensor, bf16 bool) (*tensor.Tensor, err
 		return nil, err
 	}
 	perm := func(t *tensor.Tensor) (*tensor.Tensor, error) { return autograd.Permute(t, 0, 2, 1, 3) }
+	if fluxDebug != nil {
+		for name, t := range map[string]*tensor.Tensor{"q_rope": q, "k_rope": k, "v_in": v} {
+			if p, err := t.Permute(0, 2, 1, 3); err == nil {
+				if p, err = p.Contiguous(); err == nil {
+					fluxDebug(name, p)
+				}
+			}
+		}
+	}
 	if bf16 && !q.RequiresGrad() {
 		if o, ok, err := attendBF16(q, k, v); err != nil || ok {
 			return o, err
@@ -418,6 +463,11 @@ func attendOpt(q, k, v, cos, sin *tensor.Tensor, bf16 bool) (*tensor.Tensor, err
 	o, err := nn.SDPA(q, k, v, nil)
 	if err != nil {
 		return nil, err
+	}
+	if fluxDebug != nil {
+		if c, err := o.Contiguous(); err == nil {
+			fluxDebug("sdpa_out", c) // (B, H, S, Dh)
+		}
 	}
 	if o, err = perm(o); err != nil {
 		return nil, err
@@ -578,6 +628,11 @@ func (m *FluxTransformer) Forward(in FluxInputs) (*tensor.Tensor, error) {
 	if err != nil {
 		return nil, err
 	}
+	if fluxDebug != nil {
+		fluxDebug("x_embed", x)
+		fluxDebug("ctx_embed", ctx)
+		fluxDebug("temb", temb)
+	}
 	ids := append(append([]float32{}, in.TxtIDs...), in.ImgIDs...)
 	cos, sin, err := m.fluxRoPE(ids, St+x.Dim(1), dev)
 	if err != nil {
@@ -586,14 +641,28 @@ func (m *FluxTransformer) Forward(in FluxInputs) (*tensor.Tensor, error) {
 
 	if m.stream != nil {
 		err = m.stream.double.Each(seq(m.Cfg.NumLayers), func(i int, b *fluxDoubleBlock) error {
+			if i == 0 {
+				m.firstDouble = b
+			}
 			x, ctx, err = m.doubleBlock(b, x, ctx, stemb, cos, sin)
+			if err == nil && m.Trace != nil {
+				err = m.Trace("double", i, x, ctx)
+			}
 			return err
 		})
 	} else {
 		for i, b := range m.Double {
+			if i == 0 {
+				m.firstDouble = b
+			}
 			if x, ctx, err = m.doubleBlock(b, x, ctx, stemb, cos, sin); err != nil {
 				err = fmt.Errorf("flux: double block %d: %w", i, err)
 				break
+			}
+			if m.Trace != nil {
+				if err = m.Trace("double", i, x, ctx); err != nil {
+					break
+				}
 			}
 		}
 	}
@@ -607,6 +676,9 @@ func (m *FluxTransformer) Forward(in FluxInputs) (*tensor.Tensor, error) {
 	if m.stream != nil {
 		err = m.stream.single.Each(seq(m.Cfg.NumSingleLayers), func(i int, b *fluxSingleBlock) error {
 			h, err = m.singleBlock(b, h, stemb, cos, sin)
+			if err == nil && m.Trace != nil {
+				err = m.Trace("single", i, h, nil)
+			}
 			return err
 		})
 	} else {
@@ -614,6 +686,11 @@ func (m *FluxTransformer) Forward(in FluxInputs) (*tensor.Tensor, error) {
 			if h, err = m.singleBlock(b, h, stemb, cos, sin); err != nil {
 				err = fmt.Errorf("flux: single block %d: %w", i, err)
 				break
+			}
+			if m.Trace != nil {
+				if err = m.Trace("single", i, h, nil); err != nil {
+					break
+				}
 			}
 		}
 	}
@@ -644,9 +721,18 @@ func mlpSiLU(l1, l2 *nn.Linear, x *tensor.Tensor) (*tensor.Tensor, error) {
 	return l2.Forward(h)
 }
 
+// fluxDebug, when set (tests), sees named intermediates of the first
+// double block and the embeddings feeding it.
+var fluxDebug func(name string, t *tensor.Tensor)
+
 func (m *FluxTransformer) doubleBlock(b *fluxDoubleBlock, x, ctx, stemb, cos, sin *tensor.Tensor) (*tensor.Tensor, *tensor.Tensor, error) {
 	H, Dh := m.Cfg.NumHeads, m.Cfg.HeadDim
 	St := ctx.Dim(1)
+	dbg := func(name string, t *tensor.Tensor) {
+		if fluxDebug != nil && b == m.firstDouble {
+			fluxDebug(name, t)
+		}
+	}
 	mi, err := modulation(b.Norm1, stemb, 6) // shift, scale, gate (attn); shift, scale, gate (mlp)
 	if err != nil {
 		return nil, nil, err
@@ -663,6 +749,16 @@ func (m *FluxTransformer) doubleBlock(b *fluxDoubleBlock, x, ctx, stemb, cos, si
 	if err != nil {
 		return nil, nil, err
 	}
+	dbg("norm1", nx)
+	dbg("norm1_ctx", nc)
+	if fluxDebug != nil {
+		if q, err := b.Img.Q.Forward(nx); err == nil {
+			dbg("q_img", q)
+		}
+		if q, err := b.Ctx.Q.Forward(nc); err == nil {
+			dbg("q_txt", q)
+		}
+	}
 	qi, ki, vi, err := b.Img.qkv(nx, H, Dh)
 	if err != nil {
 		return nil, nil, err
@@ -670,6 +766,18 @@ func (m *FluxTransformer) doubleBlock(b *fluxDoubleBlock, x, ctx, stemb, cos, si
 	qc, kc, vc, err := b.Ctx.qkv(nc, H, Dh)
 	if err != nil {
 		return nil, nil, err
+	}
+	if fluxDebug != nil {
+		dbg("w_norm_q", b.Img.NormQ.Weight)
+	}
+	if fluxDebug != nil { // (B, S, H, Dh) → diffusers' (B, H, S, Dh)
+		for name, t := range map[string]*tensor.Tensor{"qn_img": qi, "kn_img": ki, "qn_txt": qc, "v_img": vi} {
+			if p, err := t.Permute(0, 2, 1, 3); err == nil {
+				if p, err = p.Contiguous(); err == nil {
+					dbg(name, p)
+				}
+			}
+		}
 	}
 	cat := func(c, i *tensor.Tensor) (*tensor.Tensor, error) { return ops.Concat([]*tensor.Tensor{c, i}, 1) }
 	q, err := cat(qc, qi)
@@ -696,13 +804,23 @@ func (m *FluxTransformer) doubleBlock(b *fluxDoubleBlock, x, ctx, stemb, cos, si
 	if err != nil {
 		return nil, nil, err
 	}
+	if fluxDebug != nil {
+		if c, err := oi.Contiguous(); err == nil {
+			dbg("core_img", c)
+		}
+		if c, err := oc.Contiguous(); err == nil {
+			dbg("core_txt", c)
+		}
+	}
 	if oi, err = b.Out.Forward(oi); err != nil {
 		return nil, nil, err
 	}
 	if oc, err = b.CtxOut.Forward(oc); err != nil {
 		return nil, nil, err
 	}
-	stream := func(h, o *tensor.Tensor, md []*tensor.Tensor, f1, f2 *nn.Linear) (*tensor.Tensor, error) {
+	dbg("attn_img", oi)
+	dbg("attn_txt", oc)
+	stream := func(h, o *tensor.Tensor, md []*tensor.Tensor, f1, f2 *nn.Linear, name string) (*tensor.Tensor, error) {
 		h, err := gateAdd(h, md[2], o)
 		if err != nil {
 			return nil, err
@@ -715,12 +833,13 @@ func (m *FluxTransformer) doubleBlock(b *fluxDoubleBlock, x, ctx, stemb, cos, si
 		if err != nil {
 			return nil, err
 		}
+		dbg(name, f)
 		return gateAdd(h, md[5], f)
 	}
-	if x, err = stream(x, oi, mi, b.FF1, b.FF2); err != nil {
+	if x, err = stream(x, oi, mi, b.FF1, b.FF2, "ff_img"); err != nil {
 		return nil, nil, err
 	}
-	if ctx, err = stream(ctx, oc, mc, b.CtxFF1, b.CtxFF2); err != nil {
+	if ctx, err = stream(ctx, oc, mc, b.CtxFF1, b.CtxFF2, "ff_txt"); err != nil {
 		return nil, nil, err
 	}
 	return x, ctx, nil
@@ -785,7 +904,11 @@ func LoadFluxTransformerOpts(dir string, dev device.Device, o FluxTransformerLoa
 	}
 	var hf map[string]*tensor.Tensor
 	if st, serr := os.Stat(dir); serr == nil && !st.IsDir() {
-		hf, err = loadFluxSingleFile(dir)
+		if strings.HasSuffix(strings.ToLower(dir), ".gguf") {
+			hf, err = loadFluxGGUF(dir)
+		} else {
+			hf, err = loadFluxSingleFile(dir)
+		}
 	} else {
 		hf, err = loadCheckpointTensors(dir)
 	}
@@ -796,19 +919,24 @@ func LoadFluxTransformerOpts(dir string, dev device.Device, o FluxTransformerLoa
 	if o.Stream { // the blocks are built per forward pass instead
 		cfg.NumLayers, cfg.NumSingleLayers = 0, 0
 	}
-	fp8 := o.KeepFP8 && checkpointIsFP8(hf)
-	m, err := newFluxTransformer(cfg, dev, fp8)
+	// (m.Cfg keeps the constructor's defaults: patch size, out channels,
+	// rope axes for a config without axes_dims_rope, as FLUX.1's.)
+	mode := fluxWeightsF32
+	switch {
+	case o.KeepFP8 && checkpointIsFP8(hf):
+		mode = fluxWeightsFP8
+	case checkpointIsQuantized(hf):
+		mode = fluxWeightsPlaceholder
+	}
+	m, err := newFluxTransformer(cfg, dev, mode)
 	if err != nil {
 		return nil, err
 	}
-	m.Cfg = full
+	m.Cfg.NumLayers, m.Cfg.NumSingleLayers = full.NumLayers, full.NumSingleLayers
 	var lerr error
 	lin := func(l *nn.Linear, name string) {
 		if lerr == nil {
-			lerr = copyExactCast(l.W, hf, name+".weight")
-		}
-		if lerr == nil {
-			lerr = copyExactCast(l.B, hf, name+".bias")
+			lerr = loadFluxLinear(l, hf, name, dev, false)
 		}
 	}
 	norm := func(n *nn.RMSNorm, name string) {
@@ -838,7 +966,7 @@ func LoadFluxTransformerOpts(dir string, dev device.Device, o FluxTransformerLoa
 		return nil, fmt.Errorf("LoadFluxTransformer: %w", lerr)
 	}
 	if o.Stream {
-		if err := m.streamBlocks(hf, dev, o.Slots, fp8); err != nil {
+		if err := m.streamBlocks(hf, dev, o.Slots, mode); err != nil {
 			return nil, err
 		}
 	}
@@ -862,26 +990,23 @@ func checkpointIsFP8(hf map[string]*tensor.Tensor) bool {
 
 // streamBlocks sets the transformer up to build its blocks from hf on
 // demand (FluxTransformerLoadOptions.Stream).
-func (m *FluxTransformer) streamBlocks(hf map[string]*tensor.Tensor, dev device.Device, slots int, fp8 bool) error {
+func (m *FluxTransformer) streamBlocks(hf map[string]*tensor.Tensor, dev device.Device, slots int, mode fluxWeightMode) error {
 	if slots <= 0 {
 		slots = 2
 	}
 	D := m.Cfg.inner()
-	s := &fluxStream{hf: hf, dev: dev, fp8: fp8}
+	s := &fluxStream{hf: hf, dev: dev, mode: mode}
 	s.wdt, s.mixed = nn.WeightStorage(D)
 	build := func(f func(lin func(*nn.Linear, string), norm func(*nn.RMSNorm, string))) error {
 		var lerr error
-		lin := func(l *nn.Linear, name string) {
+		lin := func(l *nn.Linear, name string) { // keep: read again every pass
 			if lerr == nil {
-				lerr = copyExactCast(l.W, hf, name+".weight")
-			}
-			if lerr == nil {
-				lerr = copyExactCast(l.B, hf, name+".bias")
+				lerr = loadFluxLinear(l, hf, name, dev, true)
 			}
 		}
 		norm := func(n *nn.RMSNorm, name string) {
 			if lerr == nil {
-				lerr = copyExactCast(n.Weight, hf, name+".weight")
+				lerr = copyExactCastKeep(n.Weight, hf, name+".weight")
 			}
 		}
 		f(lin, norm)

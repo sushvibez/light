@@ -306,6 +306,17 @@ func mapHFToLlamaPrefix(m *Llama, hf map[string]*tensor.Tensor, prefix string) e
 // After a successful copy the entry is deleted from `hf` so its CPU buffer
 // becomes eligible for GC.
 func copyExactCast(dst *tensor.Tensor, hf map[string]*tensor.Tensor, name string) error {
+	if err := copyExactCastKeep(dst, hf, name); err != nil {
+		return err
+	}
+	delete(hf, name) // the mapped pages are no longer needed
+	return nil
+}
+
+// copyExactCastKeep is copyExactCast leaving hf as it is, for loaders that
+// read a tensor more than once (weights streamed per forward pass) or
+// from several goroutines.
+func copyExactCastKeep(dst *tensor.Tensor, hf map[string]*tensor.Tensor, name string) error {
 	src, ok := hf[name]
 	if !ok {
 		return fmt.Errorf("HF Llama: missing tensor %q", name)
@@ -333,7 +344,6 @@ func copyExactCast(dst *tensor.Tensor, hf map[string]*tensor.Tensor, name string
 	if err := dst.CopyFrom(src); err != nil {
 		return fmt.Errorf("%s: %w", name, err)
 	}
-	delete(hf, name)
 	return nil
 }
 

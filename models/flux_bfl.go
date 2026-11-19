@@ -43,6 +43,13 @@ func FluxConfigAt(path string) (FluxConfig, error) {
 			return readFluxConfig(side)
 		}
 	}
+	if strings.HasSuffix(strings.ToLower(path), ".gguf") {
+		shapes, err := ggufShapes(path)
+		if err != nil {
+			return cfg, fmt.Errorf("flux %s: %w", filepath.Base(path), err)
+		}
+		return fluxConfigFromShapes(shapes)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return cfg, err
@@ -150,7 +157,8 @@ func fluxFromBFL(src map[string]*tensor.Tensor) (map[string]*tensor.Tensor, erro
 		}
 	}
 	both := func(from, to string) { mv(from+".weight", to+".weight"); mv(from+".bias", to+".bias") }
-	// rows splits t's leading dim into parts of the given sizes (views).
+	// rows splits t's leading dim into parts of the given sizes (views, or
+	// byte ranges of a quantized tensor).
 	rows := func(name string, sizes []int, tos []string) {
 		t, ok := src[name]
 		if !ok || err != nil {
@@ -160,17 +168,13 @@ func fluxFromBFL(src map[string]*tensor.Tensor) (map[string]*tensor.Tensor, erro
 			return
 		}
 		delete(src, name)
-		off := 0
-		for i, n := range sizes {
-			var v *tensor.Tensor
-			if v, err = t.Narrow(0, off, n); err != nil {
-				return
-			}
-			out[tos[i]] = v
-			off += n
+		parts, e := splitRows(t, sizes)
+		if e != nil {
+			err = fmt.Errorf("flux: %s: %w", name, e)
+			return
 		}
-		if off != t.Dim(0) {
-			err = fmt.Errorf("flux: %s has %d rows, expected %d", name, t.Dim(0), off)
+		for i, v := range parts {
+			out[tos[i]] = v
 		}
 	}
 	D := 0
@@ -194,10 +198,8 @@ func fluxFromBFL(src map[string]*tensor.Tensor) (map[string]*tensor.Tensor, erro
 			return nil, fmt.Errorf("flux: missing final_layer.adaLN_modulation.1.%s", s)
 		}
 		delete(src, "final_layer.adaLN_modulation.1."+s)
-		if t.DType() == dtype.F8E4M3 { // concat has no FP8 kernel; the halves are small (2D x D)
-			if t, err = ops.Cast(t, dtype.F32); err != nil {
-				return nil, err
-			}
+		if t, err = widen(t); err != nil { // rearranged on the host in F32 (2D x D, small)
+			return nil, err
 		}
 		shift, e1 := t.Narrow(0, 0, D)
 		scale, e2 := t.Narrow(0, D, D)
@@ -260,3 +262,5 @@ func fluxFromBFL(src map[string]*tensor.Tensor) (map[string]*tensor.Tensor, erro
 	}
 	return out, nil
 }
+
+func castCPU(t *tensor.Tensor, dt dtype.DType) (*tensor.Tensor, error) { return ops.Cast(t, dt) }
