@@ -25,6 +25,12 @@
 # Hugging Face downloads use $HF_TOKEN when set.
 set -uo pipefail
 
+# `colab run` stops a session that prints nothing for 30 s; downloads and
+# the long tests are silent for minutes, so a heartbeat keeps it alive.
+( while true; do sleep 20; printf '[%s heartbeat]\n' "$(date +%T)"; done ) &
+HEARTBEAT=$!
+trap 'kill $HEARTBEAT 2>/dev/null' EXIT
+
 REPO_URL=${REPO_URL:-https://github.com/sushvibez/light}
 BRANCH=${BRANCH:-main}
 WORK=${WORK:-/content/light}
