@@ -107,3 +107,37 @@ func TestFluxComponentsFromRepo(t *testing.T) {
 		t.Error("single file accepted")
 	}
 }
+
+// Run targets: local ones pass, remote ones are recognised and refused
+// until wired, unknown ones and stages are errors; JSON round-trips.
+func TestPipelineSpecRun(t *testing.T) {
+	ok := []PipelineSpec{{}, {Run: RunTarget{Target: "local/cpu"}}, {Stages: map[string]RunTarget{"text_encode": {Target: "local/cpu"}, "denoise": {Target: "local/gpu"}}}}
+	for i, p := range ok {
+		if err := p.Validate(); err != nil {
+			t.Errorf("%d: %v", i, err)
+		}
+	}
+	bad := map[string]PipelineSpec{
+		"unknown target": {Run: RunTarget{Target: "cloud"}},
+		"unknown stage":  {Stages: map[string]RunTarget{"upscale": {}}},
+		"api no url":     {Run: RunTarget{Target: "remote/api"}},
+		"colab (later)":  {Run: RunTarget{Target: "remote/colab", Session: "flux"}},
+		"ssh (later)":    {Stages: map[string]RunTarget{"denoise": {Target: "remote/ssh", Host: "box"}}},
+		"decode apart":   {Run: RunTarget{Target: "local/gpu"}, Stages: map[string]RunTarget{"decode": {Target: "local/cpu"}}},
+	}
+	for name, p := range bad {
+		if err := p.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	f := filepath.Join(t.TempDir(), "p.json")
+	os.WriteFile(f, []byte(`{"family":"flux","run":{"target":"local/gpu"},"stages":{"text_encode":{"target":"local/cpu"}},
+		"transformer":{"repo":"black-forest-labs/FLUX.1-schnell","sub":"transformer"},"loras":[{"path":"x.safetensors","scale":0.8}]}`), 0o644)
+	p, err := LoadPipelineSpec(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.stageTarget("text_encode") != "local/cpu" || p.stageTarget("denoise") != "local/gpu" || p.Loras[0].Scale != 0.8 || p.Transformer.Sub != "transformer" {
+		t.Errorf("%+v", p)
+	}
+}

@@ -33,6 +33,8 @@ type Flux struct {
 	dir      string
 	opts     FluxLoadOptions
 	cfg      models.FluxConfig // the transformer's, known before it loads
+	encDev   device.Device
+	loras    []*models.FluxLoRA // parsed once, applied per transformer load
 }
 
 func fluxTransformerConfig(dir string) (models.FluxConfig, error) {
@@ -69,6 +71,18 @@ type FluxLoadOptions struct {
 	// diffusers-layout folder for that part, so a pipeline can be composed
 	// from separately chosen parts. Others come from the repo.
 	Components map[string]string
+	// Loras are adapters applied to the transformer, in order.
+	Loras []FluxLoRA
+	// EncoderDevice runs CLIP and T5 elsewhere (nil: dev); they run once
+	// per image, so the CPU can free the GPU for the transformer.
+	EncoderDevice device.Device
+}
+
+// FluxLoRA is a LoRA file for the transformer at a strength (1 = as
+// trained; a file's alpha folds in, a file without one scales by Scale).
+type FluxLoRA struct {
+	Path  string
+	Scale float32
 }
 
 // LoadFlux loads a FluxPipeline folder (or Hub repo) onto dev at F32.
@@ -94,10 +108,10 @@ func (p *Flux) sub(s string) string {
 func (p *Flux) loadEncoders() error {
 	return p.load16(func() (err error) {
 		sub := p.sub
-		if p.CLIP, err = models.LoadCLIPTextFromDir(sub("text_encoder"), p.Dev); err != nil {
+		if p.CLIP, err = models.LoadCLIPTextFromDir(sub("text_encoder"), p.encDev); err != nil {
 			return fmt.Errorf("flux text_encoder: %w", err)
 		}
-		if p.T5, err = models.LoadT5EncoderFromHF(sub("text_encoder_2"), p.Dev, dtype.F32); err != nil {
+		if p.T5, err = models.LoadT5EncoderFromHF(sub("text_encoder_2"), p.encDev, dtype.F32); err != nil {
 			return fmt.Errorf("flux text_encoder_2: %w", err)
 		}
 		return nil
@@ -110,6 +124,18 @@ func (p *Flux) loadTransformer() error {
 		if p.Transformer, err = models.LoadFluxTransformerOpts(p.sub("transformer"), p.Dev, o); err != nil {
 			return fmt.Errorf("flux transformer: %w", err)
 		}
+		for i, l := range p.opts.Loras {
+			if len(p.loras) <= i {
+				ad, err := models.LoadFluxLoRA(l.Path)
+				if err != nil {
+					return err
+				}
+				p.loras = append(p.loras, ad)
+			}
+			if err := p.Transformer.ApplyLoRA(p.loras[i], l.Scale); err != nil {
+				return fmt.Errorf("flux lora %s: %w", filepath.Base(l.Path), err)
+			}
+		}
 		return nil
 	})
 }
@@ -120,7 +146,10 @@ func LoadFluxOpts(repo string, dev device.Device, o FluxLoadOptions) (*Flux, err
 	if err != nil {
 		return nil, err
 	}
-	p := &Flux{Dev: dev, dir: dir, opts: o}
+	p := &Flux{Dev: dev, dir: dir, opts: o, encDev: dev}
+	if o.EncoderDevice != nil {
+		p.encDev = o.EncoderDevice
+	}
 	sub := p.sub
 	if !o.Sequential {
 		if err = p.loadEncoders(); err != nil {
@@ -254,7 +283,7 @@ func (p *Flux) Generate(o FluxOptions) (*FluxResult, error) {
 	for i, v := range cids {
 		c64[i] = int64(v)
 	}
-	ct, err := tensor.New(c64, []int{1, len(c64)}, p.Dev)
+	ct, err := tensor.New(c64, []int{1, len(c64)}, p.encDev)
 	if err != nil {
 		return nil, err
 	}
@@ -266,16 +295,22 @@ func (p *Flux) Generate(o FluxOptions) (*FluxResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	if pooled, err = pooled.To(p.Dev); err != nil {
+		return nil, err
+	}
 	tids, err := p.t5IDs(o.Prompt, o.MaxSeqLen)
 	if err != nil {
 		return nil, err
 	}
-	tt, err := tensor.New(tids, []int{1, len(tids)}, p.Dev)
+	tt, err := tensor.New(tids, []int{1, len(tids)}, p.encDev)
 	if err != nil {
 		return nil, err
 	}
 	embeds, err := p.T5.Forward(tt)
 	if err != nil {
+		return nil, err
+	}
+	if embeds, err = embeds.To(p.Dev); err != nil {
 		return nil, err
 	}
 	if p.opts.Sequential {

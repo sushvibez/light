@@ -77,11 +77,19 @@ func GenerateImage(o ImageOptions) (*ImageResult, error) {
 	var class string
 
 	if o.Pipeline != nil {
+		if err := o.Pipeline.Validate(); err != nil {
+			return nil, err
+		}
 		switch o.Pipeline.Family {
 		case "flux", "":
 			class = "FluxPipeline"
 		default:
 			return nil, fmt.Errorf("pipeline: family %q is not composable yet (flux only)", o.Pipeline.Family)
+		}
+		if t := o.Pipeline.stageTarget("denoise"); t == "local/cpu" {
+			o.Device = "cpu"
+		} else if t == "local/gpu" {
+			o.Device = "gpu"
 		}
 	} else if class, err = pipelineClass(o.Repo); err != nil {
 		return nil, err
@@ -159,6 +167,12 @@ func GenerateImage(o ImageOptions) (*ImageResult, error) {
 		if o.Pipeline != nil {
 			if lo.Components, err = fluxComponents(o); err != nil {
 				return nil, err
+			}
+			if lo.Loras, err = fluxLoras(o.Pipeline); err != nil {
+				return nil, err
+			}
+			if o.Pipeline.stageTarget("text_encode") == "local/cpu" {
+				lo.EncoderDevice = device.CPU()
 			}
 			if repo == "" {
 				repo = lo.Components["transformer"] // a folder: Snapshot returns it as is

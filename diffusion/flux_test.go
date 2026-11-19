@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"light/device"
+	"light/models"
 	"light/tensor"
 )
 
@@ -142,4 +143,86 @@ func refPNG(t *testing.T) image.Image {
 		t.Fatal(err)
 	}
 	return img
+}
+
+// A PEFT LoRA on the tiny transformer (scripts/verify/ref_flux_lora.py:
+// rank 2, alpha 3, every linear kind), at strength 0.7: diffusers folds
+// alpha / rank into the scale and the file carries no alpha, so Light gets
+// 0.7 · 3 / 2. Resident and streamed, CPU and CUDA.
+func TestFluxPipelineTinyLoRA(t *testing.T) {
+	raw, err := os.ReadFile("testdata/flux-tiny-pipe.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var base struct {
+		Prompt       string    `json:"prompt"`
+		Height       int       `json:"height"`
+		Width        int       `json:"width"`
+		Steps        int       `json:"steps"`
+		MaxSeqLen    int       `json:"max_seq_len"`
+		Latents      []float32 `json:"latents"`
+		LatentsShape []int     `json:"latents_shape"`
+	}
+	if err := json.Unmarshal(raw, &base); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile("testdata/flux-tiny-lora.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ref struct {
+		Strength float32   `json:"strength"`
+		Alpha    float32   `json:"alpha"`
+		Rank     float32   `json:"rank"`
+		Image    []float32 `json:"image"`
+		Modules  []string  `json:"modules"`
+	}
+	if err := json.Unmarshal(raw, &ref); err != nil {
+		t.Fatal(err)
+	}
+	ad, err := models.LoadFluxLoRA("testdata/flux-tiny-lora.safetensors")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ad.Modules) != len(ref.Modules) || len(ad.Skipped) != 0 {
+		t.Errorf("parsed %d modules (%d skipped), the file has %d", len(ad.Modules), len(ad.Skipped), len(ref.Modules))
+	}
+	devs := []device.Device{device.CPU()}
+	if g, err := device.CUDA(0); err == nil {
+		devs = append(devs, g)
+	}
+	lora := FluxLoRA{Path: "testdata/flux-tiny-lora.safetensors", Scale: ref.Strength * ref.Alpha / ref.Rank}
+	loads := map[string]FluxLoadOptions{"resident": {Loras: []FluxLoRA{lora}}, "streamed": {Sequential: true, StreamBlocks: true, Loras: []FluxLoRA{lora}}}
+	for _, dev := range devs {
+		for name, lo := range loads {
+			t.Run(dev.String()+"/"+name, func(t *testing.T) {
+				p, err := LoadFluxOpts("testdata/flux-tiny-pipe", dev, lo)
+				if err != nil {
+					t.Fatal(err)
+				}
+				lat, err := tensor.New(base.Latents, base.LatentsShape, dev)
+				if err != nil {
+					t.Fatal(err)
+				}
+				res, err := p.Generate(FluxOptions{Prompt: base.Prompt, Width: base.Width, Height: base.Height,
+					Steps: base.Steps, MaxSeqLen: base.MaxSeqLen, Latents: lat})
+				if err != nil {
+					t.Fatal(err)
+				}
+				img, err := res.Image.To(device.CPU())
+				if err != nil {
+					t.Fatal(err)
+				}
+				got := tensor.MustSlice[float32](img)
+				md := 0.0
+				for i := range got {
+					md = math.Max(md, math.Abs(float64(got[i]-ref.Image[i])))
+				}
+				t.Logf("image with LoRA: max diff %.3g over %d values", md, len(got))
+				if md > 1e-4 {
+					t.Errorf("image differs by %.3g", md)
+				}
+			})
+		}
+	}
 }

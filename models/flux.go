@@ -60,9 +60,7 @@ type fluxStream struct {
 	mixed  bool
 	double *nn.ExpertCache[*fluxDoubleBlock]
 	single *nn.ExpertCache[*fluxSingleBlock]
-	// OnBlock, when set, runs on each freshly built block (LoRA, hooks).
-	OnDouble func(i int, b *fluxDoubleBlock) error
-	OnSingle func(i int, b *fluxSingleBlock) error
+	loras  []fluxLoRAUse // applied to each block as it is built
 }
 
 // FluxTransformerLoadOptions adjust LoadFluxTransformerOpts.
@@ -844,8 +842,8 @@ func (m *FluxTransformer) streamBlocks(hf map[string]*tensor.Tensor, dev device.
 		if err := build(func(lin func(*nn.Linear, string), norm func(*nn.RMSNorm, string)) { loadFluxDouble(b, i, lin, norm) }); err != nil {
 			return nil, fmt.Errorf("flux: double block %d: %w", i, err)
 		}
-		if s.OnDouble != nil {
-			if err := s.OnDouble(i, b); err != nil {
+		for _, u := range s.loras {
+			if err := applyFluxLoRA(u.ad, u.strength, b.linears(i), s.dev); err != nil {
 				return nil, err
 			}
 		}
@@ -864,8 +862,8 @@ func (m *FluxTransformer) streamBlocks(hf map[string]*tensor.Tensor, dev device.
 		if err := build(func(lin func(*nn.Linear, string), norm func(*nn.RMSNorm, string)) { loadFluxSingle(b, i, lin, norm) }); err != nil {
 			return nil, fmt.Errorf("flux: single block %d: %w", i, err)
 		}
-		if s.OnSingle != nil {
-			if err := s.OnSingle(i, b); err != nil {
+		for _, u := range s.loras {
+			if err := applyFluxLoRA(u.ad, u.strength, b.linears(i), s.dev); err != nil {
 				return nil, err
 			}
 		}

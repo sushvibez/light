@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,6 +40,95 @@ type PipelineSpec struct {
 	TextEncoders []PipelineSlot `json:"text_encoders"`
 	Loras        []LoraSpec     `json:"loras"`
 	Scheduler    PipelineSlot   `json:"scheduler,omitempty"`
+	// Run is where the pipeline runs; Stages overrides it per stage
+	// ("text_encode", "denoise", "decode").
+	Run    RunTarget            `json:"run,omitempty"`
+	Stages map[string]RunTarget `json:"stages,omitempty"`
+}
+
+// RunTarget is where a pipeline (or one of its stages) executes.
+type RunTarget struct {
+	// Target is "local/cpu", "local/gpu", "remote/api", "remote/colab" or
+	// "remote/ssh" ("" = local/gpu when one exists, else local/cpu).
+	Target string `json:"target,omitempty"`
+	// remote/api: the Light server's base URL (its /v1/images/generations)
+	// and the environment variable holding its key.
+	Endpoint string `json:"endpoint,omitempty"`
+	KeyEnv   string `json:"key_env,omitempty"`
+	// remote/colab: the kept session's name and the GPU to ask for.
+	Session string `json:"session,omitempty"`
+	GPU     string `json:"gpu,omitempty"`
+	// remote/ssh: user@host and the light binary there.
+	Host  string `json:"host,omitempty"`
+	Light string `json:"light,omitempty"`
+}
+
+// PipelineStages are the stages a RunTarget can be set for.
+var PipelineStages = []string{"text_encode", "denoise", "decode"}
+
+// Validate checks the targets; remote ones are recognised but not run yet.
+func (p *PipelineSpec) Validate() error {
+	check := func(stage string, r RunTarget) error {
+		switch r.Target {
+		case "", "local/cpu", "local/gpu":
+			return nil
+		case "remote/api":
+			if r.Endpoint == "" {
+				return fmt.Errorf("pipeline %s: remote/api needs an endpoint", stage)
+			}
+		case "remote/colab":
+			if r.Session == "" {
+				return fmt.Errorf("pipeline %s: remote/colab needs a session name", stage)
+			}
+		case "remote/ssh":
+			if r.Host == "" {
+				return fmt.Errorf("pipeline %s: remote/ssh needs a host", stage)
+			}
+		default:
+			return fmt.Errorf("pipeline %s: unknown target %q", stage, r.Target)
+		}
+		return fmt.Errorf("pipeline %s: %s is not wired yet (local/cpu and local/gpu run today)", stage, r.Target)
+	}
+	if err := check("run", p.Run); err != nil {
+		return err
+	}
+	for stage, r := range p.Stages {
+		known := false
+		for _, s := range PipelineStages {
+			known = known || s == stage
+		}
+		if !known {
+			return fmt.Errorf("pipeline: unknown stage %q, want one of %v", stage, PipelineStages)
+		}
+		if err := check(stage, r); err != nil {
+			return err
+		}
+	}
+	if d, ok := p.Stages["decode"]; ok && d.Target != "" && d.Target != p.stageTarget("denoise") {
+		return fmt.Errorf("pipeline: decode must run where denoise runs for now")
+	}
+	return nil
+}
+
+// stageTarget is the effective target of a stage.
+func (p *PipelineSpec) stageTarget(stage string) string {
+	if r, ok := p.Stages[stage]; ok && r.Target != "" {
+		return r.Target
+	}
+	return p.Run.Target
+}
+
+// LoadPipelineSpec reads a pipeline JSON file.
+func LoadPipelineSpec(path string) (*PipelineSpec, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var p PipelineSpec
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, fmt.Errorf("pipeline %s: %w", path, err)
+	}
+	return &p, p.Validate()
 }
 
 // LibraryFile is one file of the local model library (LibraryFiles).
@@ -325,8 +415,21 @@ func fluxComponents(o ImageOptions) (map[string]string, error) {
 			return nil, err
 		}
 	}
-	if len(sp.Loras) > 0 {
-		return nil, fmt.Errorf("pipeline: LoRA loading is not wired yet (%d given)", len(sp.Loras))
-	}
 	return comp, nil
+}
+
+// fluxLoras turns the spec's LoRAs into load options, checking the files.
+func fluxLoras(sp *PipelineSpec) ([]diffusion.FluxLoRA, error) {
+	var out []diffusion.FluxLoRA
+	for _, l := range sp.Loras {
+		if _, err := os.Stat(l.Path); err != nil {
+			return nil, fmt.Errorf("pipeline lora: %w", err)
+		}
+		sc := l.Scale
+		if sc == 0 {
+			sc = 1
+		}
+		out = append(out, diffusion.FluxLoRA{Path: l.Path, Scale: sc})
+	}
+	return out, nil
 }
