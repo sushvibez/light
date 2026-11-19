@@ -20,6 +20,7 @@ import (
 //
 //	LIGHT_HEAVY_TESTS=1 LIGHT_ZIMAGE_REAL_REF=/path/zimage.json go test ./diffusion -run TestZImageTurboRealCUDA -v
 //	LIGHT_HEAVY_TESTS=1 LIGHT_KLEIN_REAL_REF=/path/klein.json go test ./diffusion -run TestFlux2KleinRealCUDA -v
+//	LIGHT_HEAVY_TESTS=1 LIGHT_FLUX1_REAL_REF=/path/schnell.json go test ./diffusion -run TestFlux1RealCUDA -v
 //
 // Four BF16 denoising steps on both sides accumulate rounding, so the
 // images are compared by mean absolute pixel difference (tolerance 0.03
@@ -125,6 +126,29 @@ func TestFlux2KleinRealCUDA(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := p.Generate(Flux2Options{Prompt: ref.Prompt, Width: ref.Width, Height: ref.Height, Steps: ref.Steps, Guidance: ref.Guidance, Latents: lat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	compareReal(t, res.Image, ref)
+}
+
+// FLUX.1 (schnell or dev): the 12B transformer streams its blocks from the
+// memory-mapped checkpoint, so the run fits a 16 GB card.
+func TestFlux1RealCUDA(t *testing.T) {
+	ref, dev := loadRealRef(t, "LIGHT_FLUX1_REAL_REF")
+	p, err := LoadFluxOpts(ref.Repo, dev, FluxLoadOptions{Storage16: true, Sequential: true, StreamBlocks: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	noise, err := tensor.New(ref.Latents, ref.LatentsShape, dev) // (1, C, h, w) before packing
+	if err != nil {
+		t.Fatal(err)
+	}
+	seq := 512
+	if strings.HasSuffix(ref.Repo, "schnell") {
+		seq = 256
+	}
+	res, err := p.Generate(FluxOptions{Prompt: ref.Prompt, Width: ref.Width, Height: ref.Height, Steps: ref.Steps, Guidance: ref.Guidance, MaxSeqLen: seq, Noise: noise})
 	if err != nil {
 		t.Fatal(err)
 	}

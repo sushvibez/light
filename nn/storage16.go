@@ -123,3 +123,14 @@ func embeddingDevice16(dt dtype.DType, n int, dev device.Device) device.Device {
 	}
 	return dev
 }
+
+// WeightStorage reports how a Linear asked for an F32 weight with in input
+// features would store it right now: the dtype and whether it computes
+// mixed (see WithWeightStorage16 / WithWeightStorage16Mixed). Loaders that
+// build layers later, outside the scope they were loaded in (weights
+// streamed per block), record it and pass the dtype to NewLinearUninit and
+// the flag to Linear.Mixed16 themselves.
+func WeightStorage(in int) (dtype.DType, bool) {
+	dt, _, mixed := weightDType16Mixed(dtype.F32, in)
+	return dt, mixed
+}

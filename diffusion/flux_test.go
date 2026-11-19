@@ -70,46 +70,62 @@ func TestFluxPipelineTinyMatchesDiffusers(t *testing.T) {
 			t.Errorf("%s differs by %.3g", name, md)
 		}
 	}
+	if g, err := device.CUDA(0); err == nil {
+		devs = append(devs, g)
+	}
+	// Resident, and sequential with streamed transformer blocks (the
+	// 12B path): same numbers either way.
+	loads := map[string]FluxLoadOptions{"resident": {}, "streamed": {Sequential: true, StreamBlocks: true}}
 	for _, dev := range devs {
-		t.Run(dev.String(), func(t *testing.T) {
-			p, err := LoadFlux("testdata/flux-tiny-pipe", dev)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got := p.CLIPTok.Encode(ref.Prompt, p.CLIP.Cfg.MaxPosition); !slices.Equal(got, ref.CLIPIDs) {
-				t.Errorf("CLIP ids\n got %v\nwant %v", got, ref.CLIPIDs)
-			}
-			if got, _ := p.t5IDs(ref.Prompt, ref.MaxSeqLen); !slices.Equal(got, ref.T5IDs) {
-				t.Errorf("T5 ids\n got %v\nwant %v", got, ref.T5IDs)
-			}
-			lat, err := tensor.New(ref.Latents, ref.LatentsShape, dev)
-			if err != nil {
-				t.Fatal(err)
-			}
-			res, err := p.Generate(FluxOptions{Prompt: ref.Prompt, Width: ref.Width, Height: ref.Height,
-				Steps: ref.Steps, MaxSeqLen: ref.MaxSeqLen, Latents: lat})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !slices.Equal(res.Sigmas, ref.Sigmas) {
-				t.Errorf("sigmas %v, want %v", res.Sigmas, ref.Sigmas)
-			}
-			maxDiff(t, "T5 states", res.PromptEmbeds, ref.PromptEmbeds, 1e-4)
-			maxDiff(t, "CLIP pooled", res.Pooled, ref.Pooled, 1e-4)
-			maxDiff(t, "image", res.Image, ref.Image, 1e-4)
+		for name, lo := range loads {
+			t.Run(dev.String()+"/"+name, func(t *testing.T) {
+				p, err := LoadFluxOpts("testdata/flux-tiny-pipe", dev, lo)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if lo.Sequential && p.Transformer != nil {
+					t.Fatal("sequential load kept the transformer resident")
+				}
+				if lo.Sequential {
+					if err := p.loadEncoders(); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if got := p.CLIPTok.Encode(ref.Prompt, p.CLIP.Cfg.MaxPosition); !slices.Equal(got, ref.CLIPIDs) {
+					t.Errorf("CLIP ids\n got %v\nwant %v", got, ref.CLIPIDs)
+				}
+				if got, _ := p.t5IDs(ref.Prompt, ref.MaxSeqLen); !slices.Equal(got, ref.T5IDs) {
+					t.Errorf("T5 ids\n got %v\nwant %v", got, ref.T5IDs)
+				}
+				lat, err := tensor.New(ref.Latents, ref.LatentsShape, dev)
+				if err != nil {
+					t.Fatal(err)
+				}
+				res, err := p.Generate(FluxOptions{Prompt: ref.Prompt, Width: ref.Width, Height: ref.Height,
+					Steps: ref.Steps, MaxSeqLen: ref.MaxSeqLen, Latents: lat})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !slices.Equal(res.Sigmas, ref.Sigmas) {
+					t.Errorf("sigmas %v, want %v", res.Sigmas, ref.Sigmas)
+				}
+				maxDiff(t, "T5 states", res.PromptEmbeds, ref.PromptEmbeds, 1e-4)
+				maxDiff(t, "CLIP pooled", res.Pooled, ref.Pooled, 1e-4)
+				maxDiff(t, "image", res.Image, ref.Image, 1e-4)
 
-			noise, err := tensor.New(ref.I2INoise, ref.I2INoiseSh, dev)
-			if err != nil {
-				t.Fatal(err)
-			}
-			res, err = p.Generate(FluxOptions{Prompt: ref.Prompt, Width: ref.I2IWidth, Height: ref.I2IHeight,
-				Steps: ref.I2ISteps, MaxSeqLen: ref.MaxSeqLen, Noise: noise,
-				Img2Img: Img2Img{Image: refPNG(t), Strength: ref.I2IStrength}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			maxDiff(t, "img2img image", res.Image, ref.I2IImage, 1e-4)
-		})
+				noise, err := tensor.New(ref.I2INoise, ref.I2INoiseSh, dev)
+				if err != nil {
+					t.Fatal(err)
+				}
+				res, err = p.Generate(FluxOptions{Prompt: ref.Prompt, Width: ref.I2IWidth, Height: ref.I2IHeight,
+					Steps: ref.I2ISteps, MaxSeqLen: ref.MaxSeqLen, Noise: noise,
+					Img2Img: Img2Img{Image: refPNG(t), Strength: ref.I2IStrength}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				maxDiff(t, "img2img image", res.Image, ref.I2IImage, 1e-4)
+			})
+		}
 	}
 }
 

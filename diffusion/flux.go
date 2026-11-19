@@ -10,6 +10,7 @@ import (
 	"light/device"
 	"light/dtype"
 	"light/models"
+	"light/nn"
 	"light/ops"
 	"light/tensor"
 	"light/tokenizer"
@@ -29,18 +30,88 @@ type Flux struct {
 	Dev         device.Device
 
 	vaeScale int // 2^(len(block_out_channels) − 1): pixels per latent
+	dir      string
+	opts     FluxLoadOptions
+	cfg      models.FluxConfig // the transformer's, known before it loads
+}
+
+func fluxTransformerConfig(dir string) (models.FluxConfig, error) {
+	var cfg models.FluxConfig
+	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	if err != nil {
+		return cfg, err
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return cfg, fmt.Errorf("flux config: %w", err)
+	}
+	return cfg, nil
+}
+
+// FluxLoadOptions adjust LoadFluxOpts.
+type FluxLoadOptions struct {
+	// Storage16 keeps the text encoders' and transformer's matmul weights
+	// in BF16 (F32 compute, exact for BF16 checkpoints): FLUX.1's 12B
+	// transformer then takes 24 GB instead of 48, T5-XXL 9.5 instead of 19.
+	Storage16 bool
+	// Sequential keeps only the tokenizers, VAE and scheduler resident:
+	// Generate loads CLIP and T5, encodes, frees them, then loads the
+	// transformer, denoises and frees it before decoding. Peak memory is
+	// the largest model instead of the sum, at the cost of loading per image.
+	Sequential bool
+	// StreamBlocks keeps the transformer's blocks on the host and uploads
+	// each right before it runs (models.FluxTransformerLoadOptions.Stream):
+	// the 12B transformer then fits a 16 GB device, reading its checkpoint
+	// once per step.
+	StreamBlocks bool
 }
 
 // LoadFlux loads a FluxPipeline folder (or Hub repo) onto dev at F32.
 func LoadFlux(repo string, dev device.Device) (*Flux, error) {
+	return LoadFluxOpts(repo, dev, FluxLoadOptions{})
+}
+
+func (p *Flux) load16(f func() error) error {
+	if p.opts.Storage16 {
+		return nn.WithWeightStorage16(dtype.BF16, f)
+	}
+	return f()
+}
+
+func (p *Flux) loadEncoders() error {
+	return p.load16(func() (err error) {
+		sub := func(s string) string { return filepath.Join(p.dir, s) }
+		if p.CLIP, err = models.LoadCLIPTextFromDir(sub("text_encoder"), p.Dev); err != nil {
+			return fmt.Errorf("flux text_encoder: %w", err)
+		}
+		if p.T5, err = models.LoadT5EncoderFromHF(sub("text_encoder_2"), p.Dev, dtype.F32); err != nil {
+			return fmt.Errorf("flux text_encoder_2: %w", err)
+		}
+		return nil
+	})
+}
+
+func (p *Flux) loadTransformer() error {
+	return p.load16(func() (err error) {
+		o := models.FluxTransformerLoadOptions{Stream: p.opts.StreamBlocks}
+		if p.Transformer, err = models.LoadFluxTransformerOpts(filepath.Join(p.dir, "transformer"), p.Dev, o); err != nil {
+			return fmt.Errorf("flux transformer: %w", err)
+		}
+		return nil
+	})
+}
+
+// LoadFluxOpts is LoadFlux with options.
+func LoadFluxOpts(repo string, dev device.Device, o FluxLoadOptions) (*Flux, error) {
 	dir, err := Snapshot(repo)
 	if err != nil {
 		return nil, err
 	}
-	p := &Flux{Dev: dev}
+	p := &Flux{Dev: dev, dir: dir, opts: o}
 	sub := func(s string) string { return filepath.Join(dir, s) }
-	if p.CLIP, err = models.LoadCLIPTextFromDir(sub("text_encoder"), dev); err != nil {
-		return nil, fmt.Errorf("flux text_encoder: %w", err)
+	if !o.Sequential {
+		if err = p.loadEncoders(); err != nil {
+			return nil, err
+		}
 	}
 	vocab, err := os.Open(filepath.Join(sub("tokenizer"), "vocab.json"))
 	if err != nil {
@@ -55,14 +126,16 @@ func LoadFlux(repo string, dev device.Device) (*Flux, error) {
 	if p.CLIPTok, err = tokenizer.LoadCLIPTokenizer(vocab, merges); err != nil {
 		return nil, fmt.Errorf("flux tokenizer: %w", err)
 	}
-	if p.T5, err = models.LoadT5EncoderFromHF(sub("text_encoder_2"), dev, dtype.F32); err != nil {
-		return nil, fmt.Errorf("flux text_encoder_2: %w", err)
-	}
 	if p.T5Tok, err = tokenizer.Load(filepath.Join(sub("tokenizer_2"), "tokenizer.json")); err != nil {
 		return nil, fmt.Errorf("flux tokenizer_2: %w", err)
 	}
-	if p.Transformer, err = models.LoadFluxTransformer(sub("transformer"), dev); err != nil {
-		return nil, fmt.Errorf("flux transformer: %w", err)
+	if p.cfg, err = fluxTransformerConfig(sub("transformer")); err != nil {
+		return nil, err
+	}
+	if !o.Sequential {
+		if err = p.loadTransformer(); err != nil {
+			return nil, err
+		}
 	}
 	if p.VAE, err = models.LoadFluxVAE(sub("vae"), dev); err != nil {
 		return nil, fmt.Errorf("flux vae: %w", err)
@@ -157,6 +230,11 @@ func (p *Flux) Generate(o FluxOptions) (*FluxResult, error) {
 		o.Height = 1024
 	}
 	// Text: CLIP pooled + T5 states.
+	if p.CLIP == nil || p.T5 == nil {
+		if err := p.loadEncoders(); err != nil {
+			return nil, err
+		}
+	}
 	cids := p.CLIPTok.Encode(o.Prompt, p.CLIP.Cfg.MaxPosition)
 	c64 := make([]int64, len(cids))
 	for i, v := range cids {
@@ -186,9 +264,18 @@ func (p *Flux) Generate(o FluxOptions) (*FluxResult, error) {
 	if err != nil {
 		return nil, err
 	}
+	if p.opts.Sequential {
+		p.CLIP, p.T5 = nil, nil
+		releaseMemory()
+	}
+	if p.Transformer == nil {
+		if err := p.loadTransformer(); err != nil {
+			return nil, err
+		}
+	}
 
 	// Latents: (1, C, h, w) noise packed into (1, h/2·w/2, 4C) 2 × 2 patches.
-	cfg := p.Transformer.Cfg
+	cfg := p.cfg
 	C := cfg.InChannels / 4
 	h := 2 * (o.Height / (p.vaeScale * 2))
 	w := 2 * (o.Width / (p.vaeScale * 2))
@@ -270,6 +357,11 @@ func (p *Flux) Generate(o FluxOptions) (*FluxResult, error) {
 		if x, err = ops.Add(x, v); err != nil {
 			return nil, err
 		}
+	}
+
+	if p.opts.Sequential {
+		p.Transformer = nil
+		releaseMemory()
 	}
 
 	// Unpack to (1, C, h, w), undo the latent normalisation, decode.

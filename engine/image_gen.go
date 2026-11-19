@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image"
 	"os"
+	"path/filepath"
 	"time"
 
 	"light/device"
@@ -130,7 +131,10 @@ func GenerateImage(o ImageOptions) (*ImageResult, error) {
 			b := i2i.Image.Bounds()
 			w, h = b.Dx()/16*16, b.Dy()/16*16
 		}
-		p, err := diffusion.LoadFlux(o.Repo, d)
+		// FLUX.1's 12B transformer streams its blocks on CUDA (it does not
+		// fit a 16 GB card resident); the tiny / small ones load whole.
+		stream := s16 && device.IsCUDA(d) && fluxTransformerBytes(o.Repo) > 8<<30
+		p, err := diffusion.LoadFluxOpts(o.Repo, d, diffusion.FluxLoadOptions{Storage16: s16, Sequential: true, StreamBlocks: stream})
 		if err != nil {
 			return nil, err
 		}
@@ -275,4 +279,21 @@ func pipelineClass(repo string) (string, error) {
 		return "", err
 	}
 	return mi.Class, nil
+}
+
+// fluxTransformerBytes is the size of <repo>/transformer's safetensors on
+// disk (0 when unknown), to decide whether its blocks must be streamed.
+func fluxTransformerBytes(repo string) int64 {
+	dir, err := diffusion.Snapshot(repo)
+	if err != nil {
+		return 0
+	}
+	files, _ := filepath.Glob(filepath.Join(dir, "transformer", "*.safetensors"))
+	var n int64
+	for _, f := range files {
+		if st, err := os.Stat(f); err == nil {
+			n += st.Size()
+		}
+	}
+	return n
 }

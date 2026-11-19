@@ -46,7 +46,41 @@ type FluxTransformer struct {
 	Single               []*fluxSingleBlock
 	NormOut, ProjOut     *nn.Linear
 	ones, zeros          *tensor.Tensor // LayerNorm without affine
+	stream               *fluxStream    // nil: Double / Single are resident
 }
+
+// fluxStream is the streamed form of the blocks (FluxTransformerLoadOptions.
+// Stream): the checkpoint stays memory-mapped on the host and each block is
+// built on the device right before it runs, the next one uploading in the
+// background, so the device holds Slots blocks instead of all of them.
+type fluxStream struct {
+	hf     map[string]*tensor.Tensor
+	dev    device.Device
+	wdt    dtype.DType // block Linear weight storage (nn.WeightStorage at load)
+	mixed  bool
+	double *nn.ExpertCache[*fluxDoubleBlock]
+	single *nn.ExpertCache[*fluxSingleBlock]
+	// OnBlock, when set, runs on each freshly built block (LoRA, hooks).
+	OnDouble func(i int, b *fluxDoubleBlock) error
+	OnSingle func(i int, b *fluxSingleBlock) error
+}
+
+// FluxTransformerLoadOptions adjust LoadFluxTransformerOpts.
+type FluxTransformerLoadOptions struct {
+	// Stream keeps the double / single blocks out of device memory: the
+	// checkpoint stays mapped on the host and every forward pass uploads
+	// each block right before it runs (Slots at a time, the next one in the
+	// background). A 12B FLUX.1 then needs ~1.5 GB of device memory for its
+	// blocks instead of 24, at the cost of reading the checkpoint once per
+	// step. The embedders and output layers stay resident.
+	Stream bool
+	// Slots is how many blocks stay on the device at once (default 2: the
+	// running one and the next).
+	Slots int
+}
+
+// Streamed reports whether the blocks are streamed per forward pass.
+func (m *FluxTransformer) Streamed() bool { return m.stream != nil }
 
 type fluxAttn struct {
 	Q, K, V      *nn.Linear
@@ -101,9 +135,6 @@ func NewFluxTransformer(cfg FluxConfig, dev device.Device) (*FluxTransformer, er
 		n, err = nn.NewRMSNormWithDType(cfg.HeadDim, 1e-6, dtype.F32, dev)
 		return n
 	}
-	attn := func() fluxAttn {
-		return fluxAttn{Q: lin(D, D), K: lin(D, D), V: lin(D, D), NormQ: rms(), NormK: rms()}
-	}
 	m := &FluxTransformer{Cfg: cfg,
 		XEmbed: lin(cfg.InChannels*cfg.PatchSize*cfg.PatchSize, D), ContextEmbed: lin(cfg.JointDim, D),
 		TimeL1: lin(256, D), TimeL2: lin(D, D), TextL1: lin(cfg.PooledDim, D), TextL2: lin(D, D),
@@ -112,14 +143,10 @@ func NewFluxTransformer(cfg FluxConfig, dev device.Device) (*FluxTransformer, er
 		m.GuideL1, m.GuideL2 = lin(256, D), lin(D, D)
 	}
 	for range cfg.NumLayers {
-		m.Double = append(m.Double, &fluxDoubleBlock{
-			Norm1: lin(D, 6*D), Norm1Ctx: lin(D, 6*D), Img: attn(), Ctx: attn(),
-			Out: lin(D, D), CtxOut: lin(D, D),
-			FF1: lin(D, 4*D), FF2: lin(4*D, D), CtxFF1: lin(D, 4*D), CtxFF2: lin(4*D, D)})
+		m.Double = append(m.Double, newFluxDouble(D, lin, rms))
 	}
 	for range cfg.NumSingleLayers {
-		m.Single = append(m.Single, &fluxSingleBlock{Norm: lin(D, 3*D), Attn: attn(),
-			ProjMLP: lin(D, 4*D), ProjOut: lin(5*D, D)})
+		m.Single = append(m.Single, newFluxSingle(D, lin, rms))
 	}
 	if err != nil {
 		return nil, err
@@ -131,6 +158,54 @@ func NewFluxTransformer(cfg FluxConfig, dev device.Device) (*FluxTransformer, er
 		return nil, err
 	}
 	return m, nil
+}
+
+func newFluxDouble(D int, lin func(in, out int) *nn.Linear, rms func() *nn.RMSNorm) *fluxDoubleBlock {
+	attn := func() fluxAttn {
+		return fluxAttn{Q: lin(D, D), K: lin(D, D), V: lin(D, D), NormQ: rms(), NormK: rms()}
+	}
+	return &fluxDoubleBlock{
+		Norm1: lin(D, 6*D), Norm1Ctx: lin(D, 6*D), Img: attn(), Ctx: attn(),
+		Out: lin(D, D), CtxOut: lin(D, D),
+		FF1: lin(D, 4*D), FF2: lin(4*D, D), CtxFF1: lin(D, 4*D), CtxFF2: lin(4*D, D)}
+}
+
+func newFluxSingle(D int, lin func(in, out int) *nn.Linear, rms func() *nn.RMSNorm) *fluxSingleBlock {
+	return &fluxSingleBlock{Norm: lin(D, 3*D),
+		Attn:    fluxAttn{Q: lin(D, D), K: lin(D, D), V: lin(D, D), NormQ: rms(), NormK: rms()},
+		ProjMLP: lin(D, 4*D), ProjOut: lin(5*D, D)}
+}
+
+// blockBuilders are constructors for one streamed block at the weight
+// storage recorded at load time; the first error sticks in *err.
+func (s *fluxStream) blockBuilders(headDim int, err *error) (func(in, out int) *nn.Linear, func() *nn.RMSNorm) {
+	lin := func(in, out int) *nn.Linear {
+		if *err != nil {
+			return nil
+		}
+		dt := s.wdt
+		if in%2 != 0 {
+			dt = dtype.F32
+		}
+		l, e := nn.NewLinearUninit(in, out, true, dt, s.dev)
+		if e != nil {
+			*err = e
+			return nil
+		}
+		l.Mixed16 = s.mixed && dt != dtype.F32
+		return l
+	}
+	rms := func() *nn.RMSNorm {
+		if *err != nil {
+			return nil
+		}
+		n, e := nn.NewRMSNormWithDType(headDim, 1e-6, dtype.F32, s.dev)
+		if e != nil {
+			*err = e
+		}
+		return n
+	}
+	return lin, rms
 }
 
 // timestepEmbedding is diffusers' get_timestep_embedding(t, 256,
@@ -472,19 +547,41 @@ func (m *FluxTransformer) Forward(in FluxInputs) (*tensor.Tensor, error) {
 		return nil, err
 	}
 
-	for i, b := range m.Double {
-		if x, ctx, err = m.doubleBlock(b, x, ctx, stemb, cos, sin); err != nil {
-			return nil, fmt.Errorf("flux: double block %d: %w", i, err)
+	if m.stream != nil {
+		err = m.stream.double.Each(seq(m.Cfg.NumLayers), func(i int, b *fluxDoubleBlock) error {
+			x, ctx, err = m.doubleBlock(b, x, ctx, stemb, cos, sin)
+			return err
+		})
+	} else {
+		for i, b := range m.Double {
+			if x, ctx, err = m.doubleBlock(b, x, ctx, stemb, cos, sin); err != nil {
+				err = fmt.Errorf("flux: double block %d: %w", i, err)
+				break
+			}
 		}
+	}
+	if err != nil {
+		return nil, err
 	}
 	h, err := ops.Concat([]*tensor.Tensor{ctx, x}, 1)
 	if err != nil {
 		return nil, err
 	}
-	for i, b := range m.Single {
-		if h, err = m.singleBlock(b, h, stemb, cos, sin); err != nil {
-			return nil, fmt.Errorf("flux: single block %d: %w", i, err)
+	if m.stream != nil {
+		err = m.stream.single.Each(seq(m.Cfg.NumSingleLayers), func(i int, b *fluxSingleBlock) error {
+			h, err = m.singleBlock(b, h, stemb, cos, sin)
+			return err
+		})
+	} else {
+		for i, b := range m.Single {
+			if h, err = m.singleBlock(b, h, stemb, cos, sin); err != nil {
+				err = fmt.Errorf("flux: single block %d: %w", i, err)
+				break
+			}
 		}
+	}
+	if err != nil {
+		return nil, err
 	}
 	if x, err = h.Narrow(1, St, h.Dim(1)-St); err != nil {
 		return nil, err
@@ -631,6 +728,20 @@ func (m *FluxTransformer) singleBlock(b *fluxSingleBlock, h, stemb, cos, sin *te
 // directory holding config.json and its safetensors (a pipeline's
 // `transformer/` folder) at F32 on dev.
 func LoadFluxTransformer(dir string, dev device.Device) (*FluxTransformer, error) {
+	return LoadFluxTransformerOpts(dir, dev, FluxTransformerLoadOptions{})
+}
+
+// seq is 0 .. n-1.
+func seq(n int) []int {
+	s := make([]int, n)
+	for i := range s {
+		s[i] = i
+	}
+	return s
+}
+
+// LoadFluxTransformerOpts is LoadFluxTransformer with options.
+func LoadFluxTransformerOpts(dir string, dev device.Device, o FluxTransformerLoadOptions) (*FluxTransformer, error) {
 	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
 	if err != nil {
 		return nil, err
@@ -643,10 +754,15 @@ func LoadFluxTransformer(dir string, dev device.Device) (*FluxTransformer, error
 	if err != nil {
 		return nil, err
 	}
+	full := cfg
+	if o.Stream { // the blocks are built per forward pass instead
+		cfg.NumLayers, cfg.NumSingleLayers = 0, 0
+	}
 	m, err := NewFluxTransformer(cfg, dev)
 	if err != nil {
 		return nil, err
 	}
+	m.Cfg = full
 	var lerr error
 	lin := func(l *nn.Linear, name string) {
 		if lerr == nil {
@@ -672,6 +788,98 @@ func LoadFluxTransformer(dir string, dev device.Device) (*FluxTransformer, error
 	lin(m.TextL1, "time_text_embed.text_embedder.linear_1")
 	lin(m.TextL2, "time_text_embed.text_embedder.linear_2")
 	for i, b := range m.Double {
+		loadFluxDouble(b, i, lin, norm)
+	}
+	for i, b := range m.Single {
+		loadFluxSingle(b, i, lin, norm)
+	}
+	lin(m.NormOut, "norm_out.linear")
+	lin(m.ProjOut, "proj_out")
+	if lerr != nil {
+		return nil, fmt.Errorf("LoadFluxTransformer: %w", lerr)
+	}
+	if o.Stream {
+		if err := m.streamBlocks(hf, dev, o.Slots); err != nil {
+			return nil, err
+		}
+	}
+	return m, nil
+}
+
+// streamBlocks sets the transformer up to build its blocks from hf on
+// demand (FluxTransformerLoadOptions.Stream).
+func (m *FluxTransformer) streamBlocks(hf map[string]*tensor.Tensor, dev device.Device, slots int) error {
+	if slots <= 0 {
+		slots = 2
+	}
+	D := m.Cfg.inner()
+	s := &fluxStream{hf: hf, dev: dev}
+	s.wdt, s.mixed = nn.WeightStorage(D)
+	build := func(f func(lin func(*nn.Linear, string), norm func(*nn.RMSNorm, string))) error {
+		var lerr error
+		lin := func(l *nn.Linear, name string) {
+			if lerr == nil {
+				lerr = copyExactCast(l.W, hf, name+".weight")
+			}
+			if lerr == nil {
+				lerr = copyExactCast(l.B, hf, name+".bias")
+			}
+		}
+		norm := func(n *nn.RMSNorm, name string) {
+			if lerr == nil {
+				lerr = copyExactCast(n.Weight, hf, name+".weight")
+			}
+		}
+		f(lin, norm)
+		return lerr
+	}
+	var err error
+	s.double, err = nn.NewExpertCache(slots, func(i int) (*fluxDoubleBlock, error) {
+		var cerr error
+		lin, rms := s.blockBuilders(m.Cfg.HeadDim, &cerr)
+		b := newFluxDouble(D, lin, rms)
+		if cerr != nil {
+			return nil, cerr
+		}
+		if err := build(func(lin func(*nn.Linear, string), norm func(*nn.RMSNorm, string)) { loadFluxDouble(b, i, lin, norm) }); err != nil {
+			return nil, fmt.Errorf("flux: double block %d: %w", i, err)
+		}
+		if s.OnDouble != nil {
+			if err := s.OnDouble(i, b); err != nil {
+				return nil, err
+			}
+		}
+		return b, nil
+	})
+	if err != nil {
+		return err
+	}
+	s.single, err = nn.NewExpertCache(slots, func(i int) (*fluxSingleBlock, error) {
+		var cerr error
+		lin, rms := s.blockBuilders(m.Cfg.HeadDim, &cerr)
+		b := newFluxSingle(D, lin, rms)
+		if cerr != nil {
+			return nil, cerr
+		}
+		if err := build(func(lin func(*nn.Linear, string), norm func(*nn.RMSNorm, string)) { loadFluxSingle(b, i, lin, norm) }); err != nil {
+			return nil, fmt.Errorf("flux: single block %d: %w", i, err)
+		}
+		if s.OnSingle != nil {
+			if err := s.OnSingle(i, b); err != nil {
+				return nil, err
+			}
+		}
+		return b, nil
+	})
+	if err != nil {
+		return err
+	}
+	m.stream = s
+	return nil
+}
+
+func loadFluxDouble(b *fluxDoubleBlock, i int, lin func(*nn.Linear, string), norm func(*nn.RMSNorm, string)) {
+	{
 		p := fmt.Sprintf("transformer_blocks.%d.", i)
 		lin(b.Norm1, p+"norm1.linear")
 		lin(b.Norm1Ctx, p+"norm1_context.linear")
@@ -692,7 +900,10 @@ func LoadFluxTransformer(dir string, dev device.Device) (*FluxTransformer, error
 		lin(b.CtxFF1, p+"ff_context.net.0.proj")
 		lin(b.CtxFF2, p+"ff_context.net.2")
 	}
-	for i, b := range m.Single {
+}
+
+func loadFluxSingle(b *fluxSingleBlock, i int, lin func(*nn.Linear, string), norm func(*nn.RMSNorm, string)) {
+	{
 		p := fmt.Sprintf("single_transformer_blocks.%d.", i)
 		lin(b.Norm, p+"norm.linear")
 		lin(b.Attn.Q, p+"attn.to_q")
@@ -703,10 +914,4 @@ func LoadFluxTransformer(dir string, dev device.Device) (*FluxTransformer, error
 		lin(b.ProjMLP, p+"proj_mlp")
 		lin(b.ProjOut, p+"proj_out")
 	}
-	lin(m.NormOut, "norm_out.linear")
-	lin(m.ProjOut, "proj_out")
-	if lerr != nil {
-		return nil, fmt.Errorf("LoadFluxTransformer: %w", lerr)
-	}
-	return m, nil
 }

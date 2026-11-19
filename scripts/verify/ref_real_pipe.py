@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""Real-weight end-to-end reference of Z-Image-Turbo or FLUX.2 klein 4B
-(diffusers, BF16 on CUDA with CPU offload) for diffusion's *RealCUDA tests.
-    .venv/bin/python scripts/verify/ref_real_pipe.py zimage|klein <out.json> [size] [steps]
+"""Real-weight end-to-end reference of Z-Image-Turbo, FLUX.2 klein 4B or
+FLUX.1 (schnell / dev; diffusers, BF16 on CUDA with CPU offload) for
+diffusion's *RealCUDA tests.
+    .venv/bin/python scripts/verify/ref_real_pipe.py zimage|klein|schnell|flux1dev <out.json> [size] [steps]
+FLUX.1's 12B transformer exceeds a 16 GB card, so it runs with sequential
+CPU offload (each module uploaded for its forward); the weights stay
+memory-mapped on the host.
 Runs the cached pipeline on a fixed prompt with seeded initial noise, which
 it captures by patching the pipeline module's randn_tensor (so the JSON
 carries the exact latents and their shape, as the tiny references do), and
@@ -41,8 +45,18 @@ elif which == "klein":
     m.randn_tensor = patched_randn
     pipe.enable_model_cpu_offload()
     img = pipe(prompt=prompt, height=size, width=size, num_inference_steps=steps, output_type="pt").images
+elif which in ("schnell", "flux1dev"):
+    from diffusers import FluxPipeline
+    import diffusers.pipelines.flux.pipeline_flux as m
+    repo = "black-forest-labs/FLUX.1-schnell" if which == "schnell" else "black-forest-labs/FLUX.1-dev"
+    guidance = 0.0 if which == "schnell" else 3.5
+    pipe = FluxPipeline.from_pretrained(repo, torch_dtype=torch.bfloat16)
+    m.randn_tensor = patched_randn
+    pipe.enable_sequential_cpu_offload()
+    img = pipe(prompt=prompt, height=size, width=size, num_inference_steps=steps, guidance_scale=guidance,
+               max_sequence_length=256 if which == "schnell" else 512, output_type="pt").images
 else:
-    sys.exit("zimage or klein")
+    sys.exit("zimage, klein, schnell or flux1dev")
 
 lat = captured["latents"]
 img = img[0].float().clamp(0, 1).cpu()

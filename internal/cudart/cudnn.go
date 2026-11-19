@@ -13,9 +13,13 @@ import "C"
 
 import (
 	"fmt"
+	"os"
 	"sync"
 	"unsafe"
 )
+
+// convTF32 lets F32 convolutions use TF32 tensor cores (LIGHT_CONV_TF32=1).
+var convTF32 = os.Getenv("LIGHT_CONV_TF32") == "1"
 
 // DnnHandle wraps a cudnnHandle_t. One per device, cached for the process
 // lifetime. cuDNN handles are heavyweight (tens of MB of allocations on
@@ -157,13 +161,18 @@ func Conv2DForward(
 	); rc != C.CUDNN_STATUS_SUCCESS {
 		return cudnnErr("SetConvolution2dDescriptor", rc)
 	}
-	if dt == DnnBF16 {
+	math := C.cudnnMathType_t(C.CUDNN_FMA_MATH)
+	if dt == DnnBF16 || convTF32 {
 		// Allow tensor-core math for BF16 conv. cuDNN may still pick a
 		// non-tensor-core path when the shape doesn't fit; this is just a
 		// permission flag.
-		if rc := C.cudnnSetConvolutionMathType(convDesc, C.CUDNN_TENSOR_OP_MATH); rc != C.CUDNN_STATUS_SUCCESS {
-			return cudnnErr("SetConvolutionMathType", rc)
-		}
+		math = C.CUDNN_TENSOR_OP_MATH
+	}
+	// F32 convs compute in true F32: cuDNN's default math on Ampere and
+	// later permits TF32 (10-bit mantissa inputs), which puts a diffusion
+	// VAE ~1e-3 off its F32 reference. LIGHT_CONV_TF32=1 allows it.
+	if rc := C.cudnnSetConvolutionMathType(convDesc, math); rc != C.CUDNN_STATUS_SUCCESS {
+		return cudnnErr("SetConvolutionMathType", rc)
 	}
 
 	// Pick the fastest algorithm cuDNN's heuristic returns. Asking for the
