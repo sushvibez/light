@@ -78,12 +78,12 @@ func splitRows(t *tensor.Tensor, sizes []int) ([]*tensor.Tensor, error) {
 	for _, n := range sizes {
 		total += n
 	}
-	if t.Rank() != 2 || t.Dim(0) != total {
+	if t.Rank() < 1 || t.Dim(0) != total {
 		return nil, fmt.Errorf("split %v into rows %v", t.Shape(), sizes)
 	}
 	out := make([]*tensor.Tensor, len(sizes))
 	off := 0
-	if !t.DType().IsQuantized() {
+	if !t.DType().IsQuantized() || t.Rank() == 1 { // biases are never quantized
 		for i, n := range sizes {
 			v, err := t.Narrow(0, off, n)
 			if err != nil {
