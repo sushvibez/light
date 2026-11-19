@@ -101,6 +101,12 @@ func loadRealRef(t *testing.T, env string) (realRef, device.Device) {
 }
 
 func compareReal(t *testing.T, got *tensor.Tensor, ref realRef) {
+	compareRealTol(t, got, ref, 0.03)
+}
+
+// compareRealTol is compareReal with its own bar on the mean pixel
+// difference (a 4-bit transformer sits above the 16-bit one).
+func compareRealTol(t *testing.T, got *tensor.Tensor, ref realRef, tol float64) {
 	t.Helper()
 	c, err := got.To(device.CPU())
 	if err != nil {
@@ -128,8 +134,8 @@ func compareReal(t *testing.T, got *tensor.Tensor, ref realRef) {
 			t.Error(err)
 		}
 	}
-	if mean > 0.03 {
-		t.Errorf("mean pixel difference %.4f > 0.03", mean)
+	if mean > tol {
+		t.Errorf("mean pixel difference %.4f > %.2f", mean, tol)
 	}
 }
 
@@ -243,7 +249,11 @@ func TestFlux1RealCUDA(t *testing.T) {
 	if ref.LatentsStep0 != nil && step0 != nil {
 		stats(t, "latents after step 0", step0, ref.LatentsStep0)
 	}
-	compareReal(t, res.Image, ref)
+	tol := 0.03
+	if strings.HasSuffix(strings.ToLower(os.Getenv("LIGHT_FLUX1_TRANSFORMER")), ".gguf") {
+		tol = 0.05 // 4-bit weights: 0.033 for Q4_K_S, the same scene
+	}
+	compareRealTol(t, res.Image, ref, tol)
 }
 
 // The text encoders alone against the reference's prompt_embeds / pooled,
