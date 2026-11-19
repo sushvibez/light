@@ -235,10 +235,14 @@ for g in "${SEL[@]}"; do
 		mkdir -p "$LOGS/flux2dev"
 		fetch black-forest-labs/FLUX.2-dev "model_index.json" "scheduler/*" "tokenizer/*" "text_encoder/*" "transformer/*" "vae/*" || { SUMMARY+=("$g FAIL fetch"); continue; }
 		LD_LIBRARY_PATH=$ORIG_LD_LIBRARY_PATH python3 scripts/verify/ref_real_pipe.py flux2dev "$LOGS/flux2dev/flux2dev.json" 512 8 2>&1 | tee "$LOGS/$STAMP-flux2dev-ref.log" | tail -3
-		LIGHT_KLEIN_REAL_REF="$LOGS/flux2dev/flux2dev.json" LIGHT_REAL_SAVE_DIR="$LOGS/flux2dev" run flux2dev-bf16 ./diffusion 'TestFlux2KleinRealCUDA'
+		# On a 40 GB card the Mistral encoder runs on the CPU and the BF16
+		# transformer streams; FP8 (32 GB) sits resident. (80 GB: all resident.)
+		vram=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)
+		small=; [ "${vram:-0}" -lt 70000 ] && small=1
+		LIGHT_FLUX2_ENCODER_CPU=$small LIGHT_FLUX2_STREAM=$small LIGHT_KLEIN_REAL_REF="$LOGS/flux2dev/flux2dev.json" LIGHT_REAL_SAVE_DIR="$LOGS/flux2dev" run flux2dev-bf16 ./diffusion 'TestFlux2KleinRealCUDA'
 		LD_LIBRARY_PATH=$ORIG_LD_LIBRARY_PATH python3 scripts/verify/make_flux2_fp8_real.py black-forest-labs/FLUX.2-dev /content/flux2-dev-fp8 2>&1 | tail -1
 		mkdir -p "$LOGS/flux2dev/fp8"
-		LIGHT_KLEIN_REAL_REF="$LOGS/flux2dev/flux2dev.json" LIGHT_REAL_SAVE_DIR="$LOGS/flux2dev/fp8" LIGHT_FLUX2_TRANSFORMER=/content/flux2-dev-fp8 run flux2dev-fp8 ./diffusion 'TestFlux2KleinRealCUDA'
+		LIGHT_FLUX2_ENCODER_CPU=$small LIGHT_KLEIN_REAL_REF="$LOGS/flux2dev/flux2dev.json" LIGHT_REAL_SAVE_DIR="$LOGS/flux2dev/fp8" LIGHT_FLUX2_TRANSFORMER=/content/flux2-dev-fp8 run flux2dev-fp8 ./diffusion 'TestFlux2KleinRealCUDA'
 		drop black-forest-labs/FLUX.2-dev
 		;;
 	trellis)

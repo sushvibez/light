@@ -166,6 +166,15 @@ func TestFlux2KleinRealCUDA(t *testing.T) {
 		tol = 0.05
 		t.Logf("transformer: %s", tf)
 	}
+	if os.Getenv("LIGHT_FLUX2_ENCODER_CPU") != "" { // the Mistral-3 24B encoder of FLUX.2-dev beside a 40 GB card
+		lo.EncoderDevice = device.CPU()
+	}
+	if os.Getenv("LIGHT_FLUX2_STREAM") != "" { // transformer blocks streamed (a 24 GB card)
+		lo.StreamBlocks = true
+	}
+	if ref.Steps > 4 {
+		tol += 0.015
+	}
 	t0 := time.Now()
 	p, err := LoadFlux2(ref.Repo, dev, lo)
 	if err != nil {

@@ -53,7 +53,7 @@ elif which == "flux2dev":
     repo, guidance = "black-forest-labs/FLUX.2-dev", 4.0
     pipe = Flux2Pipeline.from_pretrained(repo, torch_dtype=torch.bfloat16)
     m.randn_tensor = patched_randn
-    pipe.enable_model_cpu_offload()
+    pipe.enable_sequential_cpu_offload()  # the 64 GB transformer exceeds a 40 GB card
     img = pipe(prompt=prompt, height=size, width=size, num_inference_steps=steps, guidance_scale=guidance, output_type="pt").images
 elif which in ("schnell", "flux1dev"):
     from diffusers import FluxPipeline
