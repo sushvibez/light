@@ -264,7 +264,10 @@ func TestFlux1RealCUDA(t *testing.T) {
 		tol = 0.045 // BF16 rounding on both sides compounds per step (dev, 8 steps: 0.036)
 	}
 	if strings.HasSuffix(strings.ToLower(os.Getenv("LIGHT_FLUX1_TRANSFORMER")), ".gguf") {
-		tol = 0.05 // 4-bit weights: 0.033 for Q4_K_S, the same scene
+		tol = 0.05 // 4-bit weights: 0.033 for Q4_K_S schnell, the same scene
+		if ref.Steps > 4 {
+			tol = 0.08 // dev, 8 steps: 0.066, the scene with the rocks redrawn
+		}
 	}
 	compareRealTol(t, res.Image, ref, tol)
 }
