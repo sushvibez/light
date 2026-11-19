@@ -9,6 +9,8 @@ package cudart
 #include <cuda_runtime.h>
 #include <cuda.h>
 #include <stdlib.h>
+#include <stdint.h>
+static void light_store_i64(uintptr_t p, int64_t v) { *(int64_t *)p = v; }
 */
 import "C"
 
@@ -108,6 +110,10 @@ func MallocHost(bytes uintptr) (uintptr, error) {
 	}
 	return uintptr(ptr), nil
 }
+
+// StoreHostInt64 writes v to pinned host memory at p (from MallocHost),
+// done in C so no Go code turns an integer address into a pointer.
+func StoreHostInt64(p uintptr, v int64) { C.light_store_i64(C.uintptr_t(p), C.int64_t(v)) }
 
 // FreeHost releases pinned host memory from MallocHost.
 func FreeHost(ptr uintptr) error {

@@ -39,6 +39,14 @@ type Qwen35Config struct {
 	// the q / k head repeat differs.
 	VHeadsTiled bool
 
+	// MoE (qwen3_5_moe): each layer's MLP is NumExperts routed SwiGLU
+	// experts of width MoEIntermediate (softmax, top MoETopK, renormalised)
+	// plus a shared expert of width IntermediateSize scaled by
+	// sigmoid(shared_expert_gate). NumExperts 0 is the dense MLP.
+	NumExperts, MoETopK, MoEIntermediate int
+	// ExpertSlots > 0 streams the routed experts (LIGHT_EXPERT_SLOTS).
+	ExpertSlots int
+
 	RmsEps      float64
 	MaxPosition int
 	TieEmbed    bool
@@ -50,6 +58,8 @@ type Qwen35Config struct {
 	// fp8Block is the weight_block_size of a fine-grained FP8 checkpoint
 	// (zero otherwise).
 	fp8Block [2]int
+	// mlx is the affine quantization of an MLX checkpoint (nil otherwise).
+	mlx *mlxQuant
 }
 
 func (c Qwen35Config) activationDType() dtype.DType {
@@ -87,7 +97,10 @@ type qwen35Block struct {
 	DtBias                        *tensor.Tensor // (Hv,) F32
 	GNorm                         *nn.RMSNorm    // gated output norm over dv, plain weight, F32
 
-	Gate, Up, Down *nn.Linear
+	Gate, Up, Down *nn.Linear // the MLP, or the MoE's shared expert
+
+	MoE        *nn.SparseMoE // routed experts (MoE configs)
+	SharedGate *nn.Linear    // (1, D) shared-expert gate
 }
 
 // Qwen35 is the Qwen3.5 text model. It implements CausalLM; its KVCache
@@ -201,6 +214,20 @@ func NewQwen35(cfg Qwen35Config, dev device.Device) (*Qwen35, error) {
 			b.KNorm, err = norm(HD, act)
 			push(err)
 		}
+		if cfg.NumExperts > 0 {
+			E, k := cfg.NumExperts, cfg.MoETopK
+			if cfg.lazyWeights {
+				b.MoE, err = nn.NewSparseMoELazy(D, E, k, true, dev)
+			} else {
+				b.MoE, err = nn.NewSparseMoEUninit(D, cfg.MoEIntermediate, E, k, true, act, dev)
+			}
+			push(err)
+			if b.MoE != nil {
+				b.MoE.StreamSlots = cfg.ExpertSlots
+			}
+			b.SharedGate, err = lin(D, 1)
+			push(err)
+		}
 		b.Gate, err = lin(D, IM)
 		push(err)
 		b.Up, err = lin(D, IM)
@@ -242,27 +269,64 @@ func (m *Qwen35) VocabSize() int     { return m.Cfg.VocabSize }
 func (m *Qwen35) MaxContext() int    { return m.Cfg.MaxPosition }
 func (m *Qwen35) SlidingWindow() int { return 0 }
 
-// Parameters lists every weight tensor (the tied head counted once).
+// Parameters lists every dense weight tensor (the tied head counted once;
+// 4-bit and streamed weights are not tensors of the model).
 func (m *Qwen35) Parameters() []*tensor.Tensor {
 	ps := []*tensor.Tensor{m.TokenEmb.Weight, m.FinalNorm.Weight}
-	if !m.Cfg.TieEmbed {
-		ps = append(ps, m.LMHead.W)
+	for _, l := range m.linears() {
+		if l.W != nil {
+			ps = append(ps, l.W)
+		}
 	}
 	for _, b := range m.Blocks {
-		ps = append(ps, b.InNorm.Weight, b.PostNorm.Weight, b.Gate.W, b.Up.W, b.Down.W)
+		ps = append(ps, b.InNorm.Weight, b.PostNorm.Weight)
 		if b.linear {
-			ps = append(ps, b.InQKV.W, b.InZ.W, b.InB.W, b.InA.W, b.OutProj.W, b.ConvW, b.NegA, b.DtBias, b.GNorm.Weight)
+			ps = append(ps, b.ConvW, b.NegA, b.DtBias, b.GNorm.Weight)
 		} else {
-			ps = append(ps, b.QProj.W, b.KProj.W, b.VProj.W, b.OProj.W, b.QNorm.Weight, b.KNorm.Weight)
+			ps = append(ps, b.QNorm.Weight, b.KNorm.Weight)
+		}
+		if b.MoE != nil && b.MoE.GateUp != nil {
+			ps = append(ps, b.MoE.GateUp, b.MoE.Down)
 		}
 	}
 	return ps
 }
 
+// linears lists the model's Linears (the tied head excluded).
+func (m *Qwen35) linears() []*nn.Linear {
+	var ls []*nn.Linear
+	if !m.Cfg.TieEmbed {
+		ls = append(ls, m.LMHead)
+	}
+	for _, b := range m.Blocks {
+		ls = append(ls, b.Gate, b.Up, b.Down)
+		if b.linear {
+			ls = append(ls, b.InQKV, b.InZ, b.InB, b.InA, b.OutProj)
+		} else {
+			ls = append(ls, b.QProj, b.KProj, b.VProj, b.OProj)
+		}
+		if b.MoE != nil {
+			ls = append(ls, b.MoE.Gate, b.SharedGate)
+		}
+	}
+	return ls
+}
+
+// ParamCount counts weights in any storage (4-bit and streamed included).
 func (m *Qwen35) ParamCount() int {
 	n := 0
 	for _, p := range m.Parameters() {
 		n += p.Shape().NumElements()
+	}
+	for _, l := range m.linears() {
+		if l.W4 != nil {
+			n += l.W4.N() * l.W4.K()
+		}
+	}
+	for _, b := range m.Blocks {
+		if b.MoE != nil && b.MoE.GateUp == nil {
+			n += 3 * m.Cfg.NumExperts * m.Cfg.MoEIntermediate * m.Cfg.HiddenSize
+		}
 	}
 	return n
 }
@@ -352,7 +416,37 @@ func (m *Qwen35) runBlock(blk *qwen35Block, x *tensor.Tensor, B, T, prior int, p
 	if h, err = blk.PostNorm.Forward(x); err != nil {
 		return nil, err
 	}
+	mlp, err := m.mlp(blk, h)
+	if err != nil {
+		return nil, err
+	}
+	if blk.MoE != nil {
+		// Routed experts plus the gated shared expert.
+		sg, err := blk.SharedGate.Forward(h)
+		if err != nil {
+			return nil, err
+		}
+		if sg, err = ops.Sigmoid(sg); err != nil {
+			return nil, err
+		}
+		if mlp, err = ops.Mul(mlp, sg); err != nil {
+			return nil, err
+		}
+		routed, err := blk.MoE.Forward(h)
+		if err != nil {
+			return nil, err
+		}
+		if mlp, err = ops.Add(routed, mlp); err != nil {
+			return nil, err
+		}
+	}
+	return ops.Add(x, mlp)
+}
+
+// mlp is the SwiGLU down(silu(gate(h)) · up(h)).
+func (m *Qwen35) mlp(blk *qwen35Block, h *tensor.Tensor) (*tensor.Tensor, error) {
 	var gate *tensor.Tensor
+	var err error
 	if fusedRow(h, blk.Gate, blk.Up) {
 		// Decode: gate, up, SiLU and the product in one launch.
 		if gate, err = ops.GatedLinear(h, blk.Gate.W, blk.Up.W, false); err != nil {
@@ -373,11 +467,7 @@ func (m *Qwen35) runBlock(blk *qwen35Block, x *tensor.Tensor, B, T, prior int, p
 			return nil, err
 		}
 	}
-	mlp, err := blk.Down.Forward(gate)
-	if err != nil {
-		return nil, err
-	}
-	return ops.Add(x, mlp)
+	return blk.Down.Forward(gate)
 }
 
 // attention is gated full attention (transformers' Qwen3NextAttention):
@@ -730,6 +820,11 @@ var _ CausalLM = (*Qwen35)(nil)
 func (m *Qwen35) DecodeGraphOK() error {
 	if m.mrope != nil {
 		return fmt.Errorf("multimodal rope tables in use")
+	}
+	for i, b := range m.Blocks {
+		if b.MoE != nil && (b.MoE.GateUpQ4 != nil || b.MoE.Stream != nil) {
+			return fmt.Errorf("layer %d routes 4-bit / streamed experts on the host", i)
+		}
 	}
 	return nil
 }

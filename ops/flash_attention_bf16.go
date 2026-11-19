@@ -61,6 +61,38 @@ func FlashAttentionBF16(q, k, v *tensor.Tensor, causal bool) (*tensor.Tensor, er
 // layout: q, k, v are (B, S, NH, 128) BF16 and the result is (B, S, NH, 128)
 // F32, with no permute copies (the kernel strides over the heads).
 func FlashAttentionBF16SeqMajor(q, k, v *tensor.Tensor, causal bool) (*tensor.Tensor, error) {
+	return flashBF16SeqMajor(q, k, v, causal, dtype.BF16, dtype.F32)
+}
+
+// FlashAttentionF16SeqMajor is FlashAttentionBF16SeqMajor on FP16 tensor
+// cores: F16 q (B, S, NH, 64) and k, v (B, Sk, NH, 64) (Sk may differ:
+// cross attention), the result (B, S, NH, 64) rounded to F16 (for an F16
+// GEMM next). FP16 keeps 3 more mantissa bits than BF16 for operands of a
+// known range (normalised q / k, probabilities).
+func FlashAttentionF16SeqMajor(q, k, v *tensor.Tensor, causal bool) (*tensor.Tensor, error) {
+	if !FlashAttentionF16OK(q, k, v) || (causal && q.Dim(1) != k.Dim(1)) {
+		return nil, fmt.Errorf("FlashAttentionF16SeqMajor: want F16 q (B, S, NH, 64), k, v (B, Sk, NH, 64) on one CUDA device, got %v %v / %v %v / %v %v",
+			q.Shape(), q.DType(), k.Shape(), k.DType(), v.Shape(), v.DType())
+	}
+	return flashBF16SeqMajor(q, k, v, causal, dtype.F16, dtype.F16)
+}
+
+// FlashAttentionF16OK reports whether FlashAttentionF16SeqMajor runs on
+// these operands.
+func FlashAttentionF16OK(q, k, v *tensor.Tensor) bool {
+	if q.Rank() != 4 || k.Rank() != 4 || !k.Shape().Equal(v.Shape()) || q.Dim(3) != 64 || k.Dim(3) != 64 ||
+		q.Dim(0) != k.Dim(0) || q.Dim(2) != k.Dim(2) {
+		return false
+	}
+	if q.DType() != dtype.F16 || k.DType() != dtype.F16 || v.DType() != dtype.F16 ||
+		!q.Device().SameAs(k.Device()) || !q.Device().SameAs(v.Device()) {
+		return false
+	}
+	_, err := registry.Lookup(registry.Key{Op: "flash_attention_bf16", Dev: q.Device().Kind(), DType: dtype.F16})
+	return err == nil
+}
+
+func flashBF16SeqMajor(q, k, v *tensor.Tensor, causal bool, inDT, outDT dtype.DType) (*tensor.Tensor, error) {
 	if q.Rank() != 4 {
 		return nil, fmt.Errorf("FlashAttentionBF16SeqMajor: want (B, S, NH, 128), got %v", q.Shape())
 	}
@@ -77,8 +109,8 @@ func FlashAttentionBF16SeqMajor(q, k, v *tensor.Tensor, causal bool) (*tensor.Te
 	if err != nil {
 		return nil, err
 	}
-	if !FlashAttentionBF16OK(pq, pk, pv) {
-		return nil, fmt.Errorf("FlashAttentionBF16SeqMajor: want (B, S, NH, 128) BF16 q, k, v on one CUDA device, got %v %v %v", q.Shape(), q.DType(), q.Device())
+	if inDT == dtype.BF16 && !flashOK(pq, pk, pv, inDT) {
+		return nil, fmt.Errorf("FlashAttentionBF16SeqMajor: want (B, S, NH, 64 or 128) %v q, k, v on one CUDA device, got %v %v %v", inDT, q.Shape(), q.DType(), q.Device())
 	}
 	var in [3]*tensor.Tensor
 	for i, t := range []*tensor.Tensor{q, k, v} {
@@ -86,11 +118,11 @@ func FlashAttentionBF16SeqMajor(q, k, v *tensor.Tensor, causal bool) (*tensor.Te
 			return nil, err
 		}
 	}
-	out, err := tensor.Empty(dtype.F32, q.Shape().Dims(), q.Device())
+	out, err := tensor.Empty(outDT, q.Shape().Dims(), q.Device())
 	if err != nil {
 		return nil, err
 	}
-	kern, err := registry.Lookup(registry.Key{Op: "flash_attention_bf16", Dev: q.Device().Kind(), DType: dtype.BF16})
+	kern, err := registry.Lookup(registry.Key{Op: "flash_attention_bf16", Dev: q.Device().Kind(), DType: inDT})
 	if err != nil {
 		return nil, err
 	}
@@ -107,16 +139,18 @@ func FlashAttentionBF16SeqMajor(q, k, v *tensor.Tensor, causal bool) (*tensor.Te
 // FlashAttentionBF16OK reports whether FlashAttentionBF16 runs on these
 // operands: rank-4 BF16 tensors of one shape with head dim 128, on a device
 // with the kernel.
-func FlashAttentionBF16OK(q, k, v *tensor.Tensor) bool {
-	if q.Rank() != 4 || !q.Shape().Equal(k.Shape()) || !q.Shape().Equal(v.Shape()) || q.Dim(3) != 128 {
+func FlashAttentionBF16OK(q, k, v *tensor.Tensor) bool { return flashOK(q, k, v, dtype.BF16) }
+
+func flashOK(q, k, v *tensor.Tensor, dt dtype.DType) bool {
+	if q.Rank() != 4 || !q.Shape().Equal(k.Shape()) || !q.Shape().Equal(v.Shape()) || (q.Dim(3) != 64 && q.Dim(3) != 128) {
 		return false
 	}
-	if q.DType() != dtype.BF16 || k.DType() != dtype.BF16 || v.DType() != dtype.BF16 {
+	if q.DType() != dt || k.DType() != dt || v.DType() != dt {
 		return false
 	}
 	if !q.Device().SameAs(k.Device()) || !q.Device().SameAs(v.Device()) {
 		return false
 	}
-	_, err := registry.Lookup(registry.Key{Op: "flash_attention_bf16", Dev: q.Device().Kind(), DType: dtype.BF16})
+	_, err := registry.Lookup(registry.Key{Op: "flash_attention_bf16", Dev: q.Device().Kind(), DType: dt})
 	return err == nil
 }

@@ -20,6 +20,20 @@ func Backward(root *tensor.Tensor, gradOutput *tensor.Tensor) error {
 		return fmt.Errorf("autograd.Backward: root is nil")
 	}
 	g := gradOutput
+	if g != nil {
+		if !g.Shape().Equal(root.Shape()) {
+			return fmt.Errorf("autograd.Backward: gradOutput shape %v does not match root shape %v",
+				g.Shape(), root.Shape())
+		}
+		if g.DType() != root.DType() {
+			return fmt.Errorf("autograd.Backward: gradOutput dtype %v does not match root dtype %v",
+				g.DType(), root.DType())
+		}
+		if !g.Device().SameAs(root.Device()) {
+			return fmt.Errorf("autograd.Backward: gradOutput device %v does not match root device %v",
+				g.Device(), root.Device())
+		}
+	}
 	if g == nil {
 		var err error
 		g, err = tensor.Ones(root.DType(), root.Shape().Dims(), root.Device())
@@ -58,6 +72,9 @@ func Backward(root *tensor.Tensor, gradOutput *tensor.Tensor) error {
 		outGrads := gradBuf[node]
 		if outGrads == nil {
 			continue
+		}
+		if err := node.ctx.checkVersions(); err != nil {
+			return fmt.Errorf("autograd %s: backward: %w", node.fn.Name(), err)
 		}
 		inputGrads, err := node.fn.Backward(node.ctx, outGrads)
 		if err != nil {

@@ -21,6 +21,7 @@ func GraphDestroy(uintptr) error                                 { return errNoC
 func MemcpyHtoDAsyncOn(uintptr, uintptr, uintptr, uintptr) error { return errNoCUDA }
 func MallocHost(uintptr) (uintptr, error)                        { return 0, errNoCUDA }
 func FreeHost(uintptr) error                                     { return errNoCUDA }
+func StoreHostInt64(uintptr, int64)                              {}
 func DeviceSynchronize() error                                   { return errNoCUDA }
 
 type GPUTime struct {

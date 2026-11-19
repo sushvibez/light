@@ -17,6 +17,11 @@ func softmaxKernel[T numericFloat](ctx *registry.Context) error {
 	a := ctx.Inputs[0]
 	out := ctx.Output
 	axis, _ := ctx.Attrs["axis"].(int)
+	if a.NumElements() == 0 {
+		// Empty tensor (possibly an empty softmax axis): the output has no
+		// elements, so there is nothing to normalise.
+		return nil
+	}
 
 	aS := asSlice[T](a)
 	outS := asSlice[T](out)

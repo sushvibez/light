@@ -66,7 +66,8 @@ func LoadEmbedder(spec Spec) (*Embedder, error) {
 	if strings.EqualFold(spec.DType, "f32") {
 		wdt = dtype.F32
 	}
-	m, err := models.LoadEmbeddingGemma2FromHF(spec.Repo, dev, wdt)
+	var m *models.EmbeddingGemma2
+	err = loadWeights(false, 0, func() (err error) { m, err = models.LoadEmbeddingGemma2FromHF(spec.Repo, dev, wdt); return })
 	if err != nil {
 		return nil, err
 	}
@@ -98,9 +99,19 @@ func (e *Embedder) Encode(text string) []int64 {
 	return ids
 }
 
+// ErrEmbedTooLarge is returned by EmbedLimit for a batch over its budget.
+var ErrEmbedTooLarge = errors.New("engine: embedding batch too large")
+
 // Embed returns one L2-normalised embedding per text and the total token
 // count. Texts are run as one padded batch.
 func (e *Embedder) Embed(texts []string) ([][]float32, int, error) {
+	return e.EmbedLimit(texts, 0)
+}
+
+// EmbedLimit is Embed that refuses (ErrEmbedTooLarge) a batch whose padded
+// size, texts × longest tokenized text, exceeds maxPadded (0: no limit),
+// before running the model.
+func (e *Embedder) EmbedLimit(texts []string, maxPadded int) ([][]float32, int, error) {
 	if len(texts) == 0 {
 		return nil, 0, errors.New("engine: no input")
 	}
@@ -114,6 +125,9 @@ func (e *Embedder) Embed(texts []string) ([][]float32, int, error) {
 		total += len(ids[i])
 	}
 	B := len(ids)
+	if maxPadded > 0 && B*T > maxPadded {
+		return nil, 0, fmt.Errorf("%w: %d inputs × %d tokens exceeds %d padded tokens", ErrEmbedTooLarge, B, T, maxPadded)
+	}
 	flat, keep := make([]int64, B*T), make([]int64, B*T)
 	for b, s := range ids {
 		copy(flat[b*T:], s)

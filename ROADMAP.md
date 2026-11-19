@@ -15,13 +15,13 @@ GPTQ / AWQ) is complete as of 2026-11-08 except for the items below.
 
 ## 1. Remaining inference roadmap
 
-1. **SDXL base** (desktop) — same primitives as SD 1.5 (CLIP, UNet2DCondition, VAE,
+1. **SDXL base** — done 2026-11-09 (desktop); same primitives as SD 1.5 (CLIP, UNet2DCondition, VAE,
    DDIM), with dual text encoders and a bigger UNet.
 2. **Flux on real weights / SD3** — the Flux pipeline (`diffusion.LoadFlux`) is
    verified end to end on a tiny checkpoint; FLUX.1-schnell (12B) still needs
    a real run (Colab, or w16 on a 32 GB host) and a CLI entry point. SD3
    (MMDiT with CLIP-L + CLIP-G + T5) reuses most of it.
-3. **INT8 W8A8 GEMM** (desktop) — `cublasGemmEx(CUBLAS_COMPUTE_32I)` for
+3. **INT8 W8A8 GEMM** — done 2026-11-09 (desktop, `ops.MatMulW8A8`); `cublasGemmEx(CUBLAS_COMPUTE_32I)` for
    SmoothQuant-style int8 weights × int8 activations; today int8 is
    per-column weights × F32 activations only (`ops.MatMulInt8`).
 
@@ -73,8 +73,7 @@ GPTQ / AWQ) is complete as of 2026-11-08 except for the items below.
   `light/pth` into the Nemotron loader.
 - Bigger sizes on bigger GPUs: Gemma 3 12B / 27B, Gemma 4 E4B / 12B / 31B
   (quantized path), Whisper beyond tiny.
-- Full-sequence diffusion LMs (LLaDA-8B, Dream-7B): SDAR's mask machinery with
-  block = whole sequence, plus a quantized path to fit 16 GB.
+- LLaDA-8B / Dream-7B (done, F32): a 16-bit or quantized path to fit 16 GB.
 - **TTS**: Kokoro-82M (StyleTTS2 decoder, needs a phonemizer) or Parler-TTS
   (Candle has it); EnCodec / SNAC codecs first, since both emit codec tokens.
 - Encoders: nomic-bert / modernbert (next on the encoder path), RoBERTa (BERT
@@ -107,37 +106,56 @@ GPTQ / AWQ) is complete as of 2026-11-08 except for the items below.
     RoI Align / RoI Pool.
   - Llama-2 7B (same loader as Llama-3; needs the checkpoint).
 
-## 3. Next models (2026-11-09, in order)
+## 3. Next models (2026-11-15, in order)
 
 From Hugging Face downloads / trending per category, weighed by what fits
 the laptop (31 GB RAM, Intel iGPU) and the desktop (16 GB GPU) and by what
 Light already has. Sizes are BF16 safetensors.
 
-1. **FLUX.2-klein-4B**: done (real weights on CPU, 512² in 383 s; WebGPU
-   blocked by iGPU memory, §4).
-2. **flux-3-image-klein**: text-to-image and editing done (tiny-verified).
+1. **Idol** (image → 3D Gaussians): done (L4, real weights), BiRefNet
+   background removal included; ~60 s per object on the L4 vs 55 s upstream
+   (attention-bound). Next: BiRefNet speed (25-150 s on CPU vs 15-22 s for
+   torch).
+2. **Large MoEs** (all tiny-verified 2026-11-15): GLM-5.3 Flash (truncated
+   real weights match; decode cache, DSA indexer done) — next engine chat;
+   DeepSeek-V4.1 Flash (decode cache, on-demand experts, truncated real-weight
+   check done); Kimi K3.1 (decode cache done) — packed MXFP4 (real
+   ~2 TB not runnable here). Expert streaming done for all three (tiny);
+   next a real streamed run on Colab. Edge0-35B-A3B (Qwen3.5-MoE, MLX 4-bit + LoRA, top-4): real weights = mlx-lm 2026-11-16 (resident and streamed); 4-bit expert slots done (16 slots: heap 4.1 GB after decode); the embedding stays packed too (next: a real run to measure the heap; fewer copies at load).
+3. **Energraft-EBT-Qwen3-1.7B**: done (real weights match the release's
+   code on Colab; `light energraft`).
+4. **LLaDA 8B Instruct**, **Dream 7B**: done (real weights match on Colab;
+   engine chat).
+5. **TRELLIS (image-large, v1)**: done for Gaussians and the mesh (real weights match on
+   the L4; `light trellis`). Images without alpha are cut out by BiRefNet (rembg's u2net in TRELLIS). Mesh: FlexiCubes on the CPU, `light trellis -mesh` (OBJ / PLY / vertex-coloured GLB). Next: to_glb (simplify + baked texture).
+6. **FLUX.2-klein-4B**: done (real weights on CPU and the L4).
+7. **flux-3-image-klein**: text-to-image and editing done (tiny-verified).
    Next: a real-weights run (11 GB DiT + 8.9 GB Qwen3-VL-4B), Lanczos for
    references over 4 MP (one) / 1 MP (several), the prompt upsampler (9B,
    optional).
-3. **Image-to-image for every pipeline**: VAE encoder + strength (SDEdit).
+8. **Image-to-image for every pipeline**: VAE encoder + strength (SDEdit).
    Done for FLUX.1, Z-Image and SD 1.5 (`light image -image -strength`);
    FLUX.2 klein edits via reference images instead. SDXL left.
-4. **Z-Image-Turbo** (most-liked text-to-image; Apache-2.0; 6B single-stream
+9. **Z-Image-Turbo**: done (real weights; L4 1.95 s per 1024² step) (most-liked text-to-image; Apache-2.0; 6B single-stream
    DiT, same Qwen3-4B encoder, 8 steps).
-5. **LFM3-1.7B**: done 2026-11-11 (CPU, WebGPU). Next: LFM3-VL-2B.
-6. **Spark-X2.6-4B**: done 2026-11-11 (CPU; tiny on WebGPU).
-7. **Wan2.1-T2V-1.3B**, then **Wan2.2-TI2V-5B** (text / image to video;
+10. **LFM3-1.7B**: done 2026-11-11 (CPU, WebGPU). Next: LFM3-VL-2B.
+11. **Spark-X2.6-4B**: done 2026-11-11 (CPU; tiny on WebGPU).
+12. **Wan2.1-T2V-1.3B**, then **Wan2.2-TI2V-5B** (text / image to video;
    Apache-2.0; UMT5 encoder): the video DiT + 3D VAE path.
-8. **Qwen-Image-2.1 / Turbo**: text-to-image done (tiny-verified; 7B DiT +
+13. **Qwen-Image-2.1 / Turbo**: text-to-image done (tiny-verified; 7B DiT +
    Qwen3-VL-8B text, 14 + 17.5 GB BF16: Colab). Next: a real run, editing
    (condition images in the text stream, VAE encoder, Qwen3-VL vision), the
    prefix KV cache.
-9. Quick non-image wins: Kokoro-82M (TTS), Qwen3-Embedding-0.6B,
-   Depth-Anything-V2, BiRefNet / RMBG-2.0 (background removal), Florence-2.
-10. **LTX-2.5** (queued): 76 GB DiT + 24 GB encoder; Colab only, after Wan
+14. Quick non-image wins: Kokoro-82M (TTS), Qwen3-Embedding-0.6B,
+   Depth-Anything-V2, RMBG-2.0 (background removal; BiRefNet is in, for Idol), Florence-2.
+15. **LTX-2.5** (queued): 76 GB DiT + 24 GB encoder; Colab only, after Wan
     proves the video path.
-11. **PixelGen** (queued): an SDXL fine-tune; works once SDXL lands
+16. **PixelGen** (queued): an SDXL fine-tune; works once SDXL lands
     (desktop).
+17. **LocateAnything-3B** (nvidia, open weights, NVIDIA License:
+    non-commercial / research only): grounding VLM (detection, referring,
+    pointing, layout OCR) on a Qwen2 LM; needs its vision tower and Parallel
+    Box Decoding (block-wise multi-token box prediction). BF16, ~8 GB.
 
 ## 4. Backends
 

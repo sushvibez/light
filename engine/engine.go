@@ -21,7 +21,6 @@ import (
 	"light/dtype"
 	"light/hub"
 	"light/models"
-	"light/nn"
 	"light/tensor"
 	"light/tokenizer"
 )
@@ -55,6 +54,10 @@ type Model struct {
 	// autoregressive loop. SDAR holds its decoding settings.
 	Diffusion bool
 	SDAR      models.SDAROpts
+	// Masked is set for masked-diffusion LMs ("llada" or "Dream"): the
+	// whole answer is denoised from a mask canvas; MaskID is its token.
+	Masked string
+	MaskID int64
 
 	vision       *models.Qwen35Vision // loaded on the first image
 	pixtral      *models.Pixtral
@@ -171,7 +174,7 @@ func Load(spec Spec) (*Model, error) {
 	var lm models.CausalLM
 	switch {
 	case spec.GGUF != "":
-		lm, err = models.LoadChatModelGGUF(spec.GGUF, dev)
+		err = loadWeights(false, 0, func() (err error) { lm, err = models.LoadChatModelGGUF(spec.GGUF, dev); return })
 	default:
 		wdt := dtype.F32
 		if strings.EqualFold(spec.DType, "bf16") && !w16 {
@@ -187,11 +190,7 @@ func Load(spec Spec) (*Model, error) {
 				lm, err = models.LoadChatModelFromHF(spec.Repo, device.CPU(), dtype.F32)
 				return err
 			}
-			if ok {
-				err = nn.WithWeightStorage16(dt16, load)
-			} else {
-				err = load()
-			}
+			err = loadWeights(ok, dt16, load)
 			if err == nil {
 				_, err = models.MoveToDeviceQ8(lm, dev)
 			}
@@ -199,7 +198,7 @@ func Load(spec Spec) (*Model, error) {
 			// The weights are allocated at 16 bits as the loader builds the
 			// model, so no F32 copy of them exists; StoreWeights16 then
 			// narrows any a loader built another way.
-			err = nn.WithWeightStorage16(store16, func() error {
+			err = loadWeights(true, store16, func() error {
 				var err error
 				lm, err = models.LoadChatModelFromHF(spec.Repo, dev, dtype.F32)
 				return err
@@ -208,7 +207,7 @@ func Load(spec Spec) (*Model, error) {
 				_, err = models.StoreWeights16(lm, store16)
 			}
 		} else {
-			lm, err = models.LoadChatModelFromHF(spec.Repo, dev, wdt)
+			err = loadWeights(false, 0, func() (err error) { lm, err = models.LoadChatModelFromHF(spec.Repo, dev, wdt); return })
 		}
 	}
 	if err != nil {
@@ -268,13 +267,20 @@ func Load(spec Spec) (*Model, error) {
 		m.hasBOS = false
 	}
 	if spec.GGUF == "" && spec.Repo != "" {
-		if mt, err := models.HFModelType(spec.Repo); err == nil && mt == "sdar" {
+		mt, err := models.HFModelType(spec.Repo)
+		if err == nil && mt == "sdar" {
 			m.Diffusion = true
 			m.SDAR = models.DefaultSDAROpts()
 			m.SDAR.EOS = m.SDAR.EOS[:0]
 			for id := range m.eos {
 				m.SDAR.EOS = append(m.SDAR.EOS, id)
 			}
+		}
+		if err == nil && (mt == "llada" || mt == "Dream") {
+			if m.MaskID, err = models.MaskTokenID(spec.Repo); err != nil {
+				return nil, err
+			}
+			m.Diffusion, m.Masked = true, mt
 		}
 	}
 	m.LoadTime = time.Since(t0)
@@ -287,6 +293,9 @@ func (m *Model) generateDiffusion(ctx context.Context, ids []int32, opts GenOpts
 	llm, ok := m.LM.(*models.Llama)
 	if !ok {
 		return "", st, errors.New("engine: diffusion decoding needs a models.Llama")
+	}
+	if m.Masked != "" {
+		return m.generateMasked(ctx, llm, ids, opts, onToken, st)
 	}
 	sd := m.SDAR
 	sd.MaxTokens = opts.MaxTokens
@@ -335,6 +344,61 @@ func (m *Model) generateDiffusion(ctx context.Context, ids []int32, opts GenOpts
 		st.TokPerSec = float64(st.Tokens) / (st.DecodeMS / 1000)
 	}
 	return out.String(), st, nil
+}
+
+// generateMasked is Generate for masked-diffusion LMs: a canvas of
+// MaxTokens masks (LLaDA: rounded up to its 32-token blocks) denoised one
+// token per step - LLaDA's low-confidence remasking, Dream's entropy
+// ordering - then cut at the first end-of-sequence token. The text arrives
+// at the end: tokens are committed out of order.
+func (m *Model) generateMasked(ctx context.Context, llm *models.Llama, ids []int32, opts GenOpts, onToken func(string), st Stats) (string, Stats, error) {
+	o := models.MaskedDiffusionOpts{MaskID: m.MaskID, GenLength: opts.MaxTokens, Temperature: float64(opts.Temperature),
+		TopP: float64(opts.TopP), TopK: opts.TopK}
+	seed := opts.Seed
+	if seed == 0 {
+		seed = rand.Uint64()
+	}
+	o.Rng = rand.New(rand.NewPCG(seed, seed^0x9E3779B97F4A7C15))
+	var cancelled bool
+	o.OnStep = func(int, []int64) { cancelled = cancelled || ctx.Err() != nil }
+	t0 := time.Now()
+	var toks []int64
+	var err error
+	if m.Masked == "llada" {
+		const block = 32
+		o.BlockLength = block
+		o.GenLength = (o.GenLength + block - 1) / block * block
+		o.Steps = o.GenLength
+		toks, err = models.LLaDAGenerate(llm, toI64(ids), o)
+	} else {
+		o.Steps, o.Alg = o.GenLength, "entropy"
+		toks, err = models.DreamGenerate(llm, toI64(ids), o)
+	}
+	if err != nil {
+		return "", st, err
+	}
+	st.Stop = "length"
+	var gen []int32
+	for _, t := range toks {
+		if m.eos[t] {
+			st.Stop = "eos"
+			break
+		}
+		gen = append(gen, int32(t))
+	}
+	if cancelled {
+		st.Stop = "cancel"
+	}
+	text := m.Tok.Decode(gen)
+	if onToken != nil && text != "" {
+		onToken(text)
+	}
+	st.Tokens = len(gen)
+	st.DecodeMS = float64(time.Since(t0).Microseconds()) / 1000
+	if st.DecodeMS > 0 {
+		st.TokPerSec = float64(st.Tokens) / (st.DecodeMS / 1000)
+	}
+	return text, st, nil
 }
 
 // Busy reports whether a generation is in flight.

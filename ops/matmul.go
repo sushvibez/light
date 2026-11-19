@@ -55,6 +55,35 @@ func MatMulMixed(a, b *tensor.Tensor) (*tensor.Tensor, error) {
 	return out, nil
 }
 
+// MatMulMixedF32Out is a (M, K) times b (K, N), both BF16 (or both F16),
+// into an F32 (M, N) with F32 accumulation: the tensor-core GEMM of
+// MatMulMixed for an activation the caller already rounded (so layers that
+// share one input cast it once). b may be nn.Linear's transposed weight
+// view. Devices with a "matmul_mixed" F32 kernel only (CUDA).
+func MatMulMixedF32Out(a, b *tensor.Tensor) (*tensor.Tensor, error) {
+	if !a.Device().SameAs(b.Device()) {
+		return nil, fmt.Errorf("MatMulMixedF32Out: device mismatch")
+	}
+	if a.Rank() != 2 || b.Rank() != 2 || a.Dim(1) != b.Dim(0) {
+		return nil, fmt.Errorf("MatMulMixedF32Out: want (M, K) x (K, N), got %v x %v", a.Shape(), b.Shape())
+	}
+	if a.DType() != b.DType() || (a.DType() != dtype.BF16 && a.DType() != dtype.F16) {
+		return nil, fmt.Errorf("MatMulMixedF32Out: want both BF16 or both F16, got %v, %v", a.DType(), b.DType())
+	}
+	k, err := registry.Lookup(registry.Key{Op: "matmul_mixed", Dev: a.Device().Kind(), DType: dtype.F32})
+	if err != nil {
+		return nil, err
+	}
+	out, err := tensor.Empty(dtype.F32, []int{a.Dim(0), b.Dim(1)}, a.Device())
+	if err != nil {
+		return nil, err
+	}
+	if err := k(&registry.Context{Inputs: []*tensor.Tensor{a, b}, Output: out}); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // MatMul performs matrix multiplication. Handles both 2-D
 // `(M,K) × (K,N) → (M,N)` and batched 3-D `(B,M,K) × (B,K,N) → (B,M,N)`
 // inputs. Inputs must share dtype and device.

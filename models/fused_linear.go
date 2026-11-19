@@ -22,7 +22,7 @@ func fusedRow(x *tensor.Tensor, ls ...*nn.Linear) bool {
 	}
 	bytes := 0
 	for _, l := range ls {
-		if l == nil || l.W == nil || l.B != nil || l.W.Rank() != 2 || l.W.DType() != dtype.BF16 || l.WScale != 0 || l.WBlockScale != nil || l.W.RequiresGrad() {
+		if l == nil || l.W == nil || l.B != nil || l.LoRA != nil || l.W.Rank() != 2 || l.W.DType() != dtype.BF16 || l.WScale != 0 || l.WBlockScale != nil || l.W.RequiresGrad() {
 			return false
 		}
 		bytes += l.W.NumElements() * 2

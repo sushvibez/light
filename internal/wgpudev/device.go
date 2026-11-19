@@ -222,6 +222,7 @@ func (d *Device) submitLocked() {
 		bg.Release()
 	}
 	d.bgs = d.bgs[:0]
+	d.pool.releaseRetired()
 	d.pending++
 	if d.pending >= maxPendingSubmits {
 		d.flushLocked()

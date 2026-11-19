@@ -42,6 +42,7 @@ func (t *Tensor) Assign(src *Tensor) error {
 	if t.NumElements() == 0 {
 		return nil
 	}
+	t.storage.BumpVersion() // in-place write: invalidates saved autograd values
 	switch kind := t.Device().Kind(); kind {
 	case device.KindCPU:
 		dst := t.storage.CPUBytes()

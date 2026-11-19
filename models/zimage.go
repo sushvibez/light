@@ -176,17 +176,8 @@ func (m *ZImageTransformer) block(b *zImageBlock, x, adaln, cos, sin *tensor.Ten
 			return nil, err
 		}
 	}
-	scale := func(t, s *tensor.Tensor) (*tensor.Tensor, error) {
-		if s == nil {
-			return t, nil
-		}
-		return ops.Mul(t, s)
-	}
-	n, err := b.AttnNorm1.Forward(x)
+	n, err := normScaled(b.AttnNorm1, x, scaleA)
 	if err != nil {
-		return nil, err
-	}
-	if n, err = scale(n, scaleA); err != nil {
 		return nil, err
 	}
 	q, k, v, err := b.Attn.qkv(n, H, Dh)
@@ -200,46 +191,86 @@ func (m *ZImageTransformer) block(b *zImageBlock, x, adaln, cos, sin *tensor.Ten
 	if a, err = b.Out.Forward(a); err != nil {
 		return nil, err
 	}
-	if a, err = b.AttnNorm2.Forward(a); err != nil {
-		return nil, err
-	}
-	if a, err = scale(a, gateA); err != nil {
+	if a, err = normScaled(b.AttnNorm2, a, gateA); err != nil {
 		return nil, err
 	}
 	if x, err = ops.Add(x, a); err != nil {
 		return nil, err
 	}
-	if n, err = b.FFNNorm1.Forward(x); err != nil {
+	if n, err = normScaled(b.FFNNorm1, x, scaleM); err != nil {
 		return nil, err
 	}
-	if n, err = scale(n, scaleM); err != nil {
-		return nil, err
-	}
-	g, err := b.W1.Forward(n)
+	// W1 and W3 read the same input: on 16-bit-compute layers round it once.
+	nr, err := b.W1.Mixed16Input(n)
 	if err != nil {
 		return nil, err
 	}
-	if g, err = ops.SiLU(g); err != nil {
-		return nil, err
+	fwd := func(l *nn.Linear) (*tensor.Tensor, error) {
+		if nr != nil && l.Mixed16 && l.W.DType() == nr.DType() {
+			return l.ForwardMixed16(nr)
+		}
+		return l.Forward(n)
 	}
-	u, err := b.W3.Forward(n)
+	g, err := fwd(b.W1)
 	if err != nil {
 		return nil, err
 	}
-	if g, err = ops.Mul(g, u); err != nil {
-		return nil, err
-	}
-	f, err := b.W2.Forward(g)
+	u, err := fwd(b.W3)
 	if err != nil {
 		return nil, err
 	}
-	if f, err = b.FFNNorm2.Forward(f); err != nil {
-		return nil, err
+	var f *tensor.Tensor
+	if nr != nil && b.W2.Mixed16 && b.W2.W.DType() == dtype.BF16 {
+		// 16-bit compute: silu(g)·u lands in BF16 for w2 in one kernel.
+		h, err := ops.SiLUMulBF16(g, u)
+		if err != nil {
+			return nil, err
+		}
+		if f, err = b.W2.ForwardMixed16(h); err != nil {
+			return nil, err
+		}
+	} else {
+		if g, err = ops.SiLU(g); err != nil {
+			return nil, err
+		}
+		if g, err = ops.Mul(g, u); err != nil {
+			return nil, err
+		}
+		if f, err = b.W2.Forward(g); err != nil {
+			return nil, err
+		}
 	}
-	if f, err = scale(f, gateM); err != nil {
+	if f, err = normScaled(b.FFNNorm2, f, gateM); err != nil {
 		return nil, err
 	}
 	return ops.Add(x, f)
+}
+
+// normScaled is norm(x) · s for a (B, 1, D) modulation s (nil: none).
+// With one s for every token (B = 1, inference) it folds s into the norm
+// weight, RMSNorm(x)·(w ⊙ s): a D-element multiply instead of a broadcast
+// one over the whole activation.
+func normScaled(norm *nn.RMSNorm, x, s *tensor.Tensor) (*tensor.Tensor, error) {
+	if s == nil {
+		return norm.Forward(x)
+	}
+	D := norm.Weight.NumElements()
+	if s.NumElements() == D && !x.RequiresGrad() && !s.RequiresGrad() && !norm.Weight.RequiresGrad() {
+		sv, err := s.Reshape(D)
+		if err != nil {
+			return nil, err
+		}
+		w, err := ops.Mul(norm.Weight, sv)
+		if err != nil {
+			return nil, err
+		}
+		return ops.RMSNorm(x, w, norm.Eps)
+	}
+	y, err := norm.Forward(x)
+	if err != nil {
+		return nil, err
+	}
+	return ops.Mul(y, s)
 }
 
 // padRows pads (n, D) rows to a multiple of 32 by repeating the last row;

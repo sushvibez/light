@@ -42,10 +42,14 @@ type LlamaConfig struct {
 	SlidingRopeScaling *RopeScaling
 	PartialRotary      float64 // fraction of HeadDim that RoPE rotates (Phi-4-mini 0.75); 0 or 1 = all of it
 	LazyLinear         bool    // allocate no Linear weights; the loader installs them (GGUF quantized models). Implies SkipInit.
-	SlidingWindow      int     // Mistral/Gemma-style sliding-window attention: each query sees at most this many keys back. 0 = full causal.
-	SlidingLayers      []bool  // optional per-layer switch (len NumLayers); nil = every layer uses SlidingWindow. Gemma alternates local/global layers.
-	QKNorm             bool    // Qwen3: RMSNorm over the head dim of Q and K (per layer weights) before RoPE
-	PostNorms          bool    // GLM-4-0414: RMSNorm on the attention and MLP outputs before each residual add
+	// ExpertSlots > 0 streams MoE experts: only that many per layer are
+	// resident, the rest are read from the checkpoint when routed to
+	// (nn.ExpertStream). Loaders take it from LIGHT_EXPERT_SLOTS.
+	ExpertSlots   int
+	SlidingWindow int    // Mistral/Gemma-style sliding-window attention: each query sees at most this many keys back. 0 = full causal.
+	SlidingLayers []bool // optional per-layer switch (len NumLayers); nil = every layer uses SlidingWindow. Gemma alternates local/global layers.
+	QKNorm        bool   // Qwen3: RMSNorm over the head dim of Q and K (per layer weights) before RoPE
+	PostNorms     bool   // GLM-4-0414: RMSNorm on the attention and MLP outputs before each residual add
 	// Spark-X (spark2_5): PartialRotary applies to full-attention layers
 	// only (sliding layers rotate the whole head); a per-head sigmoid gate
 	// (g_proj, D → NumHeads) scales each head's attention output before
@@ -212,9 +216,12 @@ func newLlamaBlock(cfg LlamaConfig, layer int, dev device.Device) (*llamaBlock, 
 	}
 	if cfg.IsMoELayer(layer) {
 		var moe *nn.SparseMoE
-		if cfg.LazyLinear {
+		switch {
+		case cfg.ExpertSlots > 0:
+			moe, err = nn.NewSparseMoEStreamed(D, cfg.NumExperts, cfg.NumExpertsPerTok, cfg.NormTopKProb, cfg.ExpertSlots, wdt, dev)
+		case cfg.LazyLinear:
 			moe, err = nn.NewSparseMoELazy(D, cfg.NumExperts, cfg.NumExpertsPerTok, cfg.NormTopKProb, dev)
-		} else {
+		default:
 			moe, err = nn.NewSparseMoEUninit(D, cfg.MoEIntermediateSize, cfg.NumExperts, cfg.NumExpertsPerTok, cfg.NormTopKProb, wdt, dev)
 		}
 		if err != nil {
@@ -299,7 +306,9 @@ func (b *llamaBlock) parameters() []*tensor.Tensor {
 			}
 			return ps
 		}
-		ps = append(ps, b.MoE.GateUp, b.MoE.Down)
+		if b.MoE.GateUp != nil {
+			ps = append(ps, b.MoE.GateUp, b.MoE.Down)
+		}
 		return ps
 	}
 	if b.GateProj != nil {
@@ -420,6 +429,9 @@ type KVCache struct {
 	// ring marks K / V as fixed-size ring buffers (Moshi's one-frame decode
 	// path) rather than position-ordered concatenations.
 	ring bool
+	// State holds a model's own decode state (GLM5Cache, DeepseekV41Cache,
+	// KimiK31Cache) when it is driven through CausalLM; Reset drops it.
+	State any
 }
 
 // NewKVCache allocates a fresh cache for a model with `numLayers` blocks.
@@ -684,6 +696,9 @@ func (c *KVCache) Truncate(n int) error {
 	if c.ring {
 		return fmt.Errorf("KVCache.Truncate: ring-buffer cache")
 	}
+	if c.State != nil && n != c.Len {
+		return fmt.Errorf("KVCache.Truncate: %T decode state cannot rewind", c.State)
+	}
 	for i := range c.Conv {
 		if c.Conv[i] != nil || c.Rec[i] != nil {
 			return fmt.Errorf("KVCache.Truncate: layer %d carries recurrent state", i)
@@ -733,6 +748,7 @@ func (c *KVCache) Reset() {
 	c.Len = 0
 	c.posSynced = false
 	c.ring = false
+	c.State = nil
 }
 
 // NewLlama constructs a fresh model with the given config on dev. Loaders

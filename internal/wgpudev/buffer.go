@@ -58,6 +58,14 @@ type pool struct {
 	buckets    map[uint64][]*Buffer
 	pooledByte uint64
 	liveByte   uint64 // bytes of device buffers created and not yet released
+	// retired are evicted buffers awaiting Release at the next submit.
+	// Kernels bind the raw buffer of a temporary tensor, and Go may collect
+	// the tensor (its GC cleanup frees the storage into this pool) before
+	// the bind group or dispatch naming that buffer is recorded; releasing
+	// an evicted buffer at once let such a recording use a released id
+	// (a wgpu-core panic on Idol's denoiser). After a submit, everything
+	// recorded so far holds its own references.
+	retired []*Buffer
 }
 
 const (
@@ -129,9 +137,21 @@ func (p *pool) put(b *Buffer) {
 		return
 	}
 	p.liveByte -= b.class
+	p.retired = append(p.retired, b)
 	p.mu.Unlock()
-	b.Buf.Release()
-	b.Buf = nil
+}
+
+// releaseRetired releases the evicted buffers; the device calls it after
+// a submit, holding d.mu.
+func (p *pool) releaseRetired() {
+	p.mu.Lock()
+	r := p.retired
+	p.retired = nil
+	p.mu.Unlock()
+	for _, b := range r {
+		b.Buf.Release()
+		b.Buf = nil
+	}
 }
 
 // PoolStats reports idle pooled buffers per size class (for tests).
@@ -161,6 +181,10 @@ func (d *Device) PoolClear() {
 			b.Buf = nil
 		}
 	}
+	d.mu.Lock() // retired buffers go after anything already recorded is submitted
+	d.submitLocked()
+	d.mu.Unlock()
+	d.pool.releaseRetired()
 }
 
 // AllocatedBytes reports the device memory held by storage buffers (in use

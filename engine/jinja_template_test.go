@@ -10,6 +10,10 @@ import (
 	"light/tokenizer"
 )
 
+// fakeSHA is a full 40-hex commit id: hub only trusts snapshots/<sha>
+// directories and refs that hold one.
+const fakeSHA = "0123abcd0123abcd0123abcd0123abcd0123abcd"
+
 // fakeHFCache lays out models--<org>--<name>/refs/main + snapshots/<sha>/
 // under a temporary HF_HOME with the tokenizer files of a chattemplate
 // fixture, so hub.Download resolves them offline.
@@ -19,14 +23,14 @@ func fakeHFCache(t *testing.T, repos map[string]string) {
 	t.Setenv("HF_HOME", home)
 	for repo, fixture := range repos {
 		repoDir := filepath.Join(home, "hub", "models--"+strings.ReplaceAll(repo, "/", "--"))
-		snap := filepath.Join(repoDir, "snapshots", "0123abcd")
+		snap := filepath.Join(repoDir, "snapshots", fakeSHA)
 		if err := os.MkdirAll(snap, 0o755); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.MkdirAll(filepath.Join(repoDir, "refs"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(repoDir, "refs", "main"), []byte("0123abcd"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(repoDir, "refs", "main"), []byte(fakeSHA), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		src := filepath.Join("..", "chattemplate", "testdata", "hf", fixture)

@@ -37,6 +37,38 @@ func upsampleNearest(ctx *registry.Context) error {
 }
 
 func init() {
+	registry.Register(registry.Key{Op: "upsample_bilinear2d", Dev: device.KindWebGPU, DType: dtype.F32}, upsampleBilinear)
+}
+
+// upsampleBilinear: ops.UpsampleBilinear2d on (N, C, H, W) F32.
+func upsampleBilinear(ctx *registry.Context) error {
+	x, out := ctx.Inputs[0], ctx.Output
+	align, _ := ctx.Attrs["align_corners"].(bool)
+	x, err := contig(x)
+	if err != nil {
+		return err
+	}
+	d, err := dev()
+	if err != nil {
+		return err
+	}
+	n := out.NumElements()
+	if n == 0 {
+		return nil
+	}
+	a := uint32(0)
+	if align {
+		a = 1
+	}
+	params, err := d.Uniform(uint32(out.Dim(2)), uint32(out.Dim(3)), uint32(x.Dim(2)), uint32(x.Dim(3)), a, 0, 0, 0)
+	if err != nil {
+		return err
+	}
+	defer params.Release()
+	return run1D(d, "upsample_bilinear", []wgpudev.Binding{rd(raw(x)), rw(raw(out)), uni(params)}, n)
+}
+
+func init() {
 	registry.Register(registry.Key{Op: "pad", Dev: device.KindWebGPU, DType: dtype.F32}, padF32)
 }
 

@@ -22,7 +22,7 @@ type Entry struct {
 	VocabSize int    `json:"vocab_size"`
 }
 
-var supportedTypes = map[string]bool{"llama": true, "mistral": true, "qwen2": true, "qwen2_5": true, "qwen3": true, "qwen3_moe": true, "qwen3moe": true, "mellum": true, "qwen3_5": true, "qwen3_5_text": true, "muse_glimmer": true, "muse_glimmer_text": true, "qwen35": true, "muse-glimmer": true, "deepseek_v2": true, "deepseek_v3": true, "glm": true, "glm4": true, "nemotron": true, "granite": true, "granitemoehybrid": true, "mistral3": true, "ministral3": true, "mimo": true, "minimax": true, "sdar": true, "phi3": true, "gemma3_text": true, "gemma3": true, "gemma2": true, "gemma4": true, "gemma4_text": true, "falcon": true, "lfm3": true, "spark2_5": true}
+var supportedTypes = map[string]bool{"llama": true, "mistral": true, "qwen2": true, "qwen2_5": true, "qwen3": true, "qwen3_moe": true, "qwen3moe": true, "mellum": true, "qwen3_5": true, "qwen3_5_text": true, "qwen3_5_moe": true, "qwen3_5_moe_text": true, "muse_glimmer": true, "muse_glimmer_text": true, "qwen35": true, "muse-glimmer": true, "deepseek_v2": true, "deepseek_v3": true, "glm": true, "glm4": true, "nemotron": true, "granite": true, "granitemoehybrid": true, "mistral3": true, "ministral3": true, "mimo": true, "minimax": true, "sdar": true, "phi3": true, "gemma3_text": true, "gemma3": true, "gemma2": true, "gemma4": true, "gemma4_text": true, "falcon": true, "lfm3": true, "spark2_5": true, "glm5_next": true, "deepseek_v41": true, "kimi_k31": true, "llada": true, "Dream": true}
 
 // Catalog scans the HF hub cache for supported causal LMs and the GGUF
 // directory (LIGHT_GGUF_DIR or ~/.cache/light/gguf) for quantized files.
@@ -241,7 +241,7 @@ func scanGGUF(hf []Entry) ([]Entry, error) {
 func matchTokenizerRepo(hf []Entry, arch string, vocab int, base string) string {
 	// GGUF architectures (llama.cpp spelling) and HF model_types of one family.
 	family := map[string]string{"qwen2_5": "qwen2", "qwen3_moe": "qwen3", "qwen3moe": "qwen3",
-		"qwen35": "qwen3_5", "qwen3_5_text": "qwen3_5", "muse-glimmer": "muse_glimmer", "muse_glimmer_text": "muse_glimmer"}
+		"qwen35": "qwen3_5", "qwen3_5_text": "qwen3_5", "qwen3_5_moe": "qwen35moe", "qwen3_5_moe_text": "qwen35moe", "muse-glimmer": "muse_glimmer", "muse_glimmer_text": "muse_glimmer"}
 	norm := func(s string) string {
 		s = strings.ToLower(s)
 		if f, ok := family[s]; ok {

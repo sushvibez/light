@@ -146,7 +146,10 @@ func testWhisperTiny(t *testing.T, dev device.Device) {
 
 	// The original 48 kHz file through our resampler must transcribe the same.
 	if raw, rate, err := audio.ReadWAV("/usr/share/sounds/alsa/Front_Center.wav"); err == nil {
-		s16 := audio.Resample(raw, rate, 16000)
+		s16, err := audio.Resample(raw, rate, 16000)
+		if err != nil {
+			t.Fatal(err)
+		}
 		mel2, err := audio.LogMel(s16, filters)
 		if err != nil {
 			t.Fatal(err)

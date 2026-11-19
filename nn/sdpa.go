@@ -66,6 +66,34 @@ func SDPAScaled(q, k, v, addMask *tensor.Tensor, scale float64) (*tensor.Tensor,
 	if addMask == nil && scale == 0 && q.Device().Kind() == device.KindCUDA && q.DType() == dtype.F32 && Sq == Sk && D <= 256 {
 		return ops.FlashAttention(q, k, v, false)
 	}
+	// Elsewhere the (B·NH, Sq, Sk) scores are materialised: past
+	// sdpaChunkBytes (16 heads over Idol's 12k tokens would be 9.7 GB, more
+	// than an iGPU's WebGPU heap) run the queries in chunks. Each query row
+	// sees the same keys either way, so the result is unchanged.
+	if es := int64(q.DType().Size()); Sq > 1 && es > 0 && !q.RequiresGrad() && !k.RequiresGrad() && !v.RequiresGrad() &&
+		int64(B)*int64(NH)*int64(Sq)*int64(Sk)*es > sdpaChunkBytes {
+		rows := max(1, int(sdpaChunkBytes/(int64(B)*int64(NH)*int64(Sk)*es)))
+		var parts []*tensor.Tensor
+		for s := 0; s < Sq; s += rows {
+			n := min(rows, Sq-s)
+			qc, err := q.Narrow(2, s, n)
+			if err != nil {
+				return nil, err
+			}
+			mc := addMask
+			if addMask != nil && addMask.Rank() >= 2 && addMask.Dim(-2) == Sq {
+				if mc, err = addMask.Narrow(addMask.Rank()-2, s, n); err != nil {
+					return nil, err
+				}
+			}
+			o, err := SDPAScaled(qc, k, v, mc, scale)
+			if err != nil {
+				return nil, err
+			}
+			parts = append(parts, o)
+		}
+		return ops.Concat(parts, 2)
+	}
 	flat := func(t *tensor.Tensor, S int) (*tensor.Tensor, error) {
 		c, err := autograd.Contiguous(t)
 		if err != nil {
@@ -265,3 +293,7 @@ func scalarLike(v float64, dt dtype.DType, dev device.Device) (*tensor.Tensor, e
 	}
 	return ops.Cast(s, dt)
 }
+
+// sdpaChunkBytes bounds the score matrix SDPA materialises at once (see
+// SDPAScaled); a variable so tests can force chunking.
+var sdpaChunkBytes int64 = 256 << 20

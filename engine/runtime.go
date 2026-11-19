@@ -13,6 +13,12 @@ import (
 
 // Runtime owns at most one loaded model at a time (a 16 GB card has no room
 // for two) and serialises load/unload against generation.
+//
+// A request holds the chat model through a Lease, taken atomically with the
+// model's selection (Acquire, LoadAndAcquire) and kept until the request
+// ends: while a lease is out the model cannot be replaced or unloaded and
+// no other request can generate, and while a load is in progress no lease
+// can be taken.
 type Runtime struct {
 	mu      sync.Mutex
 	model   *Model
@@ -20,7 +26,22 @@ type Runtime struct {
 	emb     *Embedder
 	speech  *Speech
 	loading bool
-	cancel  context.CancelFunc
+	lease   *Lease // the request holding the chat model, if any
+
+	// Test seams: nil means Load and (*Model).Generate.
+	loadFn func(Spec) (*Model, error)
+	genFn  func(m *Model, ctx context.Context, msgs []Message, opts GenOpts, onToken func(string)) (string, Stats, error)
+}
+
+// ErrNoModel is returned by Acquire when no chat model is loaded, or the
+// loaded one is not the requested one.
+var ErrNoModel = errors.New("engine: requested model is not loaded")
+
+// Lease is one request's hold on the loaded chat model; see Runtime.
+type Lease struct {
+	rt     *Runtime
+	m      *Model
+	cancel context.CancelFunc // the running generation's, guarded by rt.mu
 }
 
 // Status is what the UI polls.
@@ -43,17 +64,35 @@ type Status struct {
 
 func NewRuntime() *Runtime { return &Runtime{} }
 
+// busyLocked reports whether the chat model is held: leased, or generating
+// through a direct (*Model).Generate call. r.mu must be held.
+func (r *Runtime) busyLocked() bool {
+	return r.lease != nil || (r.model != nil && r.model.Busy())
+}
+
 // Load replaces the current model with spec. The previous model is released
 // first so its device memory is free before the new weights land.
 func (r *Runtime) Load(spec Spec) (*Model, error) {
+	m, _, err := r.load(spec, false)
+	return m, err
+}
+
+// LoadAndAcquire is Load that also leases the new model before any other
+// request can see it. The caller must Release the lease.
+func (r *Runtime) LoadAndAcquire(spec Spec) (*Lease, error) {
+	_, l, err := r.load(spec, true)
+	return l, err
+}
+
+func (r *Runtime) load(spec Spec, lease bool) (*Model, *Lease, error) {
 	r.mu.Lock()
 	if r.loading {
 		r.mu.Unlock()
-		return nil, errors.New("engine: a load is already in progress")
+		return nil, nil, fmt.Errorf("%w: a load is already in progress", ErrBusy)
 	}
-	if r.model != nil && r.model.Busy() {
+	if r.busyLocked() {
 		r.mu.Unlock()
-		return nil, ErrBusy
+		return nil, nil, ErrBusy
 	}
 	r.loading = true
 	r.model = nil
@@ -62,24 +101,31 @@ func (r *Runtime) Load(spec Spec) (*Model, error) {
 	runtime.GC()
 	storage.DrainCUDAPool()
 
-	m, err := Load(spec)
+	load := r.loadFn
+	if load == nil {
+		load = Load
+	}
+	m, err := load(spec)
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.loading = false
-	if err == nil {
-		r.model = m
-	}
-	r.mu.Unlock()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return m, nil
+	r.model = m
+	var l *Lease
+	if lease {
+		l = &Lease{rt: r, m: m}
+		r.lease = l
+	}
+	return m, l, nil
 }
 
 // Unload drops the model and frees its memory.
 func (r *Runtime) Unload() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.model != nil && r.model.Busy() {
+	if r.busyLocked() {
 		return ErrBusy
 	}
 	r.model = nil
@@ -95,29 +141,90 @@ func (r *Runtime) Model() *Model {
 	return r.model
 }
 
-// Generate runs a chat completion on the loaded model. Stop() cancels it.
-func (r *Runtime) Generate(ctx context.Context, msgs []Message, opts GenOpts, onToken func(string)) (string, Stats, error) {
-	m := r.Model()
-	if m == nil {
-		return "", Stats{}, errors.New("engine: no model loaded")
-	}
-	ctx, cancel := context.WithCancel(ctx)
+// Acquire leases the loaded chat model if want accepts it (nil: any
+// model). It fails with ErrBusy while a load is in progress or another
+// request holds the model, and with ErrNoModel when no model is loaded or
+// want rejects it. The caller must Release the lease.
+func (r *Runtime) Acquire(want func(*Model) bool) (*Lease, error) {
 	r.mu.Lock()
-	r.cancel = cancel
-	r.mu.Unlock()
-	defer func() {
-		cancel()
-		r.mu.Lock()
-		r.cancel = nil
-		r.mu.Unlock()
-	}()
-	return m.Generate(ctx, msgs, opts, onToken)
+	defer r.mu.Unlock()
+	if r.loading {
+		return nil, fmt.Errorf("%w: a load is in progress", ErrBusy)
+	}
+	if r.busyLocked() {
+		return nil, ErrBusy
+	}
+	if r.model == nil || (want != nil && !want(r.model)) {
+		return nil, ErrNoModel
+	}
+	l := &Lease{rt: r, m: r.model}
+	r.lease = l
+	return l, nil
 }
 
-// Stop cancels the running generation, if any.
+// Model is the leased model.
+func (l *Lease) Model() *Model { return l.m }
+
+// Release ends the lease; later calls are no-ops.
+func (l *Lease) Release() {
+	r := l.rt
+	r.mu.Lock()
+	if r.lease == l {
+		r.lease = nil
+	}
+	r.mu.Unlock()
+}
+
+// Generate runs a chat completion on the leased model; Runtime.Stop
+// cancels it. One generation per lease at a time.
+func (l *Lease) Generate(ctx context.Context, msgs []Message, opts GenOpts, onToken func(string)) (string, Stats, error) {
+	r := l.rt
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	r.mu.Lock()
+	if r.lease != l {
+		r.mu.Unlock()
+		return "", Stats{}, errors.New("engine: generate on a released lease")
+	}
+	if l.cancel != nil {
+		r.mu.Unlock()
+		return "", Stats{}, ErrBusy
+	}
+	l.cancel = cancel
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		l.cancel = nil
+		r.mu.Unlock()
+	}()
+	if r.genFn != nil {
+		return r.genFn(l.m, ctx, msgs, opts, onToken)
+	}
+	return l.m.Generate(ctx, msgs, opts, onToken)
+}
+
+// Generate runs a chat completion on the loaded model, holding a lease for
+// its duration. Stop() cancels it.
+func (r *Runtime) Generate(ctx context.Context, msgs []Message, opts GenOpts, onToken func(string)) (string, Stats, error) {
+	l, err := r.Acquire(nil)
+	if errors.Is(err, ErrNoModel) {
+		return "", Stats{}, errors.New("engine: no model loaded")
+	}
+	if err != nil {
+		return "", Stats{}, err
+	}
+	defer l.Release()
+	return l.Generate(ctx, msgs, opts, onToken)
+}
+
+// Stop cancels the running generation, if any. Only the lease holder's
+// generation is ever cancelled; a rejected request never touches it.
 func (r *Runtime) Stop() {
 	r.mu.Lock()
-	c := r.cancel
+	var c context.CancelFunc
+	if r.lease != nil {
+		c = r.lease.cancel
+	}
 	r.mu.Unlock()
 	if c != nil {
 		c()
@@ -195,9 +302,9 @@ func (r *Runtime) LoadSpeech(spec Spec) (*Speech, error) {
 	r.mu.Lock()
 	if r.loading {
 		r.mu.Unlock()
-		return nil, errors.New("engine: a load is already in progress")
+		return nil, fmt.Errorf("%w: a load is already in progress", ErrBusy)
 	}
-	if r.model != nil && r.model.Busy() {
+	if r.busyLocked() {
 		r.mu.Unlock()
 		return nil, ErrBusy
 	}
@@ -237,6 +344,7 @@ func (r *Runtime) UnloadSpeech() {
 func (r *Runtime) Status() Status {
 	r.mu.Lock()
 	m, loading, stt, emb, speech := r.model, r.loading, r.stt, r.emb, r.speech
+	busy := r.busyLocked()
 	r.mu.Unlock()
 	var st Status
 	st.Loading = loading
@@ -254,7 +362,7 @@ func (r *Runtime) Status() Status {
 	}
 	if m != nil {
 		st.Loaded = true
-		st.Busy = m.Busy()
+		st.Busy = busy
 		sp := m.Spec
 		st.Spec = &sp
 		st.LoadMS = float64(m.LoadTime.Milliseconds())

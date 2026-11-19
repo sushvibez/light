@@ -20,11 +20,12 @@ import (
 func TestFlashAttentionBF16MatchesReference(t *testing.T) {
 	gpu := gpuOrSkip(t)
 	rng := rand.New(rand.NewPCG(7, 8))
-	const D = 128
 	for _, c := range []struct {
-		B, NH, S int
-		causal   bool
-	}{{1, 2, 64, false}, {2, 3, 200, false}, {1, 2, 333, true}, {1, 1, 1, false}, {1, 4, 1031, false}} {
+		B, NH, S, D int
+		causal      bool
+	}{{1, 2, 64, 128, false}, {2, 3, 200, 128, false}, {1, 2, 333, 128, true}, {1, 1, 1, 128, false}, {1, 4, 1031, 128, false},
+		{1, 2, 64, 64, false}, {2, 3, 200, 64, false}, {1, 2, 333, 64, true}, {1, 4, 1031, 64, false}} {
+		D := c.D
 		n := c.B * c.NH * c.S * D
 		mk := func(scale float32) ([]float64, *tensor.Tensor) {
 			x := randTensor(t, rng, []int{c.B, c.NH, c.S, D}, scale, device.CPU(), dtype.BF16)
@@ -47,7 +48,7 @@ func TestFlashAttentionBF16MatchesReference(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := f32(t, out)
-		scale := 1 / math.Sqrt(D)
+		scale := 1 / math.Sqrt(float64(D))
 		maxErr, maxRef := 0.0, 0.0
 		for bh := 0; bh < c.B*c.NH; bh++ {
 			base := bh * c.S * D
@@ -82,7 +83,7 @@ func TestFlashAttentionBF16MatchesReference(t *testing.T) {
 				}
 			}
 		}
-		t.Logf("B=%d NH=%d S=%d causal=%v: max |err| %.3g (max |out| %.3g)", c.B, c.NH, c.S, c.causal, maxErr, maxRef)
+		t.Logf("B=%d NH=%d S=%d D=%d causal=%v: max |err| %.3g (max |out| %.3g)", c.B, c.NH, c.S, D, c.causal, maxErr, maxRef)
 		if maxErr > 1e-2*math.Max(maxRef, 1e-3) {
 			t.Errorf("S=%d causal=%v: max error %.3g", c.S, c.causal, maxErr)
 		}

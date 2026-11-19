@@ -10,7 +10,10 @@ import (
 
 // storage16 is the load-time option set by WithWeightStorage16.
 var storage16 struct {
-	load sync.Mutex // one 16-bit-storage load at a time
+	// load is held for the whole of a WithWeightStorage16 or
+	// WithDefaultWeightStorage scope: the option is process-global, so
+	// loads that may overlap must all take it (see WithWeightStorage16).
+	load sync.Mutex
 	mu   sync.Mutex
 	on   bool
 	dt   dtype.DType
@@ -29,7 +32,14 @@ var storage16 struct {
 // model does. On WebGPU an embedding table over the device's buffer cap is
 // allocated in host memory (its lookups gather there).
 //
-// Loads under this option are serialized; other loads are unaffected.
+// The option is process-global, not per loader: while the scope runs,
+// every constructor in the process sees it, including one called by a load
+// running concurrently on another goroutine. Loads under this option are
+// serialized with each other, and with WithDefaultWeightStorage, which is
+// how a load that may overlap one (a server loading several models on
+// request goroutines) keeps its own dtypes. A load that runs outside both
+// scopes while a 16-bit scope is active gets 16-bit weights. Scopes do
+// not nest: calling either function from inside load deadlocks.
 func WithWeightStorage16(dt dtype.DType, load func() error) error {
 	storage16.load.Lock()
 	defer storage16.load.Unlock()
@@ -41,6 +51,16 @@ func WithWeightStorage16(dt dtype.DType, load func() error) error {
 		storage16.on = false
 		storage16.mu.Unlock()
 	}()
+	return load()
+}
+
+// WithDefaultWeightStorage runs load (a model loader) with the dtypes it
+// asks for, holding the lock WithWeightStorage16 holds: it waits for any
+// 16-bit scope to end, and no 16-bit scope can begin while load runs. Use
+// it for loads that may overlap a WithWeightStorage16 load.
+func WithDefaultWeightStorage(load func() error) error {
+	storage16.load.Lock()
+	defer storage16.load.Unlock()
 	return load()
 }
 

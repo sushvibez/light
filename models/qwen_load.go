@@ -88,6 +88,7 @@ func loadQwen2(repo string, dev device.Device, weightDT dtype.DType) (*Llama, er
 	}
 	cfg.WeightDType = weightDT
 	cfg.SkipInit = true // we're about to overwrite every weight from disk
+	cfg.ExpertSlots = envExpertSlots()
 	q4, err := fetchInt4Config(repo)
 	if err != nil {
 		return nil, err
@@ -111,6 +112,7 @@ func loadQwen2(repo string, dev device.Device, weightDT dtype.DType) (*Llama, er
 	if err := mapHFToLlama(llama, tensors); err != nil {
 		return nil, err
 	}
+	linkExpertStreams(llama)
 	// MiMo-7B ships one multi-token-prediction layer: keep it as a draft
 	// head for speculative decoding (the forward never uses it).
 	if llama.MTP, err = loadMTPHead(llama, tensors, "model.mtp_layers.0."); err != nil {
@@ -161,7 +163,7 @@ func fetchQwenConfig(repo string) (LlamaConfig, error) {
 	// plus multi-token-prediction layers that the forward pass never runs
 	// (their `model.mtp_layers.*` weights are ignored here).
 	qkvBias := hf.AttentionBias
-	if hf.ModelType == "qwen2" || hf.ModelType == "qwen2_5" || hf.ModelType == "mimo" {
+	if hf.ModelType == "qwen2" || hf.ModelType == "qwen2_5" || hf.ModelType == "mimo" || hf.ModelType == "Dream" {
 		qkvBias = true
 	}
 	return LlamaConfig{
@@ -355,6 +357,86 @@ func squeezeTrailingOnes(t *tensor.Tensor, targetRank int) *tensor.Tensor {
 	return r
 }
 
+// streamHFMoE attaches an ExpertStream reading experts from the (memory-
+// mapped) checkpoint tensors in either layout mapHFMoE takes, cast to the
+// router's dtype.
+func streamHFMoE(m *nn.SparseMoE, hf map[string]*tensor.Tensor, p string) error {
+	wdt, dev := m.Gate.W.DType(), m.Gate.W.Device()
+	cast := func(t *tensor.Tensor) (*tensor.Tensor, error) {
+		var err error
+		if t.DType() != wdt {
+			if t, err = ops.Cast(t, wdt); err != nil {
+				return nil, err
+			}
+		}
+		return t.Contiguous()
+	}
+	var load func(e int) (*tensor.Tensor, *tensor.Tensor, error)
+	if fgu, ok := hf[p+"experts.gate_up_proj"]; ok {
+		fdn := hf[p+"experts.down_proj"]
+		if fdn == nil || fgu.Rank() != 3 {
+			return fmt.Errorf("streamHFMoE: %sexperts.gate_up_proj / down_proj", p)
+		}
+		load = func(e int) (*tensor.Tensor, *tensor.Tensor, error) {
+			gu, err := fgu.Narrow(0, e, 1)
+			if err == nil {
+				gu, err = gu.Contiguous()
+			}
+			if err == nil {
+				gu, err = gu.Reshape(fgu.Dim(1), fgu.Dim(2))
+			}
+			if err == nil {
+				gu, err = cast(gu)
+			}
+			if err != nil {
+				return nil, nil, err
+			}
+			dn, err := fdn.Narrow(0, e, 1)
+			if err == nil {
+				dn, err = dn.Contiguous()
+			}
+			if err == nil {
+				dn, err = dn.Reshape(fdn.Dim(1), fdn.Dim(2))
+			}
+			if err == nil {
+				dn, err = cast(dn)
+			}
+			return gu, dn, err
+		}
+	} else {
+		E := m.Gate.OutFeatures()
+		type ex struct{ g, u, d *tensor.Tensor }
+		exs := make([]ex, E)
+		for e := range E {
+			pe := p + "experts." + strconv.Itoa(e) + "."
+			g, okG := hf[pe+"gate_proj.weight"]
+			u, okU := hf[pe+"up_proj.weight"]
+			d, okD := hf[pe+"down_proj.weight"]
+			if !okG || !okU || !okD {
+				return fmt.Errorf("streamHFMoE: expert %d tensors missing under %s", e, pe)
+			}
+			exs[e] = ex{g, u, d}
+		}
+		load = func(e int) (*tensor.Tensor, *tensor.Tensor, error) {
+			gu, err := ops.Concat([]*tensor.Tensor{exs[e].g, exs[e].u}, 0)
+			if err == nil {
+				gu, err = cast(gu)
+			}
+			if err != nil {
+				return nil, nil, err
+			}
+			dn, err := cast(exs[e].d)
+			return gu, dn, err
+		}
+	}
+	s, err := nn.NewExpertStream(m.StreamSlots, dev, load)
+	if err != nil {
+		return err
+	}
+	m.Stream = s
+	return nil
+}
+
 // mapHFMoE fills an nn.SparseMoE from either HF expert layout:
 //
 //   - transformers ≥ 5 fused: `experts.gate_up_proj` (E, 2I, H),
@@ -371,6 +453,9 @@ func mapHFMoE(m *nn.SparseMoE, hf map[string]*tensor.Tensor, p string) error {
 	}
 	if err := copyExactCast(m.Gate.W, hf, routerName); err != nil {
 		return err
+	}
+	if m.StreamSlots > 0 {
+		return streamHFMoE(m, hf, p)
 	}
 	if _, ok := hf[p+"experts.gate_up_proj"]; ok {
 		if err := copyExactCast(m.GateUp, hf, p+"experts.gate_up_proj"); err != nil {
@@ -412,4 +497,29 @@ func mapHFMoE(m *nn.SparseMoE, hf map[string]*tensor.Tensor, p string) error {
 		return err
 	}
 	return copyExactCast(m.Down, hf, p+"experts.down_proj")
+}
+
+// envExpertSlots is LIGHT_EXPERT_SLOTS (0 when unset or invalid): the
+// resident experts per MoE layer when streaming them from the checkpoint.
+func envExpertSlots() int {
+	n, err := strconv.Atoi(os.Getenv("LIGHT_EXPERT_SLOTS"))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+// linkExpertStreams points each streamed MoE layer at the next one, so a
+// decode step prefetches the next layer's predicted experts.
+func linkExpertStreams(m *Llama) {
+	var prev *nn.SparseMoE
+	for _, b := range m.Blocks {
+		if b.MoE == nil || b.MoE.Stream == nil {
+			continue
+		}
+		if prev != nil {
+			prev.Next = b.MoE
+		}
+		prev = b.MoE
+	}
 }

@@ -90,8 +90,20 @@ func (t *Tensor) Transpose(i, j int) (*Tensor, error) {
 // Contiguous returns a new Tensor whose storage is freshly-allocated and
 // packed in row-major order, copying elements from the receiver through its
 // strides. If the receiver is already contiguous with zero offset, returns
-// the receiver unchanged.
+// the receiver unchanged; a contiguous slice of an unaligned mapped storage
+// (storage.WrapCPUUnaligned) is copied byte-wise without aligning the rest.
 func (t *Tensor) Contiguous() (*Tensor, error) {
+	n := t.shape.NumElements()
+	if t.IsContiguous() && t.storage.Unaligned() && n < t.storage.Len() {
+		// A slice of a not-yet-aligned mapped storage: copy just its bytes.
+		newT, err := Empty(t.DType(), t.shape.Dims(), t.Device())
+		if err != nil {
+			return nil, err
+		}
+		lo := t.DType().ByteSize(t.offset)
+		copy(newT.storage.CPUBytes(), t.storage.RawCPUBytes()[lo:lo+t.DType().ByteSize(n)])
+		return newT, nil
+	}
 	if t.IsContiguous() && t.offset == 0 {
 		return t, nil
 	}
@@ -137,24 +149,38 @@ func copyStrided(dst, src *Tensor) error {
 	}
 	dstBuf := dst.storage.CPUBytes()
 	srcBuf := src.storage.CPUBytes()
-	dims := src.Shape().Dims()
-	srcStrides := src.strides.Slice()
 	n := src.NumElements()
+	// Coalesced axes, then one copy per innermost run: a row of a permuted
+	// or narrowed view is a memmove when its elements are adjacent.
+	d, ss, _ := parallel.Coalesce(src.Shape().Dims(), src.strides.Slice(), make([]int, src.Rank()))
+	inner := ss[len(ss)-1]
+	zero := make([]int, len(d))
 	parallel.For(n, parallel.Grain, func(lo, hi int) {
-		switch elemSize {
-		case 4:
-			d := unsafe.Slice((*uint32)(unsafe.Pointer(unsafe.SliceData(dstBuf))), len(dstBuf)/4)
-			s := unsafe.Slice((*uint32)(unsafe.Pointer(unsafe.SliceData(srcBuf))), len(srcBuf)/4)
-			parallel.Strided(dims, srcStrides, nil, src.offset, 0, lo, hi, func(i, so, _ int) { d[i] = s[so] })
-		case 2:
-			d := unsafe.Slice((*uint16)(unsafe.Pointer(unsafe.SliceData(dstBuf))), len(dstBuf)/2)
-			s := unsafe.Slice((*uint16)(unsafe.Pointer(unsafe.SliceData(srcBuf))), len(srcBuf)/2)
-			parallel.Strided(dims, srcStrides, nil, src.offset, 0, lo, hi, func(i, so, _ int) { d[i] = s[so] })
-		default:
-			parallel.Strided(dims, srcStrides, nil, src.offset, 0, lo, hi, func(i, so, _ int) {
-				copy(dstBuf[i*elemSize:(i+1)*elemSize], srcBuf[so*elemSize:(so+1)*elemSize])
-			})
-		}
+		parallel.StridedRuns(d, ss, zero, src.offset, 0, lo, hi, func(i, so, _, m int) {
+			if inner == 1 {
+				copy(dstBuf[i*elemSize:(i+m)*elemSize], srcBuf[so*elemSize:(so+m)*elemSize])
+				return
+			}
+			switch elemSize {
+			case 4:
+				dv := unsafe.Slice((*uint32)(unsafe.Pointer(unsafe.SliceData(dstBuf))), len(dstBuf)/4)[i : i+m]
+				sv := unsafe.Slice((*uint32)(unsafe.Pointer(unsafe.SliceData(srcBuf))), len(srcBuf)/4)
+				for k := range dv {
+					dv[k] = sv[so+k*inner]
+				}
+			case 2:
+				dv := unsafe.Slice((*uint16)(unsafe.Pointer(unsafe.SliceData(dstBuf))), len(dstBuf)/2)[i : i+m]
+				sv := unsafe.Slice((*uint16)(unsafe.Pointer(unsafe.SliceData(srcBuf))), len(srcBuf)/2)
+				for k := range dv {
+					dv[k] = sv[so+k*inner]
+				}
+			default:
+				for k := range m {
+					o := (so + k*inner) * elemSize
+					copy(dstBuf[(i+k)*elemSize:(i+k+1)*elemSize], srcBuf[o:o+elemSize])
+				}
+			}
+		})
 	})
 	return nil
 }

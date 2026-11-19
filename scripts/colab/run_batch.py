@@ -13,6 +13,19 @@ REPO = os.environ.get("REPO_URL", "https://github.com/sushvibez/light")
 BRANCH = os.environ.get("BRANCH", "main")
 WORK, LOGS = "/content/light", "/content/logs"
 
+# Gated checkpoints (DINOv3 for idol, FLUX 3): the token comes from the
+# environment, else from the account's Colab Secrets (key icon, a secret
+# named HF_TOKEN with notebook access on). It is never printed.
+if not os.environ.get("HF_TOKEN"):
+    try:
+        from google.colab import userdata
+        tok = userdata.get("HF_TOKEN")
+        if tok:
+            os.environ["HF_TOKEN"] = tok
+            print("HF_TOKEN: from Colab Secrets")
+    except Exception as e:  # no secret, or no notebook access for it
+        print(f"HF_TOKEN: not available ({type(e).__name__})")
+
 if not os.path.isdir(f"{WORK}/.git"):
     subprocess.run(["git", "clone", "-q", "--depth", "1", "--branch", BRANCH, REPO, WORK], check=True,
                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

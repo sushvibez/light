@@ -235,8 +235,19 @@ func applyFluxRoPE(x, cos, sin *tensor.Tensor) (*tensor.Tensor, error) {
 // qkv projects x (B, S, D) to RMS-normed q, k and v (B, S, H, Dh).
 func (a *fluxAttn) qkv(x *tensor.Tensor, H, Dh int) (q, k, v *tensor.Tensor, err error) {
 	B, S := x.Dim(0), x.Dim(1)
+	// On 16-bit-compute layers (Mixed16 on CUDA) round x once for all three.
+	xr, err := a.Q.Mixed16Input(x)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	proj := func(l *nn.Linear, n *nn.RMSNorm) (*tensor.Tensor, error) {
-		y, err := l.Forward(x)
+		var y *tensor.Tensor
+		var err error
+		if xr != nil && l.Mixed16 && l.W.DType() == xr.DType() {
+			y, err = l.ForwardMixed16(xr)
+		} else {
+			y, err = l.Forward(x)
+		}
 		if err != nil {
 			return nil, err
 		}

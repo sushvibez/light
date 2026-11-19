@@ -240,7 +240,7 @@ func LoadChatModelFromHF(repo string, dev device.Device, weightDT dtype.DType) (
 		return LoadGemma3FromHF(repo, dev, weightDT)
 	case "gemma4", "gemma4_text":
 		return LoadGemma4FromHF(repo, dev, weightDT)
-	case "qwen3_5", "qwen3_5_text":
+	case "qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text":
 		return LoadQwen35FromHF(repo, dev, weightDT)
 	case "muse_glimmer", "muse_glimmer_text":
 		return LoadMuseGlimmerFromHF(repo, dev, weightDT)
@@ -248,6 +248,12 @@ func LoadChatModelFromHF(repo string, dev device.Device, weightDT dtype.DType) (
 		return LoadDeepseekV2FromHF(repo, dev, weightDT)
 	case "minimax":
 		return LoadMiniMaxFromHF(repo, dev, weightDT)
+	case "glm5_next":
+		return LoadGLM5ChatFromHF(repo, dev)
+	case "deepseek_v41":
+		return LoadDeepseekV41ChatFromHF(repo, dev)
+	case "kimi_k31":
+		return LoadKimiK31ChatFromHF(repo, dev)
 	case "lfm3":
 		return LoadLFM3FromHF(repo, dev, weightDT)
 	case "falcon", "RefinedWebModel", "RefinedWeb":

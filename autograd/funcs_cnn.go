@@ -306,6 +306,7 @@ func ApplyBatchNorm2d(
 	fn := &BatchNorm2dFunction{XHat: res.XHat, Sigma: res.Sigma}
 	ctx := &Context{}
 	ctx.SaveForBackward(gamma)
+	ctx.snapshotVersions()
 	node := &FunctionNode{
 		fn:       fn,
 		ctx:      ctx,

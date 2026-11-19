@@ -30,6 +30,7 @@ func (t *Tensor) CopyFrom(src *Tensor) error {
 	if !dst.IsContiguous() || dst.offset != 0 {
 		return fmt.Errorf("tensor.CopyFrom: dst must be contiguous with zero offset")
 	}
+	t.storage.BumpVersion() // in-place write: invalidates saved autograd values
 	if !t.Device().SameAs(src.Device()) {
 		// Cross-device: stream bytes directly into the existing destination
 		// storage so we don't allocate a transient that has to wait for GC.
@@ -46,9 +47,10 @@ func (t *Tensor) CopyFrom(src *Tensor) error {
 	}
 	switch kind := t.Device().Kind(); kind {
 	case device.KindCPU:
-		dstBuf := dst.storage.CPUBytes()
-		srcBuf := srcC.storage.CPUBytes()
-		copy(dstBuf, srcBuf)
+		// Both are contiguous at offset 0, but either may be a prefix view
+		// over a larger allocation: copy only the logical bytes.
+		n := t.DType().ByteSize(t.NumElements())
+		copy(dst.storage.CPUBytes()[:n], srcC.storage.CPUBytes()[:n])
 		return nil
 	default:
 		fn := copyFns[kind]
@@ -85,3 +87,7 @@ func RegisterCUDACopy(fn CUDACopyFunc) { RegisterCopy(device.KindCUDA, fn) }
 
 // RegisterCUDACopyFromHost wires the CPU→CUDA in-place copy.
 func RegisterCUDACopyFromHost(fn CUDACopyFunc) { RegisterCopyFromHost(device.KindCUDA, fn) }
+
+// Version returns the in-place write counter of t's backing storage. Views
+// sharing a buffer share the counter; CopyFrom and Assign advance it.
+func (t *Tensor) Version() uint64 { return t.storage.Version() }

@@ -83,11 +83,16 @@ func LoadSpeech(spec Spec) (*Speech, error) {
 	if err != nil {
 		return nil, err
 	}
-	mimi, err := models.LoadMimiFromHF(MimiRepo, dev)
-	if err != nil {
-		return nil, fmt.Errorf("engine: Mimi codec: %w", err)
-	}
-	m, err := models.LoadMoshiGGUF(path, dev)
+	var mimi *models.Mimi
+	var m *models.Moshi
+	err = loadWeights(false, 0, func() error {
+		var err error
+		if mimi, err = models.LoadMimiFromHF(MimiRepo, dev); err != nil {
+			return fmt.Errorf("engine: Mimi codec: %w", err)
+		}
+		m, err = models.LoadMoshiGGUF(path, dev)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +122,10 @@ func (s *Speech) Converse(samples []float32, rate int, opts ConverseOpts) (*Conv
 		opts.AudioTopK = 250
 	}
 	sr := s.Mimi.Cfg.SampleRate
-	pcm := audio.Resample(samples, rate, sr)
+	pcm, err := audio.Resample(samples, rate, sr)
+	if err != nil {
+		return nil, err
+	}
 	if len(pcm) == 0 {
 		return nil, errors.New("engine: empty audio")
 	}

@@ -19,6 +19,9 @@ func init() {
 //	ls(x)_i = (x_i - max) - log( sum_j exp(x_j - max) )
 func logSoftmaxKernel[T dtype.Numeric](ctx *registry.Context) error {
 	a, out := ctx.Inputs[0], ctx.Output
+	if a.NumElements() == 0 {
+		return nil // empty tensor or empty axis: no rows to normalise
+	}
 	aS := asSlice[T](a)
 	oS := asSlice[T](out)
 

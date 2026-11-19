@@ -15,7 +15,10 @@
 # ~2 GB), mimo (MiMo-7B-RL MTP speculative decoding in the engine, 15.6 GB),
 # moshi (per-stage frame profile + CPU profile, 8.2 GB + Mimi), speech
 # (end-to-end speech-to-speech through the engine's OpenAI handler, same
-# checkpoints; not in the default set).
+# checkpoints; not in the default set), trellis (TRELLIS image to Gaussians / mesh against
+# TRELLIS's own code), idol (three demo objects) and idolcheck (Idol's
+# real weights against idol-sdk; after idol). NO_UPDATE=1 runs the
+# checkout in $WORK as is.
 # Everything fits an L4 (24 GB); an A100 is not needed.
 # Hugging Face downloads use $HF_TOKEN when set.
 set -uo pipefail
@@ -45,7 +48,9 @@ go version || exit 1
 
 # --- repo -------------------------------------------------------------------
 say "repo"
-if [ -d "$WORK/.git" ]; then
+if [ -n "${NO_UPDATE:-}" ] && [ -d "$WORK/.git" ]; then
+	echo "NO_UPDATE: using $WORK as is"
+elif [ -d "$WORK/.git" ]; then
 	git -C "$WORK" fetch --depth 1 origin "$BRANCH" && git -C "$WORK" reset --hard FETCH_HEAD && git -C "$WORK" clean -fdq
 else
 	git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$WORK" || exit 1
@@ -54,6 +59,8 @@ cd "$WORK" || exit 1
 git log -1 --format='%h %s (%cd)'
 
 # --- cgo: CUDA, cuBLAS, cuDNN -------------------------------------------------
+# torch keeps the environment it came with (its own cuDNN, the driver path).
+ORIG_LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}
 say "cgo"
 python3 -c 'import nvidia.cudnn' 2>/dev/null || ls /usr/include/cudnn.h >/dev/null 2>&1 ||
 	pip install -q "nvidia-cudnn-cu$(/usr/local/cuda/bin/nvcc --version | sed -n 's/.*release \([0-9]*\).*/\1/p')"
@@ -210,12 +217,70 @@ for g in "${SEL[@]}"; do
 		# encode, each step, VAE decode, the device synchronised at each mark.
 		[ -x "$WORK/light-bin" ] || go build -o "$WORK/light-bin" ./cmd/light || { SUMMARY+=("$g FAIL build"); continue; }
 		say "zperf kernels"
-		go test -count=1 -run 'FlashAttentionBF16' -bench 'FlashAttentionBF16' -benchtime 10x -v ./ops 2>&1 | grep -E '^(=== RUN|\s*--- |ok|FAIL|panic|Benchmark)|_test\.go:[0-9]+:'
+		go test -count=1 -run 'FlashAttentionBF16|ForwardMixed16|SiLUMulBF16' -bench 'FlashAttentionBF16' -benchtime 10x -v ./ops ./nn 2>&1 | grep -E '^(=== RUN|\s*--- |ok|FAIL|panic|Benchmark)|_test\.go:[0-9]+:'
 		ZI=Tongyi-MAI/Z-Image-Turbo
 		fetch $ZI
 		say "zperf"
 		LIGHT_TIMINGS=1 LIGHT_PROFILE_GPU=1 "$WORK/light-bin" image -device gpu -cpuprofile "$LOGS/zperf.cpu" -o "$LOGS/zperf.png" -width 1024 -height 1024 -seed 11 $ZI 			"A cozy reading nook by a large window on a rainy evening, warm lamp light, a ginger cat curled on a knitted blanket, shelves of old books, photorealistic" 2>&1 | tee "$LOGS/zperf.log"
 		SUMMARY+=("zperf $(grep -c '^timing' "$LOGS/zperf.log") phases, $(grep -oE 'generated in [0-9.]+ s' "$LOGS/zperf.log")")
+		;;
+	trellis)
+		# TRELLIS image -> sparse structure -> structured latent -> Gaussians / mesh
+		# on real weights: TRELLIS's own code with its real spconv /
+		# xformers backends (pip-installed if missing) writes the reference
+		# (~3.8 GB of downloads), then Light's CUDA build compares both
+		# stages and writes light.ply / light_views.png next to ref.ply.
+		# torch brings its own cuDNN: not the one LD_LIBRARY_PATH points cgo at.
+		LD_LIBRARY_PATH=$ORIG_LD_LIBRARY_PATH python3 scripts/colab/trellis_check.py /content/trellis_work 2>&1 | tee "$LOGS/$STAMP-trellis-ref.log" | tail -8
+		LIGHT_TRELLIS_DIR=/content/trellis_work run trellis ./diffusion 'TrellisReal|TrellisGaussiansReal|TrellisMeshReal'
+		cp /content/trellis_work/light_views.png /content/trellis_work/ref.json "$LOGS/" 2>/dev/null
+		;;
+	idol)
+		# speridlabs/idol on three of its demo images (black backgrounds cut
+		# out by a flood fill: BiRefNet is not ported yet), 50 steps, 262,144
+		# Gaussians, PLY + turntable views in $LOGS/idol/. DINOv3 is gated: it
+		# needs HF_TOKEN or the token file (hf auth login).
+		[ -x "$WORK/light-bin" ] || go build -o "$WORK/light-bin" ./cmd/light || { SUMMARY+=("$g FAIL build"); continue; }
+		mkdir -p "$LOGS/idol"
+		python3 - "$LOGS/idol" <<'PY'
+import sys, urllib.request
+import numpy as np
+from PIL import Image, ImageDraw, ImageFilter
+out = sys.argv[1]
+for name in ["fig-fox", "food-avocado", "fig-robot-cute"]:
+    src = f"{out}/{name}.webp"
+    urllib.request.urlretrieve(f"https://raw.githubusercontent.com/speridlabs/idol-sdk/main/demo/examples/{name}.webp", src)
+    im = Image.open(src).convert("RGB")
+    m = im.copy()
+    for xy in [(0, 0), (m.width - 1, 0), (0, m.height - 1), (m.width - 1, m.height - 1)]:
+        ImageDraw.floodfill(m, xy, (255, 0, 255), thresh=18)
+    mask = (np.array(m) == [255, 0, 255]).all(-1)
+    a = Image.fromarray(np.where(mask, 0, 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(1))
+    im.putalpha(a)
+    im.save(f"{out}/{name}.png")
+    print("cut", name, f"{(np.array(a) > 127).mean():.2f} object")
+PY
+		for ex in fig-fox food-avocado fig-robot-cute; do
+			say "idol $ex"
+			t0=$SECONDS
+			"$WORK/light-bin" idol -device gpu -o "$LOGS/idol/$ex.ply" "$LOGS/idol/$ex.png" 2>&1 | tr '' '
+' | grep -v '^step' | tee "$LOGS/idol-$ex.log"
+			SUMMARY+=("idol $ex: $(grep -oE '(loaded idol|generated [0-9]+ Gaussians) in [0-9.]+ s' "$LOGS/idol-$ex.log" | paste -sd ' ')  wall $((SECONDS - t0))s")
+		done
+		;;
+	idolcheck)
+		# Idol on the real weights against idol-sdk: scripts/colab/idol_check.py
+		# records the SDK's FP16 networks as shipped and in F32 for fig-fox
+		# (~10 min; torch keeps the original LD_LIBRARY_PATH), then the
+		# models / diffusion TestIdol*RealMatchesSDK compare Light's CUDA
+		# path. Run after the idol group (its cut-out fig-fox.png, downloads).
+		[ -f "$LOGS/idol/fig-fox.png" ] || { SUMMARY+=("idolcheck SKIP (run the idol group first)"); continue; }
+		[ -d /content/idol-sdk ] || git clone -q --depth 1 https://github.com/speridlabs/idol-sdk /content/idol-sdk
+		pip install -q tensordict plyfile 2>&1 | tail -1
+		LD_LIBRARY_PATH=$ORIG_LD_LIBRARY_PATH python3 scripts/colab/idol_check.py /content/idol-sdk "$LOGS/idol/fig-fox.png" /content/idol_ref 2>&1 |
+			grep -v 'it/s\]$' | tee "$LOGS/$STAMP-idol-ref.log" | tail -12
+		W=$(ls -d "$HF_HUB"/models--speridlabs--idol/snapshots/*/ | head -1)
+		LIGHT_IDOL_REF=/content/idol_ref LIGHT_IDOL_DIR=$W run idolcheck './models ./diffusion' 'TestIdolRealMatchesSDK|TestIdolConditionRealMatchesSDK' -p 1
 		;;
 	examples)
 		# Example images for scratch/examples: 1024^2 generations kept in

@@ -1,0 +1,552 @@
+package models
+
+import (
+	"fmt"
+	"math"
+	"sort"
+
+	"light/device"
+	"light/nn"
+	"light/ops"
+	"light/tensor"
+)
+
+// KimiK31 is Kimi K3.1's language model (moonshotai/Kimi-K3.1-Pro, model_type
+// kimi_k31; text config kimi_linear), ported from vLLM's implementation
+// (vllm/models/kimi_k3/nvidia, there being no modeling code in the repo or in
+// transformers): Kimi Delta Attention layers with a full-rank output gate and
+// a bounded forget gate, gated DeepSeek Sparse Attention layers (NoPE MLA
+// whose keys are restricted to a ReLU indexer's top index_topk, times a
+// sigmoid output gate), a dense first MLP then latent MoE layers (grouped
+// sigmoid routing with a correction bias, experts run in a down-projected
+// latent that is RMS-normed and projected back up, plus shared experts on the
+// hidden state), SiTU-GLU activations, and Attention Residuals: each
+// sub-layer's input is a softmax mix, per token, of the block snapshots taken
+// every attn_res_block_size layers and the running in-block sum.
+//
+// ForwardWithCache decodes incrementally (KimiK31Cache); the indexer's
+// top-k is selected on the host.
+type KimiK31 struct {
+	Cfg     KimiK31Config
+	Embed   *tensor.Tensor // (V, D)
+	Layers  []*kimiK31Layer
+	NormW   *tensor.Tensor
+	OutResW *tensor.Tensor // output_attn_res: proj ⊙ norm weight
+	LMHead  *nn.Linear
+	aux     *GLM5 // shared helpers (RMSNorm, l2norm)
+	dev     device.Device
+}
+
+type kimiK31MLP struct{ Gate, Up, Down *nn.Linear }
+
+type kimiK31Layer struct {
+	ID                  int
+	InNormW, PostNormW  *tensor.Tensor
+	AttnResW, MLPResW   *tensor.Tensor // AttnRes scorers: proj ⊙ norm weight
+	KDA                 bool
+	Q, K, V, O, B, FA   *nn.Linear
+	FB, G               *nn.Linear
+	ConvW               *tensor.Tensor // (3·H·hd, kernel)
+	DtBias, ONormW      *tensor.Tensor
+	ALog                []float32
+	QA, QB, KVA, KVB    *nn.Linear
+	MO, MG              *nn.Linear
+	QANormW, KVANormW   *tensor.Tensor
+	IWqB, IWk, IWeights *nn.Linear // DSA indexer (nil: dense causal MLA)
+	IKNormW, IKNormB    *tensor.Tensor
+	Dense, Shared       *kimiK31MLP
+	Experts             []*kimiK31MLP
+	RouterW             *tensor.Tensor // (E, D)
+	RouterBias          []float32
+	LatentDown          *nn.Linear
+	LatentUp            *nn.Linear
+	LatentNormW         *tensor.Tensor
+	// Stream holds the routed experts instead of Experts when they are
+	// streamed from the checkpoint (LIGHT_EXPERT_SLOTS); next is the
+	// following streamed layer, whose picks a decode step prefetches.
+	Stream *nn.ExpertCache[*kimiK31MLP]
+	next   *kimiK31Layer
+}
+
+func (m *KimiK31) rms(o *iop, x, w *tensor.Tensor) *tensor.Tensor { return m.aux.rms(o, x, w) }
+
+// glu is down(act(gate·x) · up'(up·x)): SiTU-GLU (vLLM's SituAndMul,
+// β·tanh(g/β)·σ(g) times β_lin·tanh(u/β_lin)) or SwiGLU.
+func (m *KimiK31) glu(o *iop, e *kimiK31MLP, x *tensor.Tensor) *tensor.Tensor {
+	g, u := o.lin(e.Gate, x), o.lin(e.Up, x)
+	if m.Cfg.HiddenAct == "situ" {
+		beta := 1.0
+		if b := m.Cfg.SituBeta; b != nil && *b != 0 {
+			beta = *b
+		}
+		sig := o.un(ops.Sigmoid, g)
+		g = o.mul(o.affine(o.un(ops.Tanh, o.affine(g, 1/beta, 0)), beta, 0), sig)
+		if lb := m.Cfg.SituLinearBeta; lb != nil && *lb != 0 {
+			u = o.affine(o.un(ops.Tanh, o.affine(u, 1 / *lb, 0)), *lb, 0)
+		}
+	} else {
+		g = o.un(ops.SiLU, g)
+	}
+	return o.lin(e.Down, o.mul(g, u))
+}
+
+// attnRes mixes the sources (each (B, S, D); the running sum last) with a
+// per-token softmax over w·RMSNorm(source), then RMS-normalises the mix with
+// outNorm when set (vLLM's attn_res op).
+func (m *KimiK31) attnRes(o *iop, sources []*tensor.Tensor, w, outNorm *tensor.Tensor) *tensor.Tensor {
+	if o.err != nil {
+		return nil
+	}
+	mixed := sources[len(sources)-1]
+	if n := len(sources); n > 1 {
+		B, S, D := mixed.Dim(0), mixed.Dim(1), mixed.Dim(2)
+		parts := make([]*tensor.Tensor, n)
+		for i, s := range sources {
+			parts[i] = o.reshape(s, B, S, 1, D)
+		}
+		stack := o.cat(2, parts...) // (B, S, n, D)
+		logits := o.sum(m.rms(o, stack, w), 3)
+		p := o.reshape(o.do(func() (*tensor.Tensor, error) { return ops.Softmax(logits, 2) }), B, S, n, 1)
+		mixed = o.sum(o.mul(stack, p), 2)
+	}
+	if outNorm != nil {
+		mixed = m.rms(o, mixed, outNorm)
+	}
+	return mixed
+}
+
+// kda is Kimi Delta Attention on x (B, S, D): q / k / v through SiLU short
+// convolutions, a per-channel forget gate lower_bound·σ(e^A·(f + dt_bias)),
+// the delta rule, then RMSNorm(out)·σ(g_proj x) and o_proj.
+func (m *KimiK31) kda(o *iop, ly *kimiK31Layer, x *tensor.Tensor, c *KimiK31Cache, li int) *tensor.Tensor {
+	if o.err != nil {
+		return nil
+	}
+	lc := m.Cfg.LinearAttnConfig
+	B, S := x.Dim(0), x.Dim(1)
+	H, hd := lc.NumHeads, lc.HeadDim
+	qkv := H * hd
+	mixed := o.cat(2, o.lin(ly.Q, x), o.lin(ly.K, x), o.lin(ly.V, x)) // (B, S, 3qkv)
+	conv := o.do(func() (*tensor.Tensor, error) {
+		t, err := mixed.Permute(0, 2, 1)
+		if err != nil {
+			return nil, err
+		}
+		if t, err = t.Contiguous(); err != nil {
+			return nil, err
+		}
+		var state *tensor.Tensor
+		if c != nil {
+			state = c.conv[li]
+		}
+		out, ns, err := ops.CausalConv1dDepthwise(t, ly.ConvW, state, true)
+		if err == nil && c != nil {
+			c.conv[li] = ns
+		}
+		return out, err
+	})
+	conv = o.perm(conv, 0, 2, 1)
+	part := func(i int) *tensor.Tensor { return o.reshape(o.narrow(conv, 2, i*qkv, qkv), B, S, H, hd) }
+	q := o.affine(m.aux.l2norm(o, part(0), 1e-6), 1/math.Sqrt(float64(hd)), 0)
+	k := m.aux.l2norm(o, part(1), 1e-6)
+	v := part(2)
+	f := o.reshape(o.add(o.lin(ly.FB, o.lin(ly.FA, x)), ly.DtBias), B, S, H, hd)
+	a := o.do(func() (*tensor.Tensor, error) {
+		e := make([]float32, H)
+		for i, al := range ly.ALog {
+			e[i] = float32(math.Exp(float64(al)))
+		}
+		return tensor.New(e, []int{H, 1}, m.dev)
+	})
+	var g *tensor.Tensor
+	if lb := lc.GateLowerBound; lb != nil {
+		g = o.affine(o.un(ops.Sigmoid, o.mul(f, a)), *lb, 0)
+	} else {
+		g = o.mul(o.un(ops.Neg, a), o.un(ops.Softplus, f))
+	}
+	beta := o.un(ops.Sigmoid, o.lin(ly.B, x))
+	if o.err != nil {
+		return nil
+	}
+	var rec *tensor.Tensor
+	if c != nil {
+		rec = c.rec[li]
+	}
+	core, final, err := ops.KimiDeltaRule(q, k, v, g, beta, rec)
+	if err != nil {
+		o.err = err
+		return nil
+	}
+	if c != nil {
+		c.rec[li] = final
+	}
+	gate := o.reshape(o.lin(ly.G, x), B, S, H, hd)
+	out := o.mul(o.do(func() (*tensor.Tensor, error) { return ops.RMSNorm(core, ly.ONormW, 1e-5) }), o.un(ops.Sigmoid, gate))
+	return o.lin(ly.O, o.reshape(out, B, S, qkv))
+}
+
+// dsaSelect is the indexer's per-query key mask (B, 1, S, T) for the S
+// queries after P cached tokens (T = P + S): 0 on the index_topk best
+// visible keys by Σ_h relu(q_h·k)·w_h (every visible key while there are no
+// more than index_topk), -inf elsewhere; all visible keys when the layer has
+// no indexer. The index keys are cached in c.
+func (m *KimiK31) dsaSelect(o *iop, ly *kimiK31Layer, x, qr *tensor.Tensor, c *KimiK31Cache, li, P int) *tensor.Tensor {
+	if o.err != nil {
+		return nil
+	}
+	B, S := x.Dim(0), x.Dim(1)
+	T := P + S
+	ninf := float32(math.Inf(-1))
+	mv := make([]float32, B*S*T)
+	for i := range mv {
+		if i%T > P+i/T%S {
+			mv[i] = ninf
+		}
+	}
+	var ik *tensor.Tensor
+	if ly.IWqB != nil {
+		ik = o.lin(ly.IWk, x)
+		if ly.IKNormB != nil {
+			ik = o.ln(ik, ly.IKNormW, ly.IKNormB, m.Cfg.RMSNormEps)
+		} else {
+			ik = m.rms(o, ik, ly.IKNormW)
+		}
+		if c != nil {
+			if c.ik[li] != nil {
+				ik = o.cat(1, c.ik[li], ik)
+			}
+			c.ik[li] = ik
+		}
+	}
+	if ly.IWqB != nil && T > m.Cfg.DSAConfig.IndexTopk {
+		dc := m.Cfg.DSAConfig
+		nh, dh, topk := dc.IndexNumHeads, dc.IndexHeadDim, dc.IndexTopk
+		iq := o.reshape(o.lin(ly.IWqB, qr), B, S*nh, dh)
+		ikT := o.do(func() (*tensor.Tensor, error) {
+			t, err := ik.Transpose(1, 2)
+			if err != nil {
+				return nil, err
+			}
+			return t.Contiguous()
+		})
+		w := o.affine(o.lin(ly.IWeights, x), 1/math.Sqrt(float64(dh))/math.Sqrt(float64(nh)), 0)
+		sc := o.reshape(o.un(ops.Relu, o.matmul(iq, ikT)), B, S, nh, T)
+		sv := o.toHost(o.sum(o.mul(sc, o.reshape(w, B, S, nh, 1)), 2)) // (B, S, T)
+		if o.err != nil {
+			return nil
+		}
+		order := make([]int, T)
+		for r := range B * S {
+			t := P + r%S
+			if t < topk {
+				continue
+			}
+			row := sv[r*T : r*T+t+1]
+			order = order[:t+1]
+			for i := range order {
+				order[i] = i
+			}
+			sort.SliceStable(order, func(a, b int) bool { return row[order[a]] > row[order[b]] })
+			for _, j := range order[topk:] {
+				mv[r*T+j] = ninf
+			}
+		}
+	}
+	return o.do(func() (*tensor.Tensor, error) { return tensor.New(mv, []int{B, 1, S, T}, m.dev) })
+}
+
+// mla is the gated (DSA) multi-head latent attention on x (B, S, D): NoPE,
+// the qk_rope_head_dim key part shared by every head, unrotated.
+func (m *KimiK31) mla(o *iop, ly *kimiK31Layer, x *tensor.Tensor, c *KimiK31Cache, li int) *tensor.Tensor {
+	if o.err != nil {
+		return nil
+	}
+	cfg := m.Cfg
+	B, S := x.Dim(0), x.Dim(1)
+	H, nope, rope, dv := cfg.NumHeads, cfg.QKNopeHeadDim, cfg.QKRopeHeadDim, cfg.VHeadDim
+	dk := nope + rope
+	qr := m.rms(o, o.lin(ly.QA, x), ly.QANormW)
+	q := o.perm(o.reshape(o.lin(ly.QB, qr), B, S, H, dk), 0, 2, 1, 3) // (B, H, S, dk)
+	kva := o.lin(ly.KVA, x)
+	kvc := m.rms(o, o.narrow(kva, 2, 0, cfg.KVLoraRank), ly.KVANormW)
+	kv := o.reshape(o.lin(ly.KVB, kvc), B, S, H, nope+dv)
+	k := o.narrow(kv, 3, 0, nope)
+	if rope > 0 {
+		pe := o.reshape(o.narrow(kva, 2, cfg.KVLoraRank, rope), B, S, 1, rope)
+		copies := make([]*tensor.Tensor, H)
+		for i := range copies {
+			copies[i] = pe
+		}
+		k = o.cat(3, k, o.cat(2, copies...))
+	}
+	headMajor := func(t *tensor.Tensor) *tensor.Tensor { // (B, S, H, d) → (B, H, S, d)
+		return o.do(func() (*tensor.Tensor, error) {
+			p, err := t.Permute(0, 2, 1, 3)
+			if err != nil {
+				return nil, err
+			}
+			return p.Contiguous()
+		})
+	}
+	kh, v := headMajor(k), headMajor(o.narrow(kv, 3, nope, dv))
+	P := 0
+	if c != nil {
+		P = c.pos
+		if c.k[li] != nil {
+			kh, v = o.cat(2, c.k[li], kh), o.cat(2, c.v[li], v)
+		}
+		c.k[li], c.v[li] = kh, v
+	}
+	T := P + S
+	kT := o.do(func() (*tensor.Tensor, error) {
+		t, err := kh.Transpose(2, 3) // (B, H, dk, T)
+		if err != nil {
+			return nil, err
+		}
+		return t.Contiguous()
+	})
+	mask := m.dsaSelect(o, ly, x, qr, c, li, P)
+	sc := o.matmul(o.reshape(q, B*H, S, dk), o.reshape(kT, B*H, dk, T))
+	sc = o.add(o.affine(o.reshape(sc, B, H, S, T), 1/math.Sqrt(float64(dk)), 0), mask)
+	p := o.reshape(o.do(func() (*tensor.Tensor, error) { return ops.Softmax(sc, 3) }), B*H, S, T)
+	att := o.reshape(o.matmul(p, o.reshape(v, B*H, T, dv)), B, H, S, dv)
+	out := o.reshape(o.perm(att, 0, 2, 1, 3), B, S, H*dv)
+	if ly.MG != nil {
+		out = o.mul(out, o.un(ops.Sigmoid, o.lin(ly.MG, x)))
+	}
+	return o.lin(ly.MO, out)
+}
+
+// moe is the routed experts (in the latent when routed_expert_hidden_size is
+// set) plus the shared experts on x (B, S, D).
+func (m *KimiK31) moe(o *iop, ly *kimiK31Layer, x *tensor.Tensor) *tensor.Tensor {
+	if o.err != nil {
+		return nil
+	}
+	B, S, D := x.Dim(0), x.Dim(1), x.Dim(2)
+	T := B * S
+	flat := o.reshape(x, T, D)
+	if o.err != nil {
+		return nil
+	}
+	if nx := ly.next; ly.Stream != nil && nx != nil {
+		moePrefetch(nx.Stream, flat, func(o *iop, x *tensor.Tensor) [][]moeHit { return m.route(o, nx, x) })
+	}
+	routedIn := flat
+	if ly.LatentDown != nil {
+		routedIn = o.lin(ly.LatentDown, flat)
+	}
+	byExpert := m.route(o, ly, flat)
+	routed := moeRun(o, m.dev, routedIn, byExpert, nil, ly.Stream, ly.Experts, func(e *kimiK31MLP, xs, wt *tensor.Tensor) *tensor.Tensor {
+		return o.mul(m.glu(o, e, xs), wt)
+	})
+	if o.err != nil {
+		return nil
+	}
+	if routed == nil {
+		o.err = fmt.Errorf("kimi_k31 layer %d: no expert routed", ly.ID)
+		return nil
+	}
+	if ly.LatentNormW != nil {
+		routed = m.rms(o, routed, ly.LatentNormW)
+	}
+	if ly.LatentUp != nil {
+		routed = o.lin(ly.LatentUp, routed)
+	}
+	if ly.Shared != nil {
+		routed = o.add(routed, m.glu(o, ly.Shared, flat))
+	}
+	return o.reshape(routed, B, S, D)
+}
+
+// route is the host routing on flat (T, D): grouped top-k over
+// σ(logits) + correction bias (a group scored by its two best), weights
+// from the unbiased scores, renormalised and scaled.
+func (m *KimiK31) route(o *iop, ly *kimiK31Layer, flat *tensor.Tensor) [][]moeHit {
+	if o.err != nil {
+		return nil
+	}
+	cfg := m.Cfg
+	T := flat.Dim(0)
+	logits := o.do(func() (*tensor.Tensor, error) {
+		wt, err := ly.RouterW.Transpose(0, 1)
+		if err != nil {
+			return nil, err
+		}
+		return ops.MatMul(flat, wt)
+	})
+	lv := o.toHost(logits)
+	if o.err != nil {
+		return nil
+	}
+	E, K := cfg.NumExperts, cfg.ExpertsPerTok
+	G, TG := 1, 1
+	if cfg.UseGroupedTopk {
+		G, TG = cfg.NumExpertGroup, cfg.TopkGroup
+	}
+	per := E / G
+	byExpert := make([][]moeHit, E)
+	sc, sel := make([]float64, E), make([]float64, E)
+	idx, gidx, gs := make([]int, 0, E), make([]int, G), make([]float64, G)
+	for t := range T {
+		row := lv[t*E : (t+1)*E]
+		if cfg.RouterAct == "softmax" {
+			mx := math.Inf(-1)
+			for _, l := range row {
+				mx = max(mx, float64(l))
+			}
+			var s float64
+			for e, l := range row {
+				sc[e] = math.Exp(float64(l) - mx)
+				s += sc[e]
+			}
+			for e := range sc {
+				sc[e] /= s
+			}
+		} else {
+			for e, l := range row {
+				sc[e] = 1 / (1 + math.Exp(-float64(l)))
+			}
+		}
+		for e := range sel {
+			sel[e] = sc[e]
+			if ly.RouterBias != nil {
+				sel[e] += float64(ly.RouterBias[e])
+			}
+		}
+		idx = idx[:0]
+		if G > 1 {
+			for g := range G {
+				grp := append([]float64(nil), sel[g*per:(g+1)*per]...)
+				sort.Sort(sort.Reverse(sort.Float64Slice(grp)))
+				if ly.RouterBias != nil && per > 1 {
+					gs[g] = grp[0] + grp[1]
+				} else {
+					gs[g] = grp[0]
+				}
+				gidx[g] = g
+			}
+			sort.SliceStable(gidx, func(a, b int) bool { return gs[gidx[a]] > gs[gidx[b]] })
+			for _, g := range gidx[:TG] {
+				for e := g * per; e < (g+1)*per; e++ {
+					idx = append(idx, e)
+				}
+			}
+		} else {
+			for e := range E {
+				idx = append(idx, e)
+			}
+		}
+		sort.SliceStable(idx, func(a, b int) bool { return sel[idx[a]] > sel[idx[b]] })
+		var sum float64
+		for _, e := range idx[:K] {
+			sum += sc[e]
+		}
+		for _, e := range idx[:K] {
+			w := sc[e]
+			if cfg.MoERenormalize {
+				w /= sum
+			}
+			byExpert[e] = append(byExpert[e], moeHit{t, float32(w * cfg.RoutedScaling)})
+		}
+	}
+	return byExpert
+}
+
+func (m *KimiK31) mixer(o *iop, ly *kimiK31Layer, x *tensor.Tensor, c *KimiK31Cache, li int) *tensor.Tensor {
+	if ly.KDA {
+		return m.kda(o, ly, x, c, li)
+	}
+	return m.mla(o, ly, x, c, li)
+}
+
+func (m *KimiK31) ffn(o *iop, ly *kimiK31Layer, x *tensor.Tensor) *tensor.Tensor {
+	if ly.Dense != nil {
+		return m.glu(o, ly.Dense, x)
+	}
+	return m.moe(o, ly, x)
+}
+
+// KimiK31Cache is the decode state: per KDA layer the short-convolution
+// and recurrent states, per MLA layer the head-major keys / values and the
+// DSA index keys.
+type KimiK31Cache struct {
+	pos       int
+	conv, rec []*tensor.Tensor
+	k, v, ik  []*tensor.Tensor
+}
+
+// NewCache returns an empty decode cache.
+func (m *KimiK31) NewCache() *KimiK31Cache {
+	n := len(m.Layers)
+	return &KimiK31Cache{conv: make([]*tensor.Tensor, n), rec: make([]*tensor.Tensor, n),
+		k: make([]*tensor.Tensor, n), v: make([]*tensor.Tensor, n), ik: make([]*tensor.Tensor, n)}
+}
+
+// Pos is the number of tokens the cache has seen.
+func (c *KimiK31Cache) Pos() int { return c.pos }
+
+// Forward returns the logits (B, S, V) of every position for tokens (B, S).
+func (m *KimiK31) Forward(tokens *tensor.Tensor) (*tensor.Tensor, error) {
+	return m.ForwardWithCache(tokens, nil)
+}
+
+// ForwardWithCache returns the logits (B, S, V) of tokens (B, S) following
+// the cache's (nil: none), and extends the cache with them.
+func (m *KimiK31) ForwardWithCache(tokens *tensor.Tensor, c *KimiK31Cache) (*tensor.Tensor, error) {
+	o := &iop{}
+	cfg := m.Cfg
+	if tokens.Rank() != 2 {
+		return nil, fmt.Errorf("kimi_k31: tokens %v, want (B, S)", tokens.Shape())
+	}
+	B, S := tokens.Dim(0), tokens.Dim(1)
+	done := func(logits *tensor.Tensor) (*tensor.Tensor, error) {
+		if o.err == nil && c != nil {
+			c.pos += S
+		}
+		return logits, o.err
+	}
+	flatTok := o.do(func() (*tensor.Tensor, error) { return tokens.Reshape(B * S) })
+	h := o.reshape(o.do(func() (*tensor.Tensor, error) { return ops.IndexSelect(m.Embed, flatTok) }), B, S, cfg.HiddenSize)
+	bs := cfg.AttnResBlockSize
+	if bs <= 0 { // plain pre-norm residual stream
+		for li, ly := range m.Layers {
+			h = o.add(h, m.mixer(o, ly, m.rms(o, h, ly.InNormW), c, li))
+			h = o.add(h, m.ffn(o, ly, m.rms(o, h, ly.PostNormW)))
+		}
+		return done(o.lin(m.LMHead, m.rms(o, h, m.NormW)))
+	}
+	// Attention Residuals: blocks[j] snapshots the stream at layer j·bs; prefix
+	// is the sum of the sub-layer outputs since the last snapshot (the
+	// embedding before the first one).
+	prefix := h
+	var delta *tensor.Tensor
+	var blocks []*tensor.Tensor
+	for i, ly := range m.Layers {
+		if delta != nil {
+			prefix = o.add(prefix, delta)
+		}
+		prev, write := (i+bs-1)/bs, i%bs == 0
+		if write {
+			blocks = append(blocks, prefix)
+		}
+		x := m.attnRes(o, append(append([]*tensor.Tensor(nil), blocks[:prev]...), prefix), ly.AttnResW, ly.InNormW)
+		a := m.mixer(o, ly, x, c, i)
+		if write {
+			prefix = a
+		} else {
+			prefix = o.add(prefix, a)
+		}
+		nb := prev
+		if write {
+			nb++
+		}
+		x = m.attnRes(o, append(append([]*tensor.Tensor(nil), blocks[:nb]...), prefix), ly.MLPResW, ly.PostNormW)
+		delta = m.ffn(o, ly, x)
+	}
+	if delta != nil {
+		prefix = o.add(prefix, delta)
+	}
+	out := m.attnRes(o, append(append([]*tensor.Tensor(nil), blocks...), prefix), m.OutResW, nil)
+	return done(o.lin(m.LMHead, m.rms(o, out, m.NormW)))
+}

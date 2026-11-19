@@ -10,17 +10,26 @@ import (
 // `like`'s dtype. Used by composed activations (GELU, ReLU6, …) so their
 // constants don't sit at F32 when the rest of the graph runs in BF16.
 func scalarLike(v float32, like *tensor.Tensor) (*tensor.Tensor, error) {
-	t, err := tensor.Full(v, []int{1}, like.Device())
+	return fullLike(float64(v), []int{1}, like)
+}
+
+// fullLike returns a tensor of shape dims filled with v, at like's dtype and
+// on like's device. F32 and F64 are filled directly (F64 keeps v's full
+// precision); other float dtypes are built at F32 and cast. Backward passes
+// use it so their constants match the gradient's dtype instead of assuming
+// F32.
+func fullLike(v float64, dims []int, like *tensor.Tensor) (*tensor.Tensor, error) {
+	switch like.DType() {
+	case dtype.F32:
+		return tensor.Full(float32(v), dims, like.Device())
+	case dtype.F64:
+		return tensor.Full(v, dims, like.Device())
+	}
+	t, err := tensor.Full(float32(v), dims, like.Device())
 	if err != nil {
 		return nil, err
 	}
-	if like.DType() != dtype.F32 {
-		t, err = ops.Cast(t, like.DType())
-		if err != nil {
-			return nil, err
-		}
-	}
-	return t, nil
+	return ops.Cast(t, like.DType())
 }
 
 // ---- ReLU ----
@@ -88,7 +97,7 @@ func (SigmoidFunction) Forward(ctx *Context, inputs []*tensor.Tensor) ([]*tensor
 func (SigmoidFunction) Backward(ctx *Context, gradOutputs []*tensor.Tensor) ([]*tensor.Tensor, error) {
 	g := gradOutputs[0]
 	y := ctx.Saved()[0]
-	one, err := tensor.Full[float32](1.0, []int{1}, y.Device())
+	one, err := scalarLike(1, y)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +147,7 @@ func (TanhFunction) Backward(ctx *Context, gradOutputs []*tensor.Tensor) ([]*ten
 	if err != nil {
 		return nil, err
 	}
-	one, err := tensor.Full[float32](1.0, []int{1}, y.Device())
+	one, err := scalarLike(1, y)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +194,7 @@ func (SiLUFunction) Backward(ctx *Context, gradOutputs []*tensor.Tensor) ([]*ten
 	if err != nil {
 		return nil, err
 	}
-	one, err := tensor.Full[float32](1.0, []int{1}, x.Device())
+	one, err := scalarLike(1, x)
 	if err != nil {
 		return nil, err
 	}

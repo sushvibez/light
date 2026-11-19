@@ -54,9 +54,35 @@ func addKernel[T dtype.Numeric](ctx *registry.Context) error {
 		})
 		return nil
 	}
-	aStr, bStr := aStridesB.Slice(), bStridesB.Slice()
+	// Broadcast / strided: coalesced axes, tight loops per innermost run
+	// (a bias over rows is a vector + scalar loop, not a per-element walk).
+	d, sa, sb := parallel.Coalesce(dims, aStridesB.Slice(), bStridesB.Slice())
+	ia, ib := sa[len(sa)-1], sb[len(sb)-1]
 	parallel.For(n, parallel.Grain, func(lo, hi int) {
-		parallel.Strided(dims, aStr, bStr, a.Offset(), b.Offset(), lo, hi, func(i, ao, bo int) { outS[i] = aS[ao] + bS[bo] })
+		parallel.StridedRuns(d, sa, sb, a.Offset(), b.Offset(), lo, hi, func(i, ao, bo, m int) {
+			o := outS[i : i+m]
+			switch {
+			case ia == 1 && ib == 1:
+				x, y := aS[ao:ao+m], bS[bo:bo+m]
+				for k := range o {
+					o[k] = x[k] + y[k]
+				}
+			case ia == 1 && ib == 0:
+				x, v := aS[ao:ao+m], bS[bo]
+				for k := range o {
+					o[k] = x[k] + v
+				}
+			case ia == 0 && ib == 1:
+				v, y := aS[ao], bS[bo:bo+m]
+				for k := range o {
+					o[k] = v + y[k]
+				}
+			default:
+				for k := range o {
+					o[k] = aS[ao+k*ia] + bS[bo+k*ib]
+				}
+			}
+		})
 	})
 	return nil
 }

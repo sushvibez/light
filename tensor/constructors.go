@@ -53,7 +53,7 @@ func Linspace(start, stop float64, n int, dt dtype.DType, dev device.Device) (*T
 	}
 	switch dt {
 	case dtype.F32:
-		vals := unsafe.Slice((*float32)(unsafe.Pointer(&buf[0])), n)
+		vals := unsafe.Slice((*float32)(unsafe.Pointer(unsafe.SliceData(buf))), n)
 		for i := range n {
 			vals[i] = float32(start + float64(i)*step)
 		}
@@ -61,7 +61,7 @@ func Linspace(start, stop float64, n int, dt dtype.DType, dev device.Device) (*T
 			vals[n-1] = float32(stop) // avoid rounding drift
 		}
 	case dtype.F64:
-		vals := unsafe.Slice((*float64)(unsafe.Pointer(&buf[0])), n)
+		vals := unsafe.Slice((*float64)(unsafe.Pointer(unsafe.SliceData(buf))), n)
 		for i := range n {
 			vals[i] = start + float64(i)*step
 		}
@@ -90,12 +90,12 @@ func Eye(n int, dt dtype.DType, dev device.Device) (*Tensor, error) {
 	buf := cpuT.storage.CPUBytes()
 	switch dt {
 	case dtype.F32:
-		vals := unsafe.Slice((*float32)(unsafe.Pointer(&buf[0])), n*n)
+		vals := unsafe.Slice((*float32)(unsafe.Pointer(unsafe.SliceData(buf))), n*n)
 		for i := range n {
 			vals[i*n+i] = 1
 		}
 	case dtype.F64:
-		vals := unsafe.Slice((*float64)(unsafe.Pointer(&buf[0])), n*n)
+		vals := unsafe.Slice((*float64)(unsafe.Pointer(unsafe.SliceData(buf))), n*n)
 		for i := range n {
 			vals[i*n+i] = 1
 		}
@@ -153,10 +153,10 @@ func Meshgrid(x, y *Tensor) (*Tensor, *Tensor, error) {
 	gridY, _ := Zeros(x.DType(), []int{N, M}, x.Device())
 	switch x.DType() {
 	case dtype.F32:
-		xs := unsafe.Slice((*float32)(unsafe.Pointer(&xc.storage.CPUBytes()[0])), M)
-		ys := unsafe.Slice((*float32)(unsafe.Pointer(&yc.storage.CPUBytes()[0])), N)
-		gx := unsafe.Slice((*float32)(unsafe.Pointer(&gridX.storage.CPUBytes()[0])), N*M)
-		gy := unsafe.Slice((*float32)(unsafe.Pointer(&gridY.storage.CPUBytes()[0])), N*M)
+		xs := unsafe.Slice((*float32)(unsafe.Pointer(unsafe.SliceData(xc.storage.CPUBytes()))), M)
+		ys := unsafe.Slice((*float32)(unsafe.Pointer(unsafe.SliceData(yc.storage.CPUBytes()))), N)
+		gx := unsafe.Slice((*float32)(unsafe.Pointer(unsafe.SliceData(gridX.storage.CPUBytes()))), N*M)
+		gy := unsafe.Slice((*float32)(unsafe.Pointer(unsafe.SliceData(gridY.storage.CPUBytes()))), N*M)
 		for i := range N {
 			for j := range M {
 				gx[i*M+j] = xs[j]
@@ -164,10 +164,10 @@ func Meshgrid(x, y *Tensor) (*Tensor, *Tensor, error) {
 			}
 		}
 	case dtype.F64:
-		xs := unsafe.Slice((*float64)(unsafe.Pointer(&xc.storage.CPUBytes()[0])), M)
-		ys := unsafe.Slice((*float64)(unsafe.Pointer(&yc.storage.CPUBytes()[0])), N)
-		gx := unsafe.Slice((*float64)(unsafe.Pointer(&gridX.storage.CPUBytes()[0])), N*M)
-		gy := unsafe.Slice((*float64)(unsafe.Pointer(&gridY.storage.CPUBytes()[0])), N*M)
+		xs := unsafe.Slice((*float64)(unsafe.Pointer(unsafe.SliceData(xc.storage.CPUBytes()))), M)
+		ys := unsafe.Slice((*float64)(unsafe.Pointer(unsafe.SliceData(yc.storage.CPUBytes()))), N)
+		gx := unsafe.Slice((*float64)(unsafe.Pointer(unsafe.SliceData(gridX.storage.CPUBytes()))), N*M)
+		gy := unsafe.Slice((*float64)(unsafe.Pointer(unsafe.SliceData(gridY.storage.CPUBytes()))), N*M)
 		for i := range N {
 			for j := range M {
 				gx[i*M+j] = xs[j]

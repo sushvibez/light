@@ -15,7 +15,6 @@ import (
 	"strings"
 
 	"light/models"
-	"light/nn"
 	"light/ops"
 	"light/tensor"
 )
@@ -326,13 +325,7 @@ func (m *Model) multimodalPixtral(lm *models.Llama, msgs []Message, ids []int32,
 // loadTower loads a vision tower with the LM's weight storage (16-bit
 // under w16, so a 3B model and its tower fit an integrated GPU together).
 func (m *Model) loadTower(load func() error) error {
-	if !m.w16 {
-		return load()
-	}
-	if err := nn.WithWeightStorage16(m.store16, load); err != nil {
-		return err
-	}
-	return nil
+	return loadWeights(m.w16, m.store16, load)
 }
 
 // settle collects garbage twice so device buffers released by tensor

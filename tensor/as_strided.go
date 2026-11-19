@@ -2,6 +2,7 @@ package tensor
 
 import (
 	"fmt"
+	"math"
 
 	"light/shape"
 )
@@ -18,21 +19,40 @@ func (t *Tensor) AsStrided(dims, strides []int, offset int) (*Tensor, error) {
 	if offset < 0 {
 		return nil, fmt.Errorf("AsStrided: negative offset %d", offset)
 	}
-	maxIdx := offset
-	n := 1
+	empty := false
+	numel := 1 // saturates; only its overflow matters (zero strides can broadcast huge dims)
 	for i, d := range dims {
 		if d < 0 || strides[i] < 0 {
 			return nil, fmt.Errorf("AsStrided: dim %d (size %d, stride %d) must be non-negative", i, d, strides[i])
 		}
 		if d == 0 {
-			n = 0
-		}
-		if d > 0 {
-			maxIdx += (d - 1) * strides[i]
+			empty = true
+		} else if numel > math.MaxInt/d {
+			numel = math.MaxInt
+		} else {
+			numel *= d
 		}
 	}
-	if n != 0 && maxIdx >= t.storage.Len() {
-		return nil, fmt.Errorf("AsStrided: view reaches element %d but storage holds %d", maxIdx, t.storage.Len())
+	if !empty && numel == math.MaxInt {
+		return nil, fmt.Errorf("AsStrided: dims %v element count overflows", dims)
+	}
+	if !empty {
+		// The highest reachable element is offset + Σ (d-1)·stride. Track
+		// the storage still free past it instead of the sum itself, so no
+		// multiplication or addition can wrap and admit an invalid view.
+		room := t.storage.Len() - 1 - offset // elements left after offset
+		if room < 0 {
+			return nil, fmt.Errorf("AsStrided: offset %d outside storage of %d elements", offset, t.storage.Len())
+		}
+		for i, d := range dims {
+			if d <= 1 || strides[i] == 0 {
+				continue
+			}
+			if strides[i] > room/(d-1) {
+				return nil, fmt.Errorf("AsStrided: dims %v strides %v offset %d reach past storage of %d elements", dims, strides, offset, t.storage.Len())
+			}
+			room -= (d - 1) * strides[i]
+		}
 	}
 	return newTensor(t.storage, shape.New(dims...), shape.NewStrides(strides...), offset), nil
 }
