@@ -83,8 +83,10 @@ func GenerateImage(o ImageOptions) (*ImageResult, error) {
 		switch o.Pipeline.Family {
 		case "flux", "":
 			class = "FluxPipeline"
+		case "flux2":
+			class = "Flux2KleinPipeline"
 		default:
-			return nil, fmt.Errorf("pipeline: family %q is not composable yet (flux only)", o.Pipeline.Family)
+			return nil, fmt.Errorf("pipeline: family %q is not composable yet (flux, flux2)", o.Pipeline.Family)
 		}
 		if t := o.Pipeline.stageTarget("denoise"); t == "local/cpu" {
 			o.Device = "cpu"
@@ -123,7 +125,26 @@ func GenerateImage(o ImageOptions) (*ImageResult, error) {
 	var loadS float64
 	switch class {
 	case "Flux2KleinPipeline", "Flux2Pipeline":
-		p, err := diffusion.LoadFlux2(o.Repo, d, diffusion.Flux2LoadOptions{Storage16: s16, EncoderDevice: ed, Sequential: true})
+		lo := diffusion.Flux2LoadOptions{Storage16: s16, EncoderDevice: ed, Sequential: true}
+		repo := o.Repo
+		if o.Pipeline != nil {
+			if lo.Components, err = flux2Components(o); err != nil {
+				return nil, err
+			}
+			if o.Pipeline.stageTarget("text_encode") == "local/cpu" {
+				lo.EncoderDevice = device.CPU()
+			}
+			if repo == "" {
+				repo = lo.Components["transformer"]
+			}
+		}
+		tdir := lo.Components["transformer"]
+		if tdir == "" {
+			tdir = filepath.Join(snapshotDir(repo), "transformer")
+		}
+		lo.KeepFP8 = s16 && device.IsCUDA(d)
+		lo.StreamBlocks = s16 && device.IsCUDA(d) && dirBytes(tdir, "*.safetensors") > 13<<30
+		p, err := diffusion.LoadFlux2(repo, d, lo)
 		if err != nil {
 			return nil, err
 		}

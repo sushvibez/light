@@ -381,6 +381,17 @@ func resolveSlot(s PipelineSlot, fallbackRepo, sub string) (dir string, file str
 
 // fluxComponents maps a FLUX.1 spec to component folder overrides.
 func fluxComponents(o ImageOptions) (map[string]string, error) {
+	return familyComponents(o, []string{"text_encoder", "text_encoder_2"})
+}
+
+// flux2Components maps a FLUX.2 spec (one text encoder) to overrides.
+func flux2Components(o ImageOptions) (map[string]string, error) {
+	return familyComponents(o, []string{"text_encoder"})
+}
+
+// familyComponents resolves the transformer, VAE, the family's text
+// encoders (in order) and the scheduler slot.
+func familyComponents(o ImageOptions, encoders []string) (map[string]string, error) {
 	sp := o.Pipeline
 	comp := map[string]string{}
 	set := func(slot PipelineSlot, sub string) error {
@@ -405,14 +416,16 @@ func fluxComponents(o ImageOptions) (map[string]string, error) {
 		return nil, err
 	}
 	encs := sp.TextEncoders
-	for len(encs) < 2 {
+	for len(encs) < len(encoders) {
 		encs = append(encs, PipelineSlot{})
 	}
-	if err := set(encs[0], "text_encoder"); err != nil {
-		return nil, err
+	if len(encs) > len(encoders) {
+		return nil, fmt.Errorf("pipeline: %d text encoders given, the family has %d (%v)", len(encs), len(encoders), encoders)
 	}
-	if err := set(encs[1], "text_encoder_2"); err != nil {
-		return nil, err
+	for i, sub := range encoders {
+		if err := set(encs[i], sub); err != nil {
+			return nil, err
+		}
 	}
 	if sp.Scheduler != (PipelineSlot{}) {
 		if err := set(sp.Scheduler, "scheduler"); err != nil {

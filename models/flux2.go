@@ -50,7 +50,30 @@ type Flux2Transformer struct {
 	Single                    []*flux2SingleBlock
 	NormOut, ProjOut          *nn.Linear
 	ones, zeros               *tensor.Tensor
+	stream                    *flux2Stream // nil: Double / Single are resident
 }
+
+// flux2Stream streams the blocks per forward pass (Flux2TransformerLoadOptions.Stream).
+type flux2Stream struct {
+	hf     map[string]*tensor.Tensor
+	dev    device.Device
+	wdt    dtype.DType
+	mixed  bool
+	mode   fluxWeightMode
+	double *nn.ExpertCache[*flux2DoubleBlock]
+	single *nn.ExpertCache[*flux2SingleBlock]
+}
+
+// Flux2TransformerLoadOptions adjust LoadFlux2TransformerOpts (see
+// FluxTransformerLoadOptions: the same streaming, slots and FP8 choices).
+type Flux2TransformerLoadOptions struct {
+	Stream  bool
+	Slots   int
+	KeepFP8 bool
+}
+
+// Streamed reports whether the blocks are streamed per forward pass.
+func (m *Flux2Transformer) Streamed() bool { return m.stream != nil }
 
 type flux2DoubleBlock struct {
 	Img, Ctx          fluxAttn
@@ -67,6 +90,10 @@ type flux2SingleBlock struct {
 
 // NewFlux2Transformer allocates an uninitialised F32 model.
 func NewFlux2Transformer(cfg Flux2Config, dev device.Device) (*Flux2Transformer, error) {
+	return newFlux2Transformer(cfg, dev, fluxWeightsF32)
+}
+
+func newFlux2Transformer(cfg Flux2Config, dev device.Device, mode fluxWeightMode) (*Flux2Transformer, error) {
 	if cfg.PatchSize == 0 {
 		cfg.PatchSize = 1
 	}
@@ -91,12 +118,20 @@ func NewFlux2Transformer(cfg Flux2Config, dev device.Device) (*Flux2Transformer,
 	}
 	D, M := cfg.inner(), cfg.mlp()
 	var err error
+	_, mixed := nn.WeightStorage(D)
 	lin := func(in, out int) *nn.Linear {
 		if err != nil {
 			return nil
 		}
 		var l *nn.Linear
-		l, err = nn.NewLinearUninit(in, out, false, dtype.F32, dev)
+		switch mode {
+		case fluxWeightsFP8:
+			l, err = fp8Linear(in, out, false, mixed, dev)
+		case fluxWeightsPlaceholder:
+			l, err = nn.NewLinearPlaceholder(in, out, false, dev)
+		default:
+			l, err = nn.NewLinearUninit(in, out, false, dtype.F32, dev)
+		}
 		return l
 	}
 	rms := func() *nn.RMSNorm {
@@ -107,7 +142,6 @@ func NewFlux2Transformer(cfg Flux2Config, dev device.Device) (*Flux2Transformer,
 		n, err = nn.NewRMSNormWithDType(cfg.HeadDim, cfg.Eps, dtype.F32, dev)
 		return n
 	}
-	attn := func() fluxAttn { return fluxAttn{Q: lin(D, D), K: lin(D, D), V: lin(D, D), NormQ: rms(), NormK: rms()} }
 	m := &Flux2Transformer{Cfg: cfg,
 		XEmbed: lin(cfg.InChannels*cfg.PatchSize*cfg.PatchSize, D), ContextEmbed: lin(cfg.JointDim, D),
 		TimeL1: lin(256, D), TimeL2: lin(D, D),
@@ -117,11 +151,10 @@ func NewFlux2Transformer(cfg Flux2Config, dev device.Device) (*Flux2Transformer,
 		m.GuideL1, m.GuideL2 = lin(256, D), lin(D, D)
 	}
 	for range cfg.NumLayers {
-		m.Double = append(m.Double, &flux2DoubleBlock{Img: attn(), Ctx: attn(), Out: lin(D, D), CtxOut: lin(D, D),
-			FFIn: lin(D, 2*M), FFOut: lin(M, D), CtxFFIn: lin(D, 2*M), CtxFFOut: lin(M, D)})
+		m.Double = append(m.Double, newFlux2Double(D, M, lin, rms))
 	}
 	for range cfg.NumSingleLayers {
-		m.Single = append(m.Single, &flux2SingleBlock{QKVMLP: lin(D, 3*D+2*M), NormQ: rms(), NormK: rms(), Out: lin(D+M, D)})
+		m.Single = append(m.Single, newFlux2Single(D, M, lin, rms))
 	}
 	if err != nil {
 		return nil, err
@@ -133,6 +166,64 @@ func NewFlux2Transformer(cfg Flux2Config, dev device.Device) (*Flux2Transformer,
 		return nil, err
 	}
 	return m, nil
+}
+
+func newFlux2Double(D, M int, lin func(in, out int) *nn.Linear, rms func() *nn.RMSNorm) *flux2DoubleBlock {
+	attn := func() fluxAttn { return fluxAttn{Q: lin(D, D), K: lin(D, D), V: lin(D, D), NormQ: rms(), NormK: rms()} }
+	return &flux2DoubleBlock{Img: attn(), Ctx: attn(), Out: lin(D, D), CtxOut: lin(D, D),
+		FFIn: lin(D, 2*M), FFOut: lin(M, D), CtxFFIn: lin(D, 2*M), CtxFFOut: lin(M, D)}
+}
+
+func newFlux2Single(D, M int, lin func(in, out int) *nn.Linear, rms func() *nn.RMSNorm) *flux2SingleBlock {
+	return &flux2SingleBlock{QKVMLP: lin(D, 3*D+2*M), NormQ: rms(), NormK: rms(), Out: lin(D+M, D)}
+}
+
+// blockBuilders are constructors for one streamed block at the weight
+// storage recorded at load time; the first error sticks in *err.
+func (s *flux2Stream) blockBuilders(headDim int, eps float64, err *error) (func(in, out int) *nn.Linear, func() *nn.RMSNorm) {
+	lin := func(in, out int) *nn.Linear {
+		if *err != nil {
+			return nil
+		}
+		var l *nn.Linear
+		var e error
+		switch s.mode {
+		case fluxWeightsFP8:
+			l, e = fp8Linear(in, out, false, s.mixed, s.dev)
+		case fluxWeightsPlaceholder:
+			l, e = nn.NewLinearPlaceholder(in, out, false, s.dev)
+		default:
+			dt := s.wdt
+			if in%2 != 0 {
+				dt = dtype.F32
+			}
+			if l, e = nn.NewLinearPlaceholder(in, out, false, s.dev); e == nil {
+				var w *tensor.Tensor
+				if w, e = tensor.Zeros(dt, []int{out, in}, s.dev); e == nil {
+					e = l.SetWeight(w)
+				}
+			}
+			if l != nil {
+				l.Mixed16 = s.mixed && dt != dtype.F32
+			}
+		}
+		if e != nil {
+			*err = e
+			return nil
+		}
+		return l
+	}
+	rms := func() *nn.RMSNorm {
+		if *err != nil {
+			return nil
+		}
+		n, e := nn.NewRMSNormWithDType(headDim, eps, dtype.F32, s.dev)
+		if e != nil {
+			*err = e
+		}
+		return n
+	}
+	return lin, rms
 }
 
 // swiglu is silu(x[..., :half]) · x[..., half:].
@@ -238,6 +329,15 @@ func (m *Flux2Transformer) Forward(in Flux2Inputs) (*tensor.Tensor, error) {
 	if err != nil {
 		return nil, err
 	}
+	if m.stream != nil {
+		err = m.stream.double.Each(seq(m.Cfg.NumLayers), func(i int, b *flux2DoubleBlock) error {
+			x, ctx, err = m.doubleBlock(b, x, ctx, modImg, modTxt, cos, sin)
+			return err
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
 	for i, b := range m.Double {
 		if x, ctx, err = m.doubleBlock(b, x, ctx, modImg, modTxt, cos, sin); err != nil {
 			return nil, fmt.Errorf("flux2: double block %d: %w", i, err)
@@ -246,6 +346,15 @@ func (m *Flux2Transformer) Forward(in Flux2Inputs) (*tensor.Tensor, error) {
 	h, err := ops.Concat([]*tensor.Tensor{ctx, x}, 1)
 	if err != nil {
 		return nil, err
+	}
+	if m.stream != nil {
+		err = m.stream.single.Each(seq(m.Cfg.NumSingleLayers), func(i int, b *flux2SingleBlock) error {
+			h, err = m.singleBlock(b, h, modS, cos, sin, H, Dh)
+			return err
+		})
+		if err != nil {
+			return nil, err
+		}
 	}
 	for i, b := range m.Single {
 		if h, err = m.singleBlock(b, h, modS, cos, sin, H, Dh); err != nil {
@@ -412,6 +521,11 @@ func (m *Flux2Transformer) singleBlock(b *flux2SingleBlock, h *tensor.Tensor, md
 // LoadFlux2Transformer loads a diffusers Flux2Transformer2DModel from a
 // directory with config.json and its safetensors, at F32 on dev.
 func LoadFlux2Transformer(dir string, dev device.Device) (*Flux2Transformer, error) {
+	return LoadFlux2TransformerOpts(dir, dev, Flux2TransformerLoadOptions{})
+}
+
+// LoadFlux2TransformerOpts is LoadFlux2Transformer with options.
+func LoadFlux2TransformerOpts(dir string, dev device.Device, o Flux2TransformerLoadOptions) (*Flux2Transformer, error) {
 	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
 	if err != nil {
 		return nil, err
@@ -424,17 +538,33 @@ func LoadFlux2Transformer(dir string, dev device.Device) (*Flux2Transformer, err
 	if err != nil {
 		return nil, err
 	}
-	m, err := NewFlux2Transformer(cfg, dev)
+	mode := fluxWeightsF32
+	switch {
+	case o.KeepFP8 && checkpointIsFP8(hf):
+		mode = fluxWeightsFP8
+	case checkpointIsQuantized(hf):
+		mode = fluxWeightsPlaceholder
+	}
+	full := cfg
+	if o.Stream {
+		cfg.NumLayers, cfg.NumSingleLayers = 0, 0
+	}
+	m, err := newFlux2Transformer(cfg, dev, mode)
 	if err != nil {
 		return nil, err
 	}
+	m.Cfg.NumLayers, m.Cfg.NumSingleLayers = full.NumLayers, full.NumSingleLayers
 	var lerr error
 	cp := func(dst *tensor.Tensor, name string) {
 		if lerr == nil {
 			lerr = copyExactCast(dst, hf, name)
 		}
 	}
-	lin := func(l *nn.Linear, name string) { cp(l.W, name+".weight") }
+	lin := func(l *nn.Linear, name string) {
+		if lerr == nil {
+			lerr = loadFluxLinear(l, hf, name, dev, false)
+		}
+	}
 	cp2 := func(n *nn.RMSNorm, name string) { cp(n.Weight, name+".weight") }
 	lin(m.XEmbed, "x_embedder")
 	lin(m.ContextEmbed, "context_embedder")
@@ -448,6 +578,26 @@ func LoadFlux2Transformer(dir string, dev device.Device) (*Flux2Transformer, err
 	lin(m.ModTxt, "double_stream_modulation_txt.linear")
 	lin(m.ModSingle, "single_stream_modulation.linear")
 	for i, b := range m.Double {
+		loadFlux2Double(b, i, lin, cp2)
+	}
+	for i, b := range m.Single {
+		loadFlux2Single(b, i, lin, cp2)
+	}
+	lin(m.NormOut, "norm_out.linear")
+	lin(m.ProjOut, "proj_out")
+	if lerr != nil {
+		return nil, fmt.Errorf("LoadFlux2Transformer: %w", lerr)
+	}
+	if o.Stream {
+		if err := m.streamBlocks(hf, dev, o.Slots, mode); err != nil {
+			return nil, err
+		}
+	}
+	return m, nil
+}
+
+func loadFlux2Double(b *flux2DoubleBlock, i int, lin func(*nn.Linear, string), cp2 func(*nn.RMSNorm, string)) {
+	{
 		p := fmt.Sprintf("transformer_blocks.%d.", i)
 		lin(b.Img.Q, p+"attn.to_q")
 		lin(b.Img.K, p+"attn.to_k")
@@ -466,17 +616,72 @@ func LoadFlux2Transformer(dir string, dev device.Device) (*Flux2Transformer, err
 		lin(b.CtxFFIn, p+"ff_context.linear_in")
 		lin(b.CtxFFOut, p+"ff_context.linear_out")
 	}
-	for i, b := range m.Single {
+}
+
+func loadFlux2Single(b *flux2SingleBlock, i int, lin func(*nn.Linear, string), cp2 func(*nn.RMSNorm, string)) {
+	{
 		p := fmt.Sprintf("single_transformer_blocks.%d.attn.", i)
 		lin(b.QKVMLP, p+"to_qkv_mlp_proj")
 		cp2(b.NormQ, p+"norm_q")
 		cp2(b.NormK, p+"norm_k")
 		lin(b.Out, p+"to_out")
 	}
-	lin(m.NormOut, "norm_out.linear")
-	lin(m.ProjOut, "proj_out")
-	if lerr != nil {
-		return nil, fmt.Errorf("LoadFlux2Transformer: %w", lerr)
+}
+
+// streamBlocks sets the transformer up to build its blocks from hf on demand.
+func (m *Flux2Transformer) streamBlocks(hf map[string]*tensor.Tensor, dev device.Device, slots int, mode fluxWeightMode) error {
+	if slots <= 0 {
+		slots = 2
 	}
-	return m, nil
+	D, M := m.Cfg.inner(), m.Cfg.mlp()
+	s := &flux2Stream{hf: hf, dev: dev, mode: mode}
+	s.wdt, s.mixed = nn.WeightStorage(D)
+	build := func(f func(lin func(*nn.Linear, string), cp2 func(*nn.RMSNorm, string))) error {
+		var lerr error
+		lin := func(l *nn.Linear, name string) {
+			if lerr == nil {
+				lerr = loadFluxLinear(l, hf, name, dev, true)
+			}
+		}
+		cp2 := func(n *nn.RMSNorm, name string) {
+			if lerr == nil {
+				lerr = copyExactCastKeep(n.Weight, hf, name+".weight")
+			}
+		}
+		f(lin, cp2)
+		return lerr
+	}
+	var err error
+	s.double, err = nn.NewExpertCache(slots, func(i int) (*flux2DoubleBlock, error) {
+		var cerr error
+		lin, rms := s.blockBuilders(m.Cfg.HeadDim, m.Cfg.Eps, &cerr)
+		b := newFlux2Double(D, M, lin, rms)
+		if cerr != nil {
+			return nil, cerr
+		}
+		if err := build(func(lin func(*nn.Linear, string), cp2 func(*nn.RMSNorm, string)) { loadFlux2Double(b, i, lin, cp2) }); err != nil {
+			return nil, fmt.Errorf("flux2: double block %d: %w", i, err)
+		}
+		return b, nil
+	})
+	if err != nil {
+		return err
+	}
+	s.single, err = nn.NewExpertCache(slots, func(i int) (*flux2SingleBlock, error) {
+		var cerr error
+		lin, rms := s.blockBuilders(m.Cfg.HeadDim, m.Cfg.Eps, &cerr)
+		b := newFlux2Single(D, M, lin, rms)
+		if cerr != nil {
+			return nil, cerr
+		}
+		if err := build(func(lin func(*nn.Linear, string), cp2 func(*nn.RMSNorm, string)) { loadFlux2Single(b, i, lin, cp2) }); err != nil {
+			return nil, fmt.Errorf("flux2: single block %d: %w", i, err)
+		}
+		return b, nil
+	})
+	if err != nil {
+		return err
+	}
+	m.stream = s
+	return nil
 }

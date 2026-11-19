@@ -158,7 +158,16 @@ func TestZImageTurboRealCUDA(t *testing.T) {
 
 func TestFlux2KleinRealCUDA(t *testing.T) {
 	ref, dev := loadRealRef(t, "LIGHT_KLEIN_REAL_REF")
-	p, err := LoadFlux2(ref.Repo, dev, Flux2LoadOptions{Storage16: true, Sequential: true})
+	lo := Flux2LoadOptions{Storage16: true, Sequential: true}
+	tol := 0.03
+	if tf := os.Getenv("LIGHT_FLUX2_TRANSFORMER"); tf != "" { // an FP8 / quantized transformer folder in place of the repo's
+		lo.Components = map[string]string{"transformer": tf}
+		lo.KeepFP8 = true
+		tol = 0.05
+		t.Logf("transformer: %s", tf)
+	}
+	t0 := time.Now()
+	p, err := LoadFlux2(ref.Repo, dev, lo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +179,8 @@ func TestFlux2KleinRealCUDA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	compareReal(t, res.Image, ref)
+	t.Logf("load + generate: %s", time.Since(t0).Round(100*time.Millisecond))
+	compareRealTol(t, res.Image, ref, tol)
 }
 
 // FLUX.1 (schnell or dev): the 12B transformer streams its blocks from the

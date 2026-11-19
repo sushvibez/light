@@ -126,8 +126,8 @@ const (
 
 // fp8Linear builds a Linear with an F8E4M3 weight (filled by the loader)
 // and an F32 bias, widened per matmul.
-func fp8Linear(in, out int, mixed bool, dev device.Device) (*nn.Linear, error) {
-	l, err := nn.NewLinearPlaceholder(in, out, true, dev)
+func fp8Linear(in, out int, bias, mixed bool, dev device.Device) (*nn.Linear, error) {
+	l, err := nn.NewLinearPlaceholder(in, out, bias, dev)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +169,7 @@ func newFluxTransformer(cfg FluxConfig, dev device.Device, mode fluxWeightMode) 
 		var l *nn.Linear
 		switch mode {
 		case fluxWeightsFP8:
-			l, err = fp8Linear(in, out, mixed, dev)
+			l, err = fp8Linear(in, out, true, mixed, dev)
 		case fluxWeightsPlaceholder:
 			l, err = nn.NewLinearPlaceholder(in, out, true, dev)
 		default:
@@ -235,7 +235,7 @@ func (s *fluxStream) blockBuilders(headDim int, err *error) (func(in, out int) *
 		}
 		switch s.mode {
 		case fluxWeightsFP8:
-			l, e := fp8Linear(in, out, s.mixed, s.dev)
+			l, e := fp8Linear(in, out, true, s.mixed, s.dev)
 			if e != nil {
 				*err = e
 			}

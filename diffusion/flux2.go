@@ -61,6 +61,22 @@ type Flux2LoadOptions struct {
 	// transformer, denoises and frees it before decoding. Peak memory is the
 	// larger model instead of both, at the cost of loading per image.
 	Sequential bool
+	// StreamBlocks, KeepFP8 and StreamSlots are FluxLoadOptions' (the
+	// transformer's blocks streamed per step; FP8 checkpoints kept at 8 bits).
+	StreamBlocks bool
+	KeepFP8      bool
+	StreamSlots  int
+	// Components overrides a component folder by its model_index name
+	// ("transformer", "vae", "text_encoder", "tokenizer", "scheduler").
+	Components map[string]string
+}
+
+// sub is the folder of component s (Components or the repo's).
+func (p *Flux2) sub(s string) string {
+	if d := p.opts.Components[s]; d != "" {
+		return d
+	}
+	return filepath.Join(p.dir, s)
 }
 
 // LoadFlux2 loads a Flux2KleinPipeline folder (or Hub repo) onto dev at F32.
@@ -88,6 +104,7 @@ func LoadFlux2(repo string, dev device.Device, o Flux2LoadOptions) (*Flux2, erro
 	if o.EncoderDevice != nil {
 		p.encDev = o.EncoderDevice
 	}
+	sub = p.sub
 	if p.inC, err = transformerInChannels(sub("transformer")); err != nil {
 		return nil, fmt.Errorf("flux2 transformer: %w", err)
 	}
@@ -140,7 +157,7 @@ func (p *Flux2) load16(f func() error) error {
 
 func (p *Flux2) loadEncoder() (err error) {
 	if err = p.load16(func() (err error) {
-		p.TextEncoder, err = models.LoadCausalLMFromHF(filepath.Join(p.dir, "text_encoder"), p.encDev, dtype.F32)
+		p.TextEncoder, err = models.LoadCausalLMFromHF(p.sub("text_encoder"), p.encDev, dtype.F32)
 		return
 	}); err != nil {
 		return fmt.Errorf("flux2 text_encoder: %w", err)
@@ -150,7 +167,8 @@ func (p *Flux2) loadEncoder() (err error) {
 
 func (p *Flux2) loadTransformer() (err error) {
 	if err = p.load16(func() (err error) {
-		p.Transformer, err = models.LoadFlux2Transformer(filepath.Join(p.dir, "transformer"), p.Dev)
+		p.Transformer, err = models.LoadFlux2TransformerOpts(p.sub("transformer"), p.Dev,
+			models.Flux2TransformerLoadOptions{Stream: p.opts.StreamBlocks, Slots: p.opts.StreamSlots, KeepFP8: p.opts.KeepFP8})
 		return
 	}); err != nil {
 		return fmt.Errorf("flux2 transformer: %w", err)
