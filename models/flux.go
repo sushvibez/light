@@ -1,11 +1,9 @@
 package models
 
 import (
-	"encoding/json"
 	"fmt"
 	"math"
 	"os"
-	"path/filepath"
 
 	"light/autograd"
 	"light/device"
@@ -740,15 +738,16 @@ func seq(n int) []int {
 
 // LoadFluxTransformerOpts is LoadFluxTransformer with options.
 func LoadFluxTransformerOpts(dir string, dev device.Device, o FluxTransformerLoadOptions) (*FluxTransformer, error) {
-	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	cfg, err := FluxConfigAt(dir)
 	if err != nil {
 		return nil, err
 	}
-	var cfg FluxConfig
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return nil, fmt.Errorf("flux config: %w", err)
+	var hf map[string]*tensor.Tensor
+	if st, serr := os.Stat(dir); serr == nil && !st.IsDir() {
+		hf, err = loadFluxSingleFile(dir)
+	} else {
+		hf, err = loadCheckpointTensors(dir)
 	}
-	hf, err := loadCheckpointTensors(dir)
 	if err != nil {
 		return nil, err
 	}

@@ -101,10 +101,15 @@ func TestFluxComponentsFromRepo(t *testing.T) {
 			t.Errorf("%s: %q", sub, comp[sub])
 		}
 	}
-	f := filepath.Join(dir, "flux1.safetensors")
+	f := filepath.Join(dir, "ae.safetensors")
 	os.WriteFile(f, []byte("x"), 0o644)
-	if _, err := fluxComponents(ImageOptions{Repo: dir, Pipeline: &PipelineSpec{Transformer: PipelineSlot{Path: f}}}); err == nil {
-		t.Error("single file accepted")
+	if _, err := fluxComponents(ImageOptions{Repo: dir, Pipeline: &PipelineSpec{VAE: PipelineSlot{Path: f}}}); err == nil {
+		t.Error("single-file VAE accepted")
+	}
+	tf := filepath.Join(dir, "flux1.safetensors")
+	os.WriteFile(tf, []byte("x"), 0o644)
+	if comp, err := fluxComponents(ImageOptions{Repo: dir, Pipeline: &PipelineSpec{Transformer: PipelineSlot{Path: tf}}}); err != nil || comp["transformer"] != tf {
+		t.Errorf("single-file transformer: %v, %v", comp, err)
 	}
 }
 

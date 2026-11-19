@@ -389,7 +389,11 @@ func fluxComponents(o ImageOptions) (map[string]string, error) {
 			return err
 		}
 		if file != "" {
-			return fmt.Errorf("pipeline: %s: single-file checkpoints (%s) are not loadable yet; use a diffusers folder or a Hub repo", sub, filepath.Base(file))
+			if sub != "transformer" {
+				return fmt.Errorf("pipeline: %s: single-file checkpoints (%s) are not loadable yet for this part; use a diffusers folder or a Hub repo", sub, filepath.Base(file))
+			}
+			comp[sub] = file // BFL / diffusers-named single file, see models.FluxConfigAt
+			return nil
 		}
 		comp[sub] = dir
 		return nil

@@ -37,16 +37,8 @@ type Flux struct {
 	loras    []*models.FluxLoRA // parsed once, applied per transformer load
 }
 
-func fluxTransformerConfig(dir string) (models.FluxConfig, error) {
-	var cfg models.FluxConfig
-	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
-	if err != nil {
-		return cfg, err
-	}
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return cfg, fmt.Errorf("flux config: %w", err)
-	}
-	return cfg, nil
+func fluxTransformerConfig(path string) (models.FluxConfig, error) {
+	return models.FluxConfigAt(path) // a diffusers folder or a single-file checkpoint
 }
 
 // FluxLoadOptions adjust LoadFluxOpts.
