@@ -39,6 +39,10 @@ type ImageOptions struct {
 	// the denoising steps where the pipeline exposes them (SD 1.5, SDXL).
 	OnPhase func(phase string)
 	OnStep  func(step, total int)
+	// OnDownload reports component files fetched from the Hub before
+	// loading (done of total bytes), so a first run can show the download
+	// instead of a silent "load".
+	OnDownload func(file string, done, total int64)
 }
 
 // ImageResult is the generated image with its timings.
@@ -87,6 +91,11 @@ func GenerateImage(o ImageOptions) (*ImageResult, error) {
 			return diffusion.Img2Img{Image: o.Refs[0], Strength: st}, nil
 		}
 		return diffusion.Img2Img{}, fmt.Errorf("%s: one reference image (the init image) at most", o.Repo)
+	}
+	if o.OnDownload != nil {
+		if _, err := diffusion.SnapshotWithProgress(o.Repo, o.OnDownload); err != nil {
+			return nil, err
+		}
 	}
 	phase("load")
 	t0 := time.Now()

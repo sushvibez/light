@@ -16,6 +16,15 @@ import (
 // component folder named in model_index.json downloaded (weights in
 // safetensors only; root-level single-file checkpoints are skipped).
 func Snapshot(repo string) (string, error) {
+	return SnapshotWithProgress(repo, nil)
+}
+
+// DownloadProgress reports a component file's download (done of total
+// bytes; total 0 if unknown). Files already cached are not reported.
+type DownloadProgress func(file string, done, total int64)
+
+// SnapshotWithProgress is Snapshot reporting each file as it downloads.
+func SnapshotWithProgress(repo string, progress DownloadProgress) (string, error) {
 	if st, err := os.Stat(repo); err == nil && st.IsDir() {
 		return repo, nil
 	}
@@ -61,7 +70,12 @@ func Snapshot(repo string) (string, error) {
 			if attempt > 0 {
 				time.Sleep(time.Duration(attempt) * 2 * time.Second)
 			}
-			if _, derr = hub.Download(repo, "main", f.Name); derr == nil {
+			var p hub.Progress
+			if progress != nil {
+				name := f.Name
+				p = func(done, total int64) { progress(name, done, total) }
+			}
+			if _, derr = hub.DownloadWithProgress(repo, "main", f.Name, p); derr == nil {
 				break
 			}
 		}
