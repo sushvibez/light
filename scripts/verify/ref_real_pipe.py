@@ -2,7 +2,9 @@
 """Real-weight end-to-end reference of Z-Image-Turbo, FLUX.2 klein 4B or
 FLUX.1 (schnell / dev; diffusers, BF16 on CUDA with CPU offload) for
 diffusion's *RealCUDA tests.
-    .venv/bin/python scripts/verify/ref_real_pipe.py zimage|klein|schnell|flux1dev <out.json> [size] [steps]
+    .venv/bin/python scripts/verify/ref_real_pipe.py zimage|klein|flux2dev|schnell|flux1dev <out.json> [size] [steps]
+flux2dev (FLUX.2-dev: 32B transformer + Mistral-3 24B encoder, 112 GB) needs
+an 80 GB card with model CPU offload (an H100 on Colab).
 FLUX.1's 12B transformer exceeds a 16 GB card, so it runs with sequential
 CPU offload (each module uploaded for its forward); the weights stay
 memory-mapped on the host.
@@ -45,6 +47,14 @@ elif which == "klein":
     m.randn_tensor = patched_randn
     pipe.enable_model_cpu_offload()
     img = pipe(prompt=prompt, height=size, width=size, num_inference_steps=steps, output_type="pt").images
+elif which == "flux2dev":
+    from diffusers import Flux2Pipeline
+    import diffusers.pipelines.flux2.pipeline_flux2 as m
+    repo, guidance = "black-forest-labs/FLUX.2-dev", 4.0
+    pipe = Flux2Pipeline.from_pretrained(repo, torch_dtype=torch.bfloat16)
+    m.randn_tensor = patched_randn
+    pipe.enable_model_cpu_offload()
+    img = pipe(prompt=prompt, height=size, width=size, num_inference_steps=steps, guidance_scale=guidance, output_type="pt").images
 elif which in ("schnell", "flux1dev"):
     from diffusers import FluxPipeline
     import diffusers.pipelines.flux.pipeline_flux as m
@@ -69,7 +79,7 @@ elif which in ("schnell", "flux1dev"):
                callback_on_step_end_tensor_inputs=["latents"]).images
     extra["sigmas"] = pipe.scheduler.sigmas.float().cpu()
 else:
-    sys.exit("zimage, klein, schnell or flux1dev")
+    sys.exit("zimage, klein, flux2dev, schnell or flux1dev")
 
 lat = captured["latents"]
 img = img[0].float().clamp(0, 1).cpu()

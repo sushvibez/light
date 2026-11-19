@@ -19,7 +19,9 @@
 # TRELLIS's own code), idol (three demo objects) and idolcheck (Idol's
 # real weights against idol-sdk; after idol). NO_UPDATE=1 runs the
 # checkout in $WORK as is.
-# Everything fits an L4 (24 GB); an A100 is not needed.
+# Everything fits an L4 (24 GB); an A100 is not needed, except flux2dev
+# (FLUX.2-dev: the 32B transformer and the Mistral-3 24B encoder, 112 GB of
+# BF16 weights): an H100 (80 GB), ~100 GB of downloads, HF_TOKEN (gated).
 # Hugging Face downloads use $HF_TOKEN when set.
 set -uo pipefail
 
@@ -224,6 +226,21 @@ for g in "${SEL[@]}"; do
 		LIGHT_TIMINGS=1 LIGHT_PROFILE_GPU=1 "$WORK/light-bin" image -device gpu -cpuprofile "$LOGS/zperf.cpu" -o "$LOGS/zperf.png" -width 1024 -height 1024 -seed 11 $ZI 			"A cozy reading nook by a large window on a rainy evening, warm lamp light, a ginger cat curled on a knitted blanket, shelves of old books, photorealistic" 2>&1 | tee "$LOGS/zperf.log"
 		SUMMARY+=("zperf $(grep -c '^timing' "$LOGS/zperf.log") phases, $(grep -oE 'generated in [0-9.]+ s' "$LOGS/zperf.log")")
 		;;
+	flux2dev)
+		# FLUX.2-dev against diffusers (BF16, model CPU offload) at 512², 8
+		# steps: Light with the transformer resident at BF16 (64 GB), then
+		# as a weight-only FP8 cast (32 GB), both on the same seeded noise;
+		# images and the reference land in $LOGS/flux2dev/. The 60 GB
+		# single-file checkpoint is skipped.
+		mkdir -p "$LOGS/flux2dev"
+		fetch black-forest-labs/FLUX.2-dev "model_index.json" "scheduler/*" "tokenizer/*" "text_encoder/*" "transformer/*" "vae/*" || { SUMMARY+=("$g FAIL fetch"); continue; }
+		LD_LIBRARY_PATH=$ORIG_LD_LIBRARY_PATH python3 scripts/verify/ref_real_pipe.py flux2dev "$LOGS/flux2dev/flux2dev.json" 512 8 2>&1 | tee "$LOGS/$STAMP-flux2dev-ref.log" | tail -3
+		LIGHT_KLEIN_REAL_REF="$LOGS/flux2dev/flux2dev.json" LIGHT_REAL_SAVE_DIR="$LOGS/flux2dev" run flux2dev-bf16 ./diffusion 'TestFlux2KleinRealCUDA'
+		LD_LIBRARY_PATH=$ORIG_LD_LIBRARY_PATH python3 scripts/verify/make_flux2_fp8_real.py black-forest-labs/FLUX.2-dev /content/flux2-dev-fp8 2>&1 | tail -1
+		mkdir -p "$LOGS/flux2dev/fp8"
+		LIGHT_KLEIN_REAL_REF="$LOGS/flux2dev/flux2dev.json" LIGHT_REAL_SAVE_DIR="$LOGS/flux2dev/fp8" LIGHT_FLUX2_TRANSFORMER=/content/flux2-dev-fp8 run flux2dev-fp8 ./diffusion 'TestFlux2KleinRealCUDA'
+		drop black-forest-labs/FLUX.2-dev
+		;;
 	trellis)
 		# TRELLIS image -> sparse structure -> structured latent -> Gaussians / mesh
 		# on real weights: TRELLIS's own code with its real spconv /
@@ -263,7 +280,8 @@ PY
 		for ex in fig-fox food-avocado fig-robot-cute; do
 			say "idol $ex"
 			t0=$SECONDS
-			"$WORK/light-bin" idol -device gpu -o "$LOGS/idol/$ex.ply" "$LOGS/idol/$ex.png" 2>&1 | tr '' '
+			"$WORK/light-bin" idol -device gpu -o "$LOGS/idol/$ex.ply" "$LOGS/idol/$ex.png" 2>&1 | tr '
+' '
 ' | grep -v '^step' | tee "$LOGS/idol-$ex.log"
 			SUMMARY+=("idol $ex: $(grep -oE '(loaded idol|generated [0-9]+ Gaussians) in [0-9.]+ s' "$LOGS/idol-$ex.log" | paste -sd ' ')  wall $((SECONDS - t0))s")
 		done

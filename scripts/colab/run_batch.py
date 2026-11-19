@@ -11,6 +11,15 @@ import glob, os, subprocess, sys
 
 REPO = os.environ.get("REPO_URL", "https://github.com/sushvibez/light")
 BRANCH = os.environ.get("BRANCH", "main")
+# `colab run` forwards only the script's arguments: a leading BRANCH=<name>
+# (or REPO_URL=<url>) argument sets what the environment would.
+while len(sys.argv) > 1 and "=" in sys.argv[1] and sys.argv[1].split("=", 1)[0] in ("BRANCH", "REPO_URL"):
+    k, v = sys.argv.pop(1).split("=", 1)
+    os.environ[k] = v
+    if k == "BRANCH":
+        BRANCH = v
+    else:
+        REPO = v
 WORK, LOGS = "/content/light", "/content/logs"
 
 # Gated checkpoints (DINOv3 for idol, FLUX 3): the token comes from the
