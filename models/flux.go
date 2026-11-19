@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"strings"
 
 	"light/autograd"
 	"light/device"
@@ -56,6 +57,7 @@ type fluxStream struct {
 	dev    device.Device
 	wdt    dtype.DType // block Linear weight storage (nn.WeightStorage at load)
 	mixed  bool
+	fp8    bool // KeepFP8 with an FP8 checkpoint: F8 weights, F32 biases
 	double *nn.ExpertCache[*fluxDoubleBlock]
 	single *nn.ExpertCache[*fluxSingleBlock]
 	loras  []fluxLoRAUse // applied to each block as it is built
@@ -73,6 +75,11 @@ type FluxTransformerLoadOptions struct {
 	// Slots is how many blocks stay on the device at once (default 2: the
 	// running one and the next).
 	Slots int
+	// KeepFP8 stores F8E4M3 checkpoint weights as they are (half of BF16;
+	// the 12B transformer is 12 GB) and widens them per matmul
+	// (nn.Linear.F8WeightOnly). Otherwise FP8 weights are cast at load
+	// to the storage dtype.
+	KeepFP8 bool
 }
 
 // Streamed reports whether the blocks are streamed per forward pass.
@@ -100,6 +107,28 @@ func (c FluxConfig) inner() int { return c.NumHeads * c.HeadDim }
 
 // NewFluxTransformer allocates an uninitialised F32 model.
 func NewFluxTransformer(cfg FluxConfig, dev device.Device) (*FluxTransformer, error) {
+	return newFluxTransformer(cfg, dev, false)
+}
+
+// fp8Linear builds a Linear with an F8E4M3 weight (filled by the loader)
+// and an F32 bias, widened per matmul.
+func fp8Linear(in, out int, mixed bool, dev device.Device) (*nn.Linear, error) {
+	l, err := nn.NewLinearPlaceholder(in, out, true, dev)
+	if err != nil {
+		return nil, err
+	}
+	w, err := tensor.Zeros(dtype.F8E4M3, []int{out, in}, dev)
+	if err != nil {
+		return nil, err
+	}
+	if err := l.SetWeight(w); err != nil {
+		return nil, err
+	}
+	l.F8WeightOnly, l.Mixed16 = true, mixed
+	return l, nil
+}
+
+func newFluxTransformer(cfg FluxConfig, dev device.Device, fp8 bool) (*FluxTransformer, error) {
 	if cfg.PatchSize == 0 {
 		cfg.PatchSize = 1
 	}
@@ -115,12 +144,17 @@ func NewFluxTransformer(cfg FluxConfig, dev device.Device) (*FluxTransformer, er
 	}
 	D := cfg.inner()
 	var err error
+	_, mixed := nn.WeightStorage(D)
 	lin := func(in, out int) *nn.Linear {
 		if err != nil {
 			return nil
 		}
 		var l *nn.Linear
-		l, err = nn.NewLinearUninit(in, out, true, dtype.F32, dev)
+		if fp8 {
+			l, err = fp8Linear(in, out, mixed, dev)
+		} else {
+			l, err = nn.NewLinearUninit(in, out, true, dtype.F32, dev)
+		}
 		return l
 	}
 	rms := func() *nn.RMSNorm {
@@ -178,6 +212,13 @@ func (s *fluxStream) blockBuilders(headDim int, err *error) (func(in, out int) *
 	lin := func(in, out int) *nn.Linear {
 		if *err != nil {
 			return nil
+		}
+		if s.fp8 {
+			l, e := fp8Linear(in, out, s.mixed, s.dev)
+			if e != nil {
+				*err = e
+			}
+			return l
 		}
 		dt := s.wdt
 		if in%2 != 0 {
@@ -755,7 +796,8 @@ func LoadFluxTransformerOpts(dir string, dev device.Device, o FluxTransformerLoa
 	if o.Stream { // the blocks are built per forward pass instead
 		cfg.NumLayers, cfg.NumSingleLayers = 0, 0
 	}
-	m, err := NewFluxTransformer(cfg, dev)
+	fp8 := o.KeepFP8 && checkpointIsFP8(hf)
+	m, err := newFluxTransformer(cfg, dev, fp8)
 	if err != nil {
 		return nil, err
 	}
@@ -796,21 +838,36 @@ func LoadFluxTransformerOpts(dir string, dev device.Device, o FluxTransformerLoa
 		return nil, fmt.Errorf("LoadFluxTransformer: %w", lerr)
 	}
 	if o.Stream {
-		if err := m.streamBlocks(hf, dev, o.Slots); err != nil {
+		if err := m.streamBlocks(hf, dev, o.Slots, fp8); err != nil {
 			return nil, err
 		}
 	}
 	return m, nil
 }
 
+// checkpointIsFP8 reports whether the 2-D weights are F8E4M3 (most of
+// them: a renamed single file widens a few small ones).
+func checkpointIsFP8(hf map[string]*tensor.Tensor) bool {
+	n, f8 := 0, 0
+	for name, t := range hf {
+		if t.Rank() == 2 && strings.HasSuffix(name, ".weight") {
+			n++
+			if t.DType() == dtype.F8E4M3 {
+				f8++
+			}
+		}
+	}
+	return n > 0 && 2*f8 > n
+}
+
 // streamBlocks sets the transformer up to build its blocks from hf on
 // demand (FluxTransformerLoadOptions.Stream).
-func (m *FluxTransformer) streamBlocks(hf map[string]*tensor.Tensor, dev device.Device, slots int) error {
+func (m *FluxTransformer) streamBlocks(hf map[string]*tensor.Tensor, dev device.Device, slots int, fp8 bool) error {
 	if slots <= 0 {
 		slots = 2
 	}
 	D := m.Cfg.inner()
-	s := &fluxStream{hf: hf, dev: dev}
+	s := &fluxStream{hf: hf, dev: dev, fp8: fp8}
 	s.wdt, s.mixed = nn.WeightStorage(D)
 	build := func(f func(lin func(*nn.Linear, string), norm func(*nn.RMSNorm, string))) error {
 		var lerr error

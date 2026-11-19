@@ -28,6 +28,11 @@ type Linear struct {
 	// WScale de-quantises an F8E4M3 weight: W ≈ codes · WScale (0 means 1).
 	// Loaders set it from `weight_scale` / `weight_scale_inv` tensors.
 	WScale float32
+	// F8WeightOnly makes an F8E4M3 weight a storage format only: Forward
+	// widens it (to BF16 when Mixed16 on CUDA, else F32) and runs the
+	// regular GEMM, as ComfyUI does with the community FP8 checkpoints,
+	// instead of quantising the activations for the FP8 GEMM.
+	F8WeightOnly bool
 	// WBlockScale switches an F8E4M3 weight to block scaling (the "fp8"
 	// fine-grained format of Qwen3.5 / DeepSeek-V3 FP8 checkpoints):
 	// W[i, j] ≈ codes[i, j] · WBlockScale[i / WBlock[0], j / WBlock[1]], F32.
@@ -216,6 +221,19 @@ func (l *Linear) forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 		return nil, fmt.Errorf("nn.Linear: quantized weight (%v) needs F32 activations, got %v", l.W.DType(), x.DType())
 	}
 	fp8 := l.W.DType() == dtype.F8E4M3
+	if fp8 && l.F8WeightOnly && l.WBlockScale == nil {
+		wdt := dtype.F32
+		if l.Mixed16 && device.IsCUDA(l.W.Device()) {
+			wdt = dtype.BF16
+		}
+		w, err := ops.Cast(l.W, wdt)
+		if err != nil {
+			return nil, err
+		}
+		wide := *l
+		wide.W, wide.F8WeightOnly, wide.LoRA = w, false, nil
+		return wide.forward(x)
+	}
 	if fp8 && x.DType() != dtype.F32 && x.DType() != dtype.BF16 && x.DType() != dtype.F16 {
 		return nil, fmt.Errorf("nn.Linear: F8E4M3 weight needs F32/BF16/F16 activations, got %v", x.DType())
 	}

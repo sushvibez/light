@@ -91,21 +91,22 @@ def random_diffusers(D, heads, hd, in_ch, joint, pooled, guidance):
     return sd
 
 
-# 1. The inverse against diffusers' converter (3072-wide, one block each).
-ref = random_diffusers(3072, 24, 128, 64, 4096, 768, True)
-back = convert_flux_transformer_checkpoint_to_diffusers(to_bfl({k: v.clone() for k, v in ref.items()}, 3072))
-assert set(back) == set(ref), (set(back) ^ set(ref))
-for k in ref:
-    assert torch.equal(back[k], ref[k]), k
-print("inverse agrees with diffusers' converter on", len(ref), "tensors")
+if __name__ == "__main__":
+    # 1. The inverse against diffusers' converter (3072-wide, one block each).
+    ref = random_diffusers(3072, 24, 128, 64, 4096, 768, True)
+    back = convert_flux_transformer_checkpoint_to_diffusers(to_bfl({k: v.clone() for k, v in ref.items()}, 3072))
+    assert set(back) == set(ref), (set(back) ^ set(ref))
+    for k in ref:
+        assert torch.equal(back[k], ref[k]), k
+    print("inverse agrees with diffusers' converter on", len(ref), "tensors")
 
-# 2. The tiny model, in BFL layout.
-src, dst = sys.argv[1], sys.argv[2]
-cfg = json.load(open(os.path.join(src, "config.json")))
-sd = load_file(os.path.join(src, "diffusion_pytorch_model.safetensors"))
-D = cfg["num_attention_heads"] * cfg["attention_head_dim"]
-bfl = to_bfl(sd, D)
-os.makedirs(os.path.dirname(dst), exist_ok=True)
-save_file({k: v.contiguous() for k, v in bfl.items()}, dst)
-json.dump(cfg, open(dst + ".config.json", "w"))
-print("wrote", dst, len(bfl), "tensors")
+    # 2. The tiny model, in BFL layout.
+    src, dst = sys.argv[1], sys.argv[2]
+    cfg = json.load(open(os.path.join(src, "config.json")))
+    sd = load_file(os.path.join(src, "diffusion_pytorch_model.safetensors"))
+    D = cfg["num_attention_heads"] * cfg["attention_head_dim"]
+    bfl = to_bfl(sd, D)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    save_file({k: v.contiguous() for k, v in bfl.items()}, dst)
+    json.dump(cfg, open(dst + ".config.json", "w"))
+    print("wrote", dst, len(bfl), "tensors")

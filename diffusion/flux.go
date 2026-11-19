@@ -57,6 +57,9 @@ type FluxLoadOptions struct {
 	// the 12B transformer then fits a 16 GB device, reading its checkpoint
 	// once per step.
 	StreamBlocks bool
+	// KeepFP8 keeps an FP8 transformer checkpoint's weights at 8 bits
+	// (models.FluxTransformerLoadOptions.KeepFP8).
+	KeepFP8 bool
 	// Components overrides where a component folder comes from, by its
 	// model_index name ("transformer", "vae", "text_encoder",
 	// "text_encoder_2", "scheduler", "tokenizer", "tokenizer_2"): a local
@@ -112,7 +115,7 @@ func (p *Flux) loadEncoders() error {
 
 func (p *Flux) loadTransformer() error {
 	return p.load16(func() (err error) {
-		o := models.FluxTransformerLoadOptions{Stream: p.opts.StreamBlocks}
+		o := models.FluxTransformerLoadOptions{Stream: p.opts.StreamBlocks, KeepFP8: p.opts.KeepFP8}
 		if p.Transformer, err = models.LoadFluxTransformerOpts(p.sub("transformer"), p.Dev, o); err != nil {
 			return fmt.Errorf("flux transformer: %w", err)
 		}

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"light/device"
+	"light/dtype"
 	"light/ops"
 	"light/safetensors"
 	"light/tensor"
@@ -193,6 +194,11 @@ func fluxFromBFL(src map[string]*tensor.Tensor) (map[string]*tensor.Tensor, erro
 			return nil, fmt.Errorf("flux: missing final_layer.adaLN_modulation.1.%s", s)
 		}
 		delete(src, "final_layer.adaLN_modulation.1."+s)
+		if t.DType() == dtype.F8E4M3 { // concat has no FP8 kernel; the halves are small (2D x D)
+			if t, err = ops.Cast(t, dtype.F32); err != nil {
+				return nil, err
+			}
+		}
 		shift, e1 := t.Narrow(0, 0, D)
 		scale, e2 := t.Narrow(0, D, D)
 		if e1 != nil || e2 != nil {

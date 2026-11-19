@@ -182,7 +182,14 @@ func GenerateImage(o ImageOptions) (*ImageResult, error) {
 		if tdir == "" {
 			tdir = filepath.Join(snapshotDir(repo), "transformer")
 		}
-		lo.StreamBlocks = s16 && device.IsCUDA(d) && dirBytes(tdir, "*.safetensors") > 8<<30
+		// FP8 checkpoints stay FP8 on CUDA (12 GB resident); BF16 ones over
+		// 13 GB stream their blocks.
+		tbytes := dirBytes(tdir, "*.safetensors")
+		if st, err := os.Stat(tdir); err == nil && !st.IsDir() {
+			tbytes = st.Size()
+		}
+		lo.KeepFP8 = s16 && device.IsCUDA(d)
+		lo.StreamBlocks = s16 && device.IsCUDA(d) && tbytes > 13<<30
 		p, err := diffusion.LoadFluxOpts(repo, d, lo)
 		if err != nil {
 			return nil, err

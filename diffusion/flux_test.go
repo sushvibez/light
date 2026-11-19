@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"light/device"
+	"light/dtype"
 	"light/models"
 	"light/tensor"
 )
@@ -219,6 +220,87 @@ func TestFluxPipelineTinyLoRA(t *testing.T) {
 					md = math.Max(md, math.Abs(float64(got[i]-ref.Image[i])))
 				}
 				t.Logf("image with LoRA: max diff %.3g over %d values", md, len(got))
+				if md > 1e-4 {
+					t.Errorf("image differs by %.3g", md)
+				}
+			})
+		}
+	}
+}
+
+// The tiny transformer as a community-style FP8 single file (BFL layout,
+// 2-D weights float8_e4m3fn, no scales; scripts/verify/make_flux_fp8.py)
+// kept at 8 bits and widened per matmul matches diffusers running the
+// widened weights. CPU and CUDA, resident and streamed.
+func TestFluxPipelineTinyFP8(t *testing.T) {
+	raw, err := os.ReadFile("testdata/flux-tiny-pipe.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var base struct {
+		Prompt       string    `json:"prompt"`
+		Height       int       `json:"height"`
+		Width        int       `json:"width"`
+		Steps        int       `json:"steps"`
+		MaxSeqLen    int       `json:"max_seq_len"`
+		Latents      []float32 `json:"latents"`
+		LatentsShape []int     `json:"latents_shape"`
+	}
+	if err := json.Unmarshal(raw, &base); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile("testdata/flux-tiny-fp8.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ref struct {
+		Image []float32 `json:"image"`
+	}
+	if err := json.Unmarshal(raw, &ref); err != nil {
+		t.Fatal(err)
+	}
+	devs := []device.Device{device.CPU()}
+	if g, err := device.CUDA(0); err == nil {
+		devs = append(devs, g)
+	}
+	file := "testdata/flux-tiny-fp8.safetensors"
+	comp := map[string]string{"transformer": file}
+	loads := map[string]FluxLoadOptions{
+		"resident": {KeepFP8: true, Components: comp},
+		"streamed": {KeepFP8: true, Sequential: true, StreamBlocks: true, Components: comp},
+		"widened":  {Components: comp}, // cast to F32 at load: the same numbers
+	}
+	for _, dev := range devs {
+		for name, lo := range loads {
+			t.Run(dev.String()+"/"+name, func(t *testing.T) {
+				p, err := LoadFluxOpts("testdata/flux-tiny-pipe", dev, lo)
+				if err != nil {
+					t.Fatal(err)
+				}
+				lat, err := tensor.New(base.Latents, base.LatentsShape, dev)
+				if err != nil {
+					t.Fatal(err)
+				}
+				res, err := p.Generate(FluxOptions{Prompt: base.Prompt, Width: base.Width, Height: base.Height,
+					Steps: base.Steps, MaxSeqLen: base.MaxSeqLen, Latents: lat})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if lo.KeepFP8 && !lo.Sequential {
+					if w := p.Transformer.Double[0].Img.Q.W; w.DType() != dtype.F8E4M3 {
+						t.Errorf("weights widened at load: %v", w.DType())
+					}
+				}
+				img, err := res.Image.To(device.CPU())
+				if err != nil {
+					t.Fatal(err)
+				}
+				got := tensor.MustSlice[float32](img)
+				md := 0.0
+				for i := range got {
+					md = math.Max(md, math.Abs(float64(got[i]-ref.Image[i])))
+				}
+				t.Logf("FP8 image: max diff %.3g over %d values", md, len(got))
 				if md > 1e-4 {
 					t.Errorf("image differs by %.3g", md)
 				}
