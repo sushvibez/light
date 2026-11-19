@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"light/device"
 	"light/models"
@@ -171,7 +172,18 @@ func TestFlux2KleinRealCUDA(t *testing.T) {
 func TestFlux1RealCUDA(t *testing.T) {
 	ref, dev := loadRealRef(t, "LIGHT_FLUX1_REAL_REF")
 	slots, _ := strconv.Atoi(os.Getenv("LIGHT_FLUX_SLOTS"))
-	p, err := LoadFluxOpts(ref.Repo, dev, FluxLoadOptions{Storage16: true, Sequential: true, StreamBlocks: true, StreamSlots: slots})
+	lo := FluxLoadOptions{Storage16: true, Sequential: true, StreamBlocks: true, StreamSlots: slots}
+	// LIGHT_FLUX1_TRANSFORMER: a single-file transformer (BFL / diffusers
+	// names, BF16, FP8 or GGUF) in place of the repo's; FP8 and GGUF ones
+	// fit the card resident, so they are not streamed unless
+	// LIGHT_FLUX1_STREAM=1.
+	if tf := os.Getenv("LIGHT_FLUX1_TRANSFORMER"); tf != "" {
+		lo.Components = map[string]string{"transformer": tf}
+		lo.KeepFP8 = true
+		lo.StreamBlocks = os.Getenv("LIGHT_FLUX1_STREAM") != ""
+		t.Logf("transformer: %s (streamed: %v)", tf, lo.StreamBlocks)
+	}
+	p, err := LoadFluxOpts(ref.Repo, dev, lo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,15 +196,22 @@ func TestFlux1RealCUDA(t *testing.T) {
 		seq = 256
 	}
 	var step0, vel0 *tensor.Tensor
+	t0 := time.Now()
+	var stepTimes []time.Duration
+	last := t0
 	res, err := p.Generate(FluxOptions{Prompt: ref.Prompt, Width: ref.Width, Height: ref.Height, Steps: ref.Steps, Guidance: ref.Guidance, MaxSeqLen: seq, Noise: noise,
 		OnStep: func(i int, x, v *tensor.Tensor) {
 			if i == 0 {
 				step0, vel0 = x, v
 			}
+			now := time.Now()
+			stepTimes = append(stepTimes, now.Sub(last).Round(10*time.Millisecond))
+			last = now
 		}})
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Logf("generate: %s in all; step times (the first includes loading) %v", time.Since(t0).Round(100*time.Millisecond), stepTimes)
 	if ref.LatentsStep0 != nil && vel0 != nil && len(ref.Sigmas) > 1 {
 		// The reference's velocity: (x1 - x0) / (σ1 - σ0) with x0 the packed noise.
 		C, h, w := ref.LatentsShape[1], ref.LatentsShape[2], ref.LatentsShape[3]
