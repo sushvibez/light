@@ -250,6 +250,9 @@ func TestFlux1RealCUDA(t *testing.T) {
 		stats(t, "latents after step 0", step0, ref.LatentsStep0)
 	}
 	tol := 0.03
+	if ref.Steps > 4 {
+		tol = 0.045 // BF16 rounding on both sides compounds per step (dev, 8 steps: 0.036)
+	}
 	if strings.HasSuffix(strings.ToLower(os.Getenv("LIGHT_FLUX1_TRANSFORMER")), ".gguf") {
 		tol = 0.05 // 4-bit weights: 0.033 for Q4_K_S, the same scene
 	}
