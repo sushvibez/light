@@ -43,6 +43,10 @@ type ImageOptions struct {
 	// loading (done of total bytes), so a first run can show the download
 	// instead of a silent "load".
 	OnDownload func(file string, done, total int64)
+	// Pipeline, when set, composes the pipeline from separately chosen
+	// parts (PipelineSpec); Repo then only fills its empty slots. FLUX.1
+	// for now.
+	Pipeline *PipelineSpec
 }
 
 // ImageResult is the generated image with its timings.
@@ -70,8 +74,16 @@ func GenerateImage(o ImageOptions) (*ImageResult, error) {
 			o.OnPhase(p)
 		}
 	}
-	class, err := pipelineClass(o.Repo)
-	if err != nil {
+	var class string
+
+	if o.Pipeline != nil {
+		switch o.Pipeline.Family {
+		case "flux", "":
+			class = "FluxPipeline"
+		default:
+			return nil, fmt.Errorf("pipeline: family %q is not composable yet (flux only)", o.Pipeline.Family)
+		}
+	} else if class, err = pipelineClass(o.Repo); err != nil {
 		return nil, err
 	}
 	s16 := !o.F32
@@ -142,8 +154,22 @@ func GenerateImage(o ImageOptions) (*ImageResult, error) {
 		}
 		// FLUX.1's 12B transformer streams its blocks on CUDA (it does not
 		// fit a 16 GB card resident); the tiny / small ones load whole.
-		stream := s16 && device.IsCUDA(d) && fluxTransformerBytes(o.Repo) > 8<<30
-		p, err := diffusion.LoadFluxOpts(o.Repo, d, diffusion.FluxLoadOptions{Storage16: s16, Sequential: true, StreamBlocks: stream})
+		lo := diffusion.FluxLoadOptions{Storage16: s16, Sequential: true}
+		repo := o.Repo
+		if o.Pipeline != nil {
+			if lo.Components, err = fluxComponents(o); err != nil {
+				return nil, err
+			}
+			if repo == "" {
+				repo = lo.Components["transformer"] // a folder: Snapshot returns it as is
+			}
+		}
+		tdir := lo.Components["transformer"]
+		if tdir == "" {
+			tdir = filepath.Join(snapshotDir(repo), "transformer")
+		}
+		lo.StreamBlocks = s16 && device.IsCUDA(d) && dirBytes(tdir, "*.safetensors") > 8<<30
+		p, err := diffusion.LoadFluxOpts(repo, d, lo)
 		if err != nil {
 			return nil, err
 		}
@@ -290,14 +316,19 @@ func pipelineClass(repo string) (string, error) {
 	return mi.Class, nil
 }
 
-// fluxTransformerBytes is the size of <repo>/transformer's safetensors on
-// disk (0 when unknown), to decide whether its blocks must be streamed.
-func fluxTransformerBytes(repo string) int64 {
+// snapshotDir is the local folder of repo ("" when it is not available).
+func snapshotDir(repo string) string {
 	dir, err := diffusion.Snapshot(repo)
 	if err != nil {
-		return 0
+		return ""
 	}
-	files, _ := filepath.Glob(filepath.Join(dir, "transformer", "*.safetensors"))
+	return dir
+}
+
+// dirBytes is the size on disk of dir's files matching glob (0 when none),
+// to decide whether a transformer's blocks must be streamed.
+func dirBytes(dir, glob string) int64 {
+	files, _ := filepath.Glob(filepath.Join(dir, glob))
 	var n int64
 	for _, f := range files {
 		if st, err := os.Stat(f); err == nil {

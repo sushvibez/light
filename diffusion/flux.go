@@ -63,6 +63,12 @@ type FluxLoadOptions struct {
 	// the 12B transformer then fits a 16 GB device, reading its checkpoint
 	// once per step.
 	StreamBlocks bool
+	// Components overrides where a component folder comes from, by its
+	// model_index name ("transformer", "vae", "text_encoder",
+	// "text_encoder_2", "scheduler", "tokenizer", "tokenizer_2"): a local
+	// diffusers-layout folder for that part, so a pipeline can be composed
+	// from separately chosen parts. Others come from the repo.
+	Components map[string]string
 }
 
 // LoadFlux loads a FluxPipeline folder (or Hub repo) onto dev at F32.
@@ -77,9 +83,17 @@ func (p *Flux) load16(f func() error) error {
 	return f()
 }
 
+// sub is the folder of component s (FluxLoadOptions.Components or the repo's).
+func (p *Flux) sub(s string) string {
+	if d := p.opts.Components[s]; d != "" {
+		return d
+	}
+	return filepath.Join(p.dir, s)
+}
+
 func (p *Flux) loadEncoders() error {
 	return p.load16(func() (err error) {
-		sub := func(s string) string { return filepath.Join(p.dir, s) }
+		sub := p.sub
 		if p.CLIP, err = models.LoadCLIPTextFromDir(sub("text_encoder"), p.Dev); err != nil {
 			return fmt.Errorf("flux text_encoder: %w", err)
 		}
@@ -93,7 +107,7 @@ func (p *Flux) loadEncoders() error {
 func (p *Flux) loadTransformer() error {
 	return p.load16(func() (err error) {
 		o := models.FluxTransformerLoadOptions{Stream: p.opts.StreamBlocks}
-		if p.Transformer, err = models.LoadFluxTransformerOpts(filepath.Join(p.dir, "transformer"), p.Dev, o); err != nil {
+		if p.Transformer, err = models.LoadFluxTransformerOpts(p.sub("transformer"), p.Dev, o); err != nil {
 			return fmt.Errorf("flux transformer: %w", err)
 		}
 		return nil
@@ -107,7 +121,7 @@ func LoadFluxOpts(repo string, dev device.Device, o FluxLoadOptions) (*Flux, err
 		return nil, err
 	}
 	p := &Flux{Dev: dev, dir: dir, opts: o}
-	sub := func(s string) string { return filepath.Join(dir, s) }
+	sub := p.sub
 	if !o.Sequential {
 		if err = p.loadEncoders(); err != nil {
 			return nil, err
