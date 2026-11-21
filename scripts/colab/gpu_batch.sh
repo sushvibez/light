@@ -232,6 +232,36 @@ for g in "${SEL[@]}"; do
 		LIGHT_TIMINGS=1 LIGHT_PROFILE_GPU=1 "$WORK/light-bin" image -device gpu -cpuprofile "$LOGS/zperf.cpu" -o "$LOGS/zperf.png" -width 1024 -height 1024 -seed 11 $ZI 			"A cozy reading nook by a large window on a rainy evening, warm lamp light, a ginger cat curled on a knitted blanket, shelves of old books, photorealistic" 2>&1 | tee "$LOGS/zperf.log"
 		SUMMARY+=("zperf $(grep -c '^timing' "$LOGS/zperf.log") phases, $(grep -oE 'generated in [0-9.]+ s' "$LOGS/zperf.log")")
 		;;
+	imagebench)
+		# docs/image-bench.md on one card: full generations at 1024² with
+		# Light (TestImageBenchCUDA) and diffusers (bench_diffusers.py) from
+		# the same files: BF16 repos, weight-only FP8 casts and city96's
+		# Q4_K_S GGUFs (~110 GB of downloads, dropped afterwards). Tables
+		# land in $LOGS/imagebench/.
+		mkdir -p "$LOGS/imagebench" /content/light-models/checkpoints
+		export LIGHT_MODELS_DIR=/content/light-models
+		for r in Tongyi-MAI/Z-Image-Turbo black-forest-labs/FLUX.2-klein-4B black-forest-labs/FLUX.1-schnell black-forest-labs/FLUX.1-dev; do
+			fetch "$r" "model_index.json" "scheduler/*" "tokenizer/*" "tokenizer_2/*" "text_encoder/*" "text_encoder_2/*" "transformer/*" "vae/*" || { SUMMARY+=("$g FAIL fetch $r"); continue 2; }
+		done
+		LD_LIBRARY_PATH=$ORIG_LD_LIBRARY_PATH python3 scripts/verify/make_flux_fp8_real.py black-forest-labs/FLUX.1-schnell /content/light-models/checkpoints/flux1-schnell-fp8.safetensors 2>&1 | tail -1
+		LD_LIBRARY_PATH=$ORIG_LD_LIBRARY_PATH python3 scripts/verify/make_flux_fp8_real.py black-forest-labs/FLUX.1-dev /content/light-models/checkpoints/flux1-dev-fp8.safetensors 2>&1 | tail -1
+		LD_LIBRARY_PATH=$ORIG_LD_LIBRARY_PATH python3 scripts/verify/make_flux2_fp8_real.py black-forest-labs/FLUX.2-klein-4B /content/light-models/checkpoints/flux2-klein-4b-fp8 2>&1 | tail -1
+		python3 - <<'PY'
+import os
+from huggingface_hub import hf_hub_download
+for repo, f in [("city96/FLUX.1-schnell-gguf", "flux1-schnell-Q4_K_S.gguf"), ("city96/FLUX.1-dev-gguf", "flux1-dev-Q4_K_S.gguf")]:
+    hf_hub_download(repo, f, local_dir="/content/light-models/checkpoints", token=os.environ.get("HF_TOKEN") or None)
+    print("fetched", f)
+PY
+		nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | tee "$LOGS/imagebench/gpu.txt"
+		LIGHT_IMAGE_BENCH=all run imagebench-light ./diffusion 'TestImageBenchCUDA' -timeout 4h
+		grep -E '^\s*image_bench_cuda_test.go:[0-9]+: \|' "$LOGS/$STAMP-imagebench-light.log" | sed 's/.*: //' > "$LOGS/imagebench/light.md"
+		LD_LIBRARY_PATH=$ORIG_LD_LIBRARY_PATH python3 scripts/verify/bench_diffusers.py all 2>&1 | tee "$LOGS/$STAMP-imagebench-diffusers.log" | grep -E '^\|' | tee "$LOGS/imagebench/diffusers.md"
+		say "image bench tables"
+		echo "Light:"; cat "$LOGS/imagebench/light.md"; echo "diffusers:"; cat "$LOGS/imagebench/diffusers.md"
+		drop Tongyi-MAI/Z-Image-Turbo black-forest-labs/FLUX.2-klein-4B black-forest-labs/FLUX.1-schnell black-forest-labs/FLUX.1-dev
+		rm -rf /content/light-models
+		;;
 	flux2dev)
 		# FLUX.2-dev against diffusers (BF16, model CPU offload) at 512², 8
 		# steps: Light with the transformer resident at BF16 (64 GB), then
