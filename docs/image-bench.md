@@ -59,7 +59,8 @@ weights; every image shows the same scene, the Q4 dev run redraws the rocks).
 | FLUX.1 dev 12B | BF16, 23.8 GB | streamed | 33 s | 4.8 min | 0.036 | 8 |
 | FLUX.1 dev 12B | FP8, 11.9 GB | resident | 3.6 s | 61 s | 0.043 | 8 |
 | FLUX.1 dev 12B | Q4_K_S GGUF, 6.8 GB | resident | 3.2 s | 55 s | 0.066 | 8 |
-| FLUX.2 dev 32B | BF16 / FP8 | Colab A100 (40 GB): encoder on the CPU, streamed | pending | | | 8 |
+| FLUX.2 dev 32B | BF16, 64 GB | Colab A100 40 GB: Mistral-3 24B encoder on the CPU, blocks streamed | ~80 s | 12.1 min | 0.010 | 8 |
+| FLUX.2 dev 32B | FP8 folder, 30.7 GB | Colab A100 40 GB: encoder on the CPU, resident | ~35 s | 6.4 min | 0.018 | 8 |
 
 Tiny-verified only (architecture against diffusers on random weights, no
 real-weight run on this card yet): FLUX 3 image klein, Qwen-Image 2.1,
