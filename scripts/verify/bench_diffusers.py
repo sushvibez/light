@@ -42,9 +42,7 @@ for kind, repo, tf, size, steps, guidance in runs:
                     tf, quantization_config=GGUFQuantizationConfig(compute_dtype=torch.bfloat16), torch_dtype=torch.bfloat16)
             elif tf:
                 variant = "FP8"
-                tr = FluxTransformer2DModel.from_single_file(tf, config=repo, subfolder="transformer", torch_dtype=torch.float8_e4m3fn)
-                tr.enable_layerwise_casting(storage_dtype=torch.float8_e4m3fn, compute_dtype=torch.bfloat16)
-                kw["transformer"] = tr
+                kw["transformer"] = FluxTransformer2DModel.from_single_file(tf, config=repo, subfolder="transformer", torch_dtype=torch.float8_e4m3fn)
             else:
                 variant = "BF16 (offload)"
             pipe = FluxPipeline.from_pretrained(repo, torch_dtype=torch.bfloat16, **kw)
@@ -56,9 +54,7 @@ for kind, repo, tf, size, steps, guidance in runs:
             kw = {}
             if tf:
                 variant = "FP8"
-                tr = Flux2Transformer2DModel.from_pretrained(tf, torch_dtype=torch.float8_e4m3fn)
-                tr.enable_layerwise_casting(storage_dtype=torch.float8_e4m3fn, compute_dtype=torch.bfloat16)
-                kw["transformer"] = tr
+                kw["transformer"] = Flux2Transformer2DModel.from_pretrained(tf, torch_dtype=torch.float8_e4m3fn)
             pipe = Flux2KleinPipeline.from_pretrained(repo, torch_dtype=torch.bfloat16, **kw)
             call = lambda cb: pipe(prompt=prompt, height=size, width=size, num_inference_steps=steps, output_type="pt", callback_on_step_end=cb)
         elif kind == "zimage":
@@ -69,6 +65,8 @@ for kind, repo, tf, size, steps, guidance in runs:
         else:
             raise ValueError(kind)
         pipe.enable_model_cpu_offload()
+        if variant == "FP8":  # after the offload hooks, so the cast wraps the on-card module
+            pipe.transformer.enable_layerwise_casting(storage_dtype=torch.float8_e4m3fn, compute_dtype=torch.bfloat16)
         marks = []
         def cb(p, i, t, kw):
             torch.cuda.synchronize()
