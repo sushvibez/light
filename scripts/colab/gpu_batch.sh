@@ -262,6 +262,40 @@ PY
 		drop Tongyi-MAI/Z-Image-Turbo black-forest-labs/FLUX.2-klein-4B black-forest-labs/FLUX.1-schnell black-forest-labs/FLUX.1-dev
 		rm -rf /content/light-models
 		;;
+	candlebench)
+		# Candle's FLUX example on the same card, for docs/image-bench.md:
+		# a Rust toolchain and a CUDA build of candle-examples (~10 min),
+		# then schnell at 1024², 4 steps: quantized (lmz/candle-flux's GGUF)
+		# everywhere, BF16 (24 GB) and dev BF16 (28 steps) on a 40 GB card.
+		# Each run twice; the second (downloads done, kernels warm) counts.
+		mkdir -p "$LOGS/candlebench"
+		if ! command -v cargo >/dev/null; then
+			curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null 2>&1
+		fi
+		export PATH=$HOME/.cargo/bin:$PATH
+		[ -d /content/candle ] || git clone -q --depth 1 https://github.com/huggingface/candle /content/candle
+		( cd /content/candle && git log -1 --format='candle %h %cd' --date=short && cargo build --release --features cuda --example flux 2>&1 | tail -2 ) || { SUMMARY+=("$g FAIL build"); continue; }
+		vram=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1)
+		cbench() { # name args...: run twice, report the second's wall time
+			local name=$1; shift
+			local t0 t1
+			for i in 1 2; do
+				t0=$SECONDS
+				( cd /content/candle && target/release/examples/flux "$@" ) > "$LOGS/$STAMP-candle-$name-$i.log" 2>&1 || { tail -5 "$LOGS/$STAMP-candle-$name-$i.log"; SUMMARY+=("candle $name FAIL"); return; }
+				t1=$((SECONDS - t0))
+				echo "candle $name run $i: ${t1}s"
+			done
+			printf '| %s | Candle | 1024² | %s | | %dm%02ds |\n' "$name" "$STEPS" $((t1 / 60)) $((t1 % 60)) | tee -a "$LOGS/candlebench/candle.md"
+			cp /content/candle/out.jpg "$LOGS/candlebench/$name.jpg" 2>/dev/null
+		}
+		P="a watercolour painting of a red lighthouse on a rocky shore at dawn, soft light"
+		STEPS=4 cbench schnell-q8 --model schnell --quantized --height 1024 --width 1024 --prompt "$P"
+		if [ "${vram:-0}" -gt 36000 ]; then
+			STEPS=4 cbench schnell-bf16 --model schnell --height 1024 --width 1024 --prompt "$P"
+			STEPS=28 cbench dev-bf16 --model dev --height 1024 --width 1024 --prompt "$P"
+		fi
+		say "candle table"; cat "$LOGS/candlebench/candle.md"
+		;;
 	flux2dev)
 		# FLUX.2-dev against diffusers (BF16, model CPU offload) at 512², 8
 		# steps: Light with the transformer resident at BF16 (64 GB), then
