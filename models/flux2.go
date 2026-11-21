@@ -406,7 +406,7 @@ func (m *Flux2Transformer) doubleBlock(b *flux2DoubleBlock, x, ctx *tensor.Tenso
 	if err != nil {
 		return nil, nil, err
 	}
-	o, err := attend(q, k, v, cos, sin)
+	o, err := attendOpt(q, k, v, cos, sin, b.Img.Q.Mixed16)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -496,7 +496,7 @@ func (m *Flux2Transformer) singleBlock(b *flux2SingleBlock, h *tensor.Tensor, md
 	if err != nil {
 		return nil, err
 	}
-	a, err := attend(q, k, v, cos, sin)
+	a, err := attendOpt(q, k, v, cos, sin, b.QKVMLP.Mixed16)
 	if err != nil {
 		return nil, err
 	}

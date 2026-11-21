@@ -62,6 +62,11 @@ type FluxLoadOptions struct {
 	KeepFP8 bool
 	// StreamSlots is how many streamed blocks stay on the device (default 2).
 	StreamSlots int
+	// Mixed16 makes the transformer compute at BF16 on CUDA tensor cores
+	// (nn.WithWeightStorage16Mixed: GEMMs with F32 accumulation, BF16
+	// flash attention), as diffusers runs it; needs Storage16. The text
+	// encoders stay exact.
+	Mixed16 bool
 	// Components overrides where a component folder comes from, by its
 	// model_index name ("transformer", "vae", "text_encoder",
 	// "text_encoder_2", "scheduler", "tokenizer", "tokenizer_2"): a local
@@ -116,7 +121,11 @@ func (p *Flux) loadEncoders() error {
 }
 
 func (p *Flux) loadTransformer() error {
-	return p.load16(func() (err error) {
+	load := p.load16
+	if p.opts.Storage16 && p.opts.Mixed16 {
+		load = func(f func() error) error { return nn.WithWeightStorage16Mixed(dtype.BF16, f) }
+	}
+	return load(func() (err error) {
 		o := models.FluxTransformerLoadOptions{Stream: p.opts.StreamBlocks, KeepFP8: p.opts.KeepFP8, Slots: p.opts.StreamSlots}
 		if p.Transformer, err = models.LoadFluxTransformerOpts(p.sub("transformer"), p.Dev, o); err != nil {
 			return fmt.Errorf("flux transformer: %w", err)

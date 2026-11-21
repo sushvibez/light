@@ -32,8 +32,11 @@ Light, RTX 5060 Ti (16 GB), F32 compute:
 Per step is the mean over the steps after the first (the first includes
 the transformer load). At 1024² the step is 4x the tokens of 512² and
 4.5x the time: the matmuls run in F32 after widening the stored weights,
-so the card's tensor cores sit idle; a BF16-compute option (Mixed16, as
-Z-Image uses on the L4) is the next speed step.
+so the card's tensor cores sit idle. The Mixed16 option (BF16 GEMMs with
+F32 accumulation and BF16 flash attention, diffusers' own precision; the
+engine's default on CUDA since 2026-11-21) changes that: schnell FP8 at
+512² goes from 3.1 s to 1.0 s a step and klein FP8 keeps its image
+difference (0.0295 vs 0.029), with 1024² rows measured on Colab below.
 
 Same models with diffusers (PyTorch, BF16 tensor-core compute, model CPU
 offload, FP8 via layerwise casting, GGUF dequantized per matmul) and with

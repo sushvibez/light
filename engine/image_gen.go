@@ -143,6 +143,7 @@ func GenerateImage(o ImageOptions) (*ImageResult, error) {
 			tdir = filepath.Join(snapshotDir(repo), "transformer")
 		}
 		lo.KeepFP8 = s16 && device.IsCUDA(d)
+		lo.Mixed16 = s16 && device.IsCUDA(d)
 		lo.StreamBlocks = s16 && device.IsCUDA(d) && dirBytes(tdir, "*.safetensors") > 13<<30
 		p, err := diffusion.LoadFlux2(repo, d, lo)
 		if err != nil {
@@ -210,6 +211,7 @@ func GenerateImage(o ImageOptions) (*ImageResult, error) {
 			tbytes = st.Size()
 		}
 		lo.KeepFP8 = s16 && device.IsCUDA(d)
+		lo.Mixed16 = s16 && device.IsCUDA(d) // BF16 tensor-core compute, as diffusers
 		lo.StreamBlocks = s16 && device.IsCUDA(d) && tbytes > 13<<30
 		p, err := diffusion.LoadFluxOpts(repo, d, lo)
 		if err != nil {

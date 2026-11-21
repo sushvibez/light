@@ -172,6 +172,11 @@ func TestFlux2KleinRealCUDA(t *testing.T) {
 	if os.Getenv("LIGHT_FLUX2_STREAM") != "" { // transformer blocks streamed (a 24 GB card)
 		lo.StreamBlocks = true
 	}
+	if os.Getenv("LIGHT_FLUX_MIXED16") != "" { // BF16 tensor-core compute
+		lo.Mixed16 = true
+		tol += 0.01
+		t.Log("Mixed16: BF16 compute")
+	}
 	if ref.Steps > 4 {
 		tol += 0.015
 	}
@@ -208,6 +213,8 @@ func TestFlux1RealCUDA(t *testing.T) {
 		lo.StreamBlocks = os.Getenv("LIGHT_FLUX1_STREAM") != ""
 		t.Logf("transformer: %s (streamed: %v)", tf, lo.StreamBlocks)
 	}
+	mixed := os.Getenv("LIGHT_FLUX_MIXED16") != ""
+	lo.Mixed16 = mixed
 	p, err := LoadFluxOpts(ref.Repo, dev, lo)
 	if err != nil {
 		t.Fatal(err)
@@ -271,6 +278,9 @@ func TestFlux1RealCUDA(t *testing.T) {
 	tol := 0.03
 	if ref.Steps > 4 {
 		tol = 0.045 // BF16 rounding on both sides compounds per step (dev, 8 steps: 0.036)
+	}
+	if mixed {
+		tol += 0.01 // BF16 compute, as the reference itself
 	}
 	if strings.HasSuffix(strings.ToLower(os.Getenv("LIGHT_FLUX1_TRANSFORMER")), ".gguf") {
 		tol = 0.05 // 4-bit weights: 0.033 for Q4_K_S schnell, the same scene

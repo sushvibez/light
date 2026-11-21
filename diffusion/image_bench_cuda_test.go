@@ -72,10 +72,14 @@ func TestImageBenchCUDA(t *testing.T) {
 		t0 := time.Now()
 		var stepTimes []time.Duration
 		last := t0
+		mixed := os.Getenv("LIGHT_FLUX_MIXED16") != ""
+		if mixed {
+			variant += " mixed"
+		}
 		var gen func() error
 		switch kind {
 		case "flux":
-			lo := FluxLoadOptions{Storage16: true, Sequential: true}
+			lo := FluxLoadOptions{Storage16: true, Sequential: true, Mixed16: mixed}
 			if tf != "" {
 				lo.Components = map[string]string{"transformer": tf}
 				lo.KeepFP8 = true
@@ -97,7 +101,7 @@ func TestImageBenchCUDA(t *testing.T) {
 				return err
 			}
 		case "flux2":
-			lo := Flux2LoadOptions{Storage16: true, Sequential: true}
+			lo := Flux2LoadOptions{Storage16: true, Sequential: true, Mixed16: mixed}
 			if tf != "" {
 				lo.Components = map[string]string{"transformer": tf}
 				lo.KeepFP8 = true

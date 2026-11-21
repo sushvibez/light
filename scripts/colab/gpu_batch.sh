@@ -257,6 +257,9 @@ PY
 		nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | tee "$LOGS/imagebench/gpu.txt"
 		LIGHT_IMAGE_BENCH=all run imagebench-light ./diffusion 'TestImageBenchCUDA' -timeout 4h
 		grep -E '^\s*image_bench_cuda_test.go:[0-9]+: \|' "$LOGS/$STAMP-imagebench-light.log" | sed 's/.*: //' > "$LOGS/imagebench/light.md"
+		# The same with BF16 tensor-core compute (Mixed16), diffusers' precision.
+		LIGHT_FLUX_MIXED16=1 LIGHT_IMAGE_BENCH=all run imagebench-light-mixed ./diffusion 'TestImageBenchCUDA' -timeout 4h
+		grep -E '^\s*image_bench_cuda_test.go:[0-9]+: \|' "$LOGS/$STAMP-imagebench-light-mixed.log" | sed 's/.*: //' >> "$LOGS/imagebench/light.md"
 		LD_LIBRARY_PATH=$ORIG_LD_LIBRARY_PATH python3 scripts/verify/bench_diffusers.py all 2>&1 | tee "$LOGS/$STAMP-imagebench-diffusers.log" | grep -E '^\|' | tee "$LOGS/imagebench/diffusers.md"
 		say "image bench tables"
 		echo "Light:"; cat "$LOGS/imagebench/light.md"; echo "diffusers:"; cat "$LOGS/imagebench/diffusers.md"

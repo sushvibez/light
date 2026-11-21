@@ -66,6 +66,9 @@ type Flux2LoadOptions struct {
 	StreamBlocks bool
 	KeepFP8      bool
 	StreamSlots  int
+	// Mixed16 computes the transformer at BF16 on CUDA tensor cores
+	// (FluxLoadOptions.Mixed16).
+	Mixed16 bool
 	// Components overrides a component folder by its model_index name
 	// ("transformer", "vae", "text_encoder", "tokenizer", "scheduler").
 	Components map[string]string
@@ -166,7 +169,11 @@ func (p *Flux2) loadEncoder() (err error) {
 }
 
 func (p *Flux2) loadTransformer() (err error) {
-	if err = p.load16(func() (err error) {
+	load := p.load16
+	if p.opts.Storage16 && p.opts.Mixed16 {
+		load = func(f func() error) error { return nn.WithWeightStorage16Mixed(dtype.BF16, f) }
+	}
+	if err = load(func() (err error) {
 		p.Transformer, err = models.LoadFlux2TransformerOpts(p.sub("transformer"), p.Dev,
 			models.Flux2TransformerLoadOptions{Stream: p.opts.StreamBlocks, Slots: p.opts.StreamSlots, KeepFP8: p.opts.KeepFP8})
 		return

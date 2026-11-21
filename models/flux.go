@@ -792,7 +792,7 @@ func (m *FluxTransformer) doubleBlock(b *fluxDoubleBlock, x, ctx, stemb, cos, si
 	if err != nil {
 		return nil, nil, err
 	}
-	o, err := attend(q, k, v, cos, sin)
+	o, err := attendOpt(q, k, v, cos, sin, b.Img.Q.Mixed16) // BF16 flash attention under Mixed16
 	if err != nil {
 		return nil, nil, err
 	}
@@ -865,7 +865,7 @@ func (m *FluxTransformer) singleBlock(b *fluxSingleBlock, h, stemb, cos, sin *te
 	if err != nil {
 		return nil, err
 	}
-	a, err := attend(q, k, v, cos, sin)
+	a, err := attendOpt(q, k, v, cos, sin, b.Attn.Q.Mixed16)
 	if err != nil {
 		return nil, err
 	}
