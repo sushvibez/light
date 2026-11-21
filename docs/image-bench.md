@@ -16,9 +16,30 @@ and city96's GGUFs).
 
 Wall time from a cold start to the PNG, loads included.
 
+Light, RTX 5060 Ti (16 GB), F32 compute:
+
 | Model | Transformer | Size | Steps | Per step | Full generation |
 |---|---|---|---|---|---|
-(filled by the benchmark below)
+| Z-Image-Turbo | BF16 | 1024² | 8 | | 1m11s |
+| FLUX.2-klein-4B | BF16 | 1024² | 4 | | 1m16s |
+| FLUX.2-klein-4B | FP8 | 1024² | 4 | | 41s |
+| FLUX.1-schnell | BF16 streamed | 1024² | 4 | 22.0 s | 2m21s |
+| FLUX.1-schnell | FP8 | 1024² | 4 | 14.3 s | 1m40s |
+| FLUX.1-schnell | Q4_K_S GGUF | 1024² | 4 | 13.2 s | 1m34s |
+| FLUX.1-dev | FP8 | 1024² | 28 | 14.1 s | 7m0s |
+| FLUX.1-dev | Q4_K_S GGUF | 1024² | 28 | 13.1 s | 6m40s |
+
+Per step is the mean over the steps after the first (the first includes
+the transformer load). At 1024² the step is 4x the tokens of 512² and
+4.5x the time: the matmuls run in F32 after widening the stored weights,
+so the card's tensor cores sit idle; a BF16-compute option (Mixed16, as
+Z-Image uses on the L4) is the next speed step.
+
+Same models with diffusers (PyTorch, BF16 tensor-core compute, model CPU
+offload, FP8 via layerwise casting, GGUF dequantized per matmul) and with
+Candle (its quantized schnell example): measured on a Colab card next to
+Light, tables in this file once the run lands (`scripts/colab/gpu_batch.sh
+imagebench`, `scripts/verify/bench_diffusers.py`).
 
 ## Verification against diffusers, 512²
 
