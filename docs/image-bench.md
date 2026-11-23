@@ -83,6 +83,62 @@ What the rows say so far:
 
 `scripts/verify/bench_diffusers.py` reproduces the diffusers rows.
 
+## Single ops: Light, PyTorch and Candle
+
+RTX 5060 Ti, FLUX.1's 1024² geometry (4096 image + 256 text tokens, width
+3072, 24 heads of 128), mean of 10 calls after 3 warm-ups, device
+synchronized; PyTorch 2.11 with TF32 off (F32 rows are true F32), Candle
+4bc89dd (2026-04-16) with `--features cuda`. "Light vs" is Light's time
+relative to the other (negative: Light is faster); **bold** marks Light
+more than 20 % slower, the threshold for digging in. Sub-millisecond rows
+move by 10 to 20 % between runs.
+
+    LIGHT_OPBENCH=1 go test ./ops -run TestOpBenchCUDA -v
+    .venv/bin/python scripts/verify/opbench_torch.py
+    CANDLE_DIR=~/src/candle bash scripts/verify/opbench_candle/run.sh
+
+| Op | Light | rate | PyTorch | Light vs PyTorch | Candle | Light vs Candle |
+|---|---|---|---|---|---|---|
+| GEMM F32 (4096 x 3072) · (3072 x 3072)ᵀ | 5.70 ms | 13.6 TFLOPS | 6.47 ms | -12% | 6.52 ms | -13% |
+| GEMM BF16 in, F32 out (mixed) (4096 x 3072) · (3072 x 3072)ᵀ | 1.94 ms | 39.8 TFLOPS | 2.06 ms | -6% | 2.17 ms | -11% |
+| GEMM BF16 in, BF16 out (4096 x 3072) · (3072 x 3072)ᵀ | 1.71 ms | 45.3 TFLOPS | 1.66 ms | +3% | 1.67 ms | +2% |
+| GEMM F32 x, BF16 weight exact (W16) (4096 x 3072) · (3072 x 3072)ᵀ | 6.74 ms | 11.5 TFLOPS | — | | — | |
+| FP8 weight → BF16 + GEMM (4096 x 3072) · (3072 x 3072)ᵀ | 2.04 ms | 37.9 TFLOPS | 1.74 ms | +17% | — | |
+| GGUF Q8_0 weight, dequant + GEMM (4096 x 3072) · (3072 x 3072)ᵀ | 6.13 ms | 12.6 TFLOPS | — | | — | |
+| GGUF Q4_0 weight, dequant + GEMM (4096 x 3072) · (3072 x 3072)ᵀ | 6.64 ms | 11.6 TFLOPS | — | | — | |
+| GEMM F32 (4096 x 3072) · (12288 x 3072)ᵀ | 20.85 ms | 14.8 TFLOPS | 25.62 ms | -19% | 25.82 ms | -19% |
+| GEMM BF16 in, F32 out (mixed) (4096 x 3072) · (12288 x 3072)ᵀ | 6.74 ms | 45.9 TFLOPS | 7.54 ms | -11% | 7.96 ms | -15% |
+| GEMM BF16 in, BF16 out (4096 x 3072) · (12288 x 3072)ᵀ | 6.54 ms | 47.3 TFLOPS | 6.47 ms | +1% | 6.60 ms | -1% |
+| GEMM F32 x, BF16 weight exact (W16) (4096 x 3072) · (12288 x 3072)ᵀ | 27.37 ms | 11.3 TFLOPS | — | | — | |
+| FP8 weight → BF16 + GEMM (4096 x 3072) · (12288 x 3072)ᵀ | 7.39 ms | 41.8 TFLOPS | 7.00 ms | +6% | — | |
+| Attention F32 (1, 24, 4352, 128) | 82.60 ms | 2.8 TFLOPS | 35.84 ms | **+130%** | 55.35 ms | **+49%** |
+| Attention BF16 (1, 24, 4352, 128) | 6.47 ms | 36.0 TFLOPS | 5.71 ms | +13% | 25.41 ms | -75% |
+| LayerNorm F32 (1, 4352, 3072) | 0.28 ms | 388 GB/s | 0.29 ms | -3% | 0.40 ms | -30% |
+| RMSNorm F32 (1, 4352, 24, 128) | 0.46 ms | 234 GB/s | 0.33 ms | **+39%** | 0.30 ms | **+53%** |
+| GELU(tanh) F32 (1, 4352, 12288) | 1.41 ms | 303 GB/s | 1.13 ms | **+25%** | 1.36 ms | +4% |
+| SiLU F32 (1, 4352, 3072) | 0.69 ms | 155 GB/s | 0.29 ms | **+138%** | 0.35 ms | **+97%** |
+| Add F32 (1, 4352, 3072) | 0.28 ms | 575 GB/s | 0.28 ms | +0% | 0.34 ms | -18% |
+| Softmax F32 (24, 1024, 1024) | 0.53 ms | 379 GB/s | 0.53 ms | +0% | 6.48 ms | -92% |
+| Conv2d 3x3 F32 (1, 128, 512, 512) → 128 | 11.36 ms | 6.8 TFLOPS | 11.07 ms | +3% | 25.74 ms | -56% |
+| Conv2d 3x3 BF16 (1, 128, 512, 512) → 128 | 3.15 ms | 24.5 TFLOPS | 2.36 ms | **+33%** | 17.55 ms | -82% |
+
+Reading it:
+
+- The GEMMs, where a diffusion step spends most of its time, are at
+  parity or ahead: F32 12 to 19 % faster than both (cuBLAS with Light's
+  layout), BF16 tensor-core GEMMs within 3 %.
+- **F32 attention is the outlier**: Light's F32 flash kernel runs at 2.8
+  TFLOPS, 2.3x slower than PyTorch's and 1.5x slower than Candle's naive
+  matmul-softmax-matmul. It is what made the exact-F32 pipeline rows slow
+  at 1024² (two attentions per block). The BF16 flash kernel is fine (36
+  TFLOPS, 13 % behind PyTorch, 4x ahead of Candle, which has no flash
+  attention in its FLUX path).
+- To dig into (over 20 %): F32 attention, RMSNorm (+39 %), BF16 conv
+  (+33 %), GELU (+25 %); SiLU swung between runs and needs a longer
+  measurement before it counts.
+- Candle's softmax (12x slower) and convolutions (2.3x F32, 5.6x BF16)
+  are where it loses most against both.
+
 ## Verification against diffusers, 512²
 
 Same seeded noise, diffusers in BF16 with CPU offload, Light as above;

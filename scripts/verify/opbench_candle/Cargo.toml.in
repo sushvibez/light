@@ -1,0 +1,15 @@
+# Generated into Cargo.toml by run.sh with CANDLE_DIR (a candle checkout).
+[package]
+name = "opbench_candle"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+candle-core = { path = "@CANDLE_DIR@/candle-core", features = ["cuda"] }
+candle-nn = { path = "@CANDLE_DIR@/candle-nn", features = ["cuda"] }
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
