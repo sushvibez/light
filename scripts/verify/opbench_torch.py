@@ -19,11 +19,13 @@ def bench(name, flops, nbytes, f):
         for _ in range(3):
             f()
         torch.cuda.synchronize()
-        t0 = time.perf_counter()
-        for _ in range(10):
+        ds = []
+        for _ in range(21):  # median of individually synchronized calls, as Light's bench
+            t0 = time.perf_counter()
             f()
-        torch.cuda.synchronize()
-    ms = (time.perf_counter() - t0) * 1e3 / 10
+            torch.cuda.synchronize()
+            ds.append((time.perf_counter() - t0) * 1e3)
+    ms = sorted(ds)[len(ds) // 2]
     rate = f"{flops / (ms * 1e-3) / 1e12:.1f} TFLOPS" if flops else (f"{nbytes / (ms * 1e-3) / 1e9:.0f} GB/s" if nbytes else "")
     row = f"| {name} | {ms:.2f} ms | {rate} |"
     print(row, flush=True)

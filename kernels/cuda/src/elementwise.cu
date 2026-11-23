@@ -311,6 +311,29 @@ extern "C" __global__ void rmsnorm_f32(
   }
 }
 
+// rmsnorm_warp_f32: RMSNorm for narrow rows (attention heads: 64 to 256
+// wide), one warp per row and eight rows per block, reduced with shuffles
+// alone. A 256-thread block per 128-wide row leaves half its threads idle
+// and pays two barriers per row; here every lane has work and there is no
+// shared memory.
+extern "C" __global__ void rmsnorm_warp_f32(
+    const float *x, const float *weight, float *out,
+    unsigned long rows, unsigned long cols, float eps) {
+  unsigned long row = (unsigned long)blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
+  if (row >= rows) return;
+  int lane = threadIdx.x & 31;
+  const float *rowX = x + row * cols;
+  float *rowOut = out + row * cols;
+  float s = 0.0f;
+  for (unsigned long j = lane; j < cols; j += 32) {
+    float v = rowX[j];
+    s += v * v;
+  }
+  for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
+  float rms = rsqrtf(s / (float)cols + eps);
+  for (unsigned long j = lane; j < cols; j += 32) rowOut[j] = rowX[j] * rms * weight[j];
+}
+
 // ------------------- LayerNorm (last-axis) -------------------
 // y = gamma * (x - mean) / sqrt(var + eps) + beta
 extern "C" __global__ void layernorm_f32(

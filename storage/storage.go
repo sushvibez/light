@@ -180,4 +180,8 @@ func storageReleaseCleanup(s *Storage) {
 type PoolStats struct {
 	ForcedGCs, OOMRetries, Evictions, BestFits int64
 	GCTime, EvictTime                          time.Duration
+	// Mallocs counts fresh cudaMalloc calls (pool misses) and MallocTime
+	// the host time spent in them.
+	Mallocs    int64
+	MallocTime time.Duration
 }

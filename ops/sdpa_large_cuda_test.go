@@ -164,3 +164,41 @@ func TestSDPALargeLogits(t *testing.T) {
 		}
 	}
 }
+
+// RMSNorm over narrow rows (the warp-per-row kernel) and wide ones (a
+// block per row), ragged widths included: CUDA against the CPU.
+func TestRMSNormRowWidthsParity(t *testing.T) {
+	gpu, err := device.CUDA(0)
+	if err != nil {
+		t.Skip(err)
+	}
+	rng := rand.New(rand.NewPCG(21, 22))
+	for _, c := range []struct{ rows, cols int }{{1000, 128}, {37, 64}, {5, 100}, {3, 1}, {9, 31}, {4, 512}, {4, 513}, {3, 3072}} {
+		x := make([]float32, c.rows*c.cols)
+		w := make([]float32, c.cols)
+		for i := range x {
+			x[i] = float32(rng.NormFloat64()) * 3
+		}
+		for i := range w {
+			w[i] = float32(rng.NormFloat64())
+		}
+		run := func(dev device.Device) []float32 {
+			xt, _ := tensor.New(x, []int{c.rows, c.cols}, dev)
+			wt, _ := tensor.New(w, []int{c.cols}, dev)
+			y, err := ops.RMSNorm(xt, wt, 1e-6)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cpu, _ := y.To(device.CPU())
+			return tensor.MustSlice[float32](cpu)
+		}
+		a, b := run(device.CPU()), run(gpu)
+		md := 0.0
+		for i := range a {
+			md = math.Max(md, math.Abs(float64(a[i]-b[i])))
+		}
+		if md > 2e-5 {
+			t.Errorf("(%d, %d): CPU vs CUDA differ by %.3g", c.rows, c.cols, md)
+		}
+	}
+}

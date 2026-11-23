@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"os"
+	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +18,7 @@ import (
 	"light/nn"
 	"light/ops"
 	"light/quant"
+	"light/storage"
 	"light/tensor"
 )
 
@@ -63,14 +66,33 @@ func TestOpBenchCUDA(t *testing.T) {
 				return
 			}
 		}
-		_ = cudart.DeviceSynchronize()
-		iters := 10
-		t0 := time.Now()
-		for range iters {
-			_ = f()
+		// Warm the allocator: a pool miss is a cudaMalloc (~80 µs for a
+		// 53 MB block), which would be a quarter of a sub-millisecond op;
+		// outputs return to the pool only at a collection.
+		for range 6 {
+			m0 := storage.CUDAPoolStats().Mallocs
+			for range 4 {
+				_ = f()
+			}
+			runtime.GC()
+			time.Sleep(5 * time.Millisecond)
+			if storage.CUDAPoolStats().Mallocs == m0 {
+				break
+			}
 		}
 		_ = cudart.DeviceSynchronize()
-		ms := time.Since(t0).Seconds() * 1e3 / float64(iters)
+		// Median of individually synchronized calls (a forced collection
+		// inside the window otherwise lands on one op's mean).
+		const iters = 21
+		ds := make([]float64, iters)
+		for i := range ds {
+			t0 := time.Now()
+			_ = f()
+			_ = cudart.DeviceSynchronize()
+			ds[i] = time.Since(t0).Seconds() * 1e3
+		}
+		sort.Float64s(ds)
+		ms := ds[iters/2]
 		rate := ""
 		if flops > 0 {
 			rate = fmt.Sprintf("%.1f TFLOPS", flops/(ms*1e-3)/1e12)

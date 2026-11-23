@@ -32,7 +32,13 @@ func rmsnormF32CUDA(ctx *registry.Context) error {
 	if err := cudart.SetDevice(out.Device().Ordinal()); err != nil {
 		return err
 	}
-	fn, err := GetKernel("rmsnorm_f32")
+	// Narrow rows (per-head q / k norms, 64 to 256 wide): a warp per row,
+	// eight rows per block. Wide rows keep a block per row.
+	name, warp := "rmsnorm_f32", cols <= rmsnormWarpMaxCols
+	if warp {
+		name = "rmsnorm_warp_f32"
+	}
+	fn, err := GetKernel(name)
 	if err != nil {
 		return err
 	}
@@ -48,11 +54,17 @@ func rmsnormF32CUDA(ctx *registry.Context) error {
 		unsafe.Pointer(&epsF),
 	}
 	const block = 256
+	if warp {
+		return cudart.LaunchKernel(fn, uint32((rows+7)/8), 1, 1, block, 1, 1, 0, 0, args)
+	}
 	if err := cudart.LaunchKernel(fn, uint32(rows), 1, 1, block, 1, 1, block*4, 0, args); err != nil {
 		return err
 	}
 	return nil
 }
+
+// rmsnormWarpMaxCols is the widest row the warp-per-row RMSNorm takes.
+const rmsnormWarpMaxCols = 512
 
 func layernormF32CUDA(ctx *registry.Context) error {
 	x, g, b, out := ctx.Inputs[0], ctx.Inputs[1], ctx.Inputs[2], ctx.Output

@@ -227,7 +227,10 @@ func (p *cudaCachingPool) alloc(ord, bytes int) (uintptr, int, error) {
 		p.handed.Store(0)
 		forcedGC()
 	}
+	tm := time.Now()
 	ptr, err := cudart.Malloc(uintptr(class))
+	poolStats.mallocs.Add(1)
+	poolStats.mallocNanos.Add(int64(time.Since(tm)))
 	// Out of memory: drop the cache and retry; then collect, since the device
 	// blocks of dead tensors are freed only by GC cleanups (which run on
 	// their own goroutine, hence the short waits) and the GC cannot see
@@ -341,6 +344,7 @@ func (p *cudaCachingPool) Drain() {
 var poolStats struct {
 	forcedGCs, oomRetries, evictions, bestFits atomic.Int64
 	gcNanos, evictNanos                        atomic.Int64
+	mallocs, mallocNanos                       atomic.Int64
 }
 
 // forcedGC is the allocator's collection, timed.
@@ -360,8 +364,8 @@ func forcedGC() {
 func CUDAPoolStats() PoolStats {
 	return PoolStats{
 		ForcedGCs: poolStats.forcedGCs.Load(), OOMRetries: poolStats.oomRetries.Load(), Evictions: poolStats.evictions.Load(),
-		BestFits: poolStats.bestFits.Load(),
-		GCTime:   time.Duration(poolStats.gcNanos.Load()), EvictTime: time.Duration(poolStats.evictNanos.Load()),
+		BestFits: poolStats.bestFits.Load(), Mallocs: poolStats.mallocs.Load(), MallocTime: time.Duration(poolStats.mallocNanos.Load()),
+		GCTime: time.Duration(poolStats.gcNanos.Load()), EvictTime: time.Duration(poolStats.evictNanos.Load()),
 	}
 }
 

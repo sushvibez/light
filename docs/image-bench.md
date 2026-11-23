@@ -86,47 +86,47 @@ What the rows say so far:
 ## Single ops: Light, PyTorch and Candle
 
 RTX 5060 Ti, FLUX.1's 1024² geometry (4096 image + 256 text tokens, width
-3072, 24 heads of 128), mean of 10 calls after 3 warm-ups, device
-synchronized; PyTorch 2.11 with TF32 off (F32 rows are true F32), Candle
-4bc89dd (2026-04-16) with `--features cuda`. "Light vs" is Light's time
-relative to the other (negative: Light is faster); **bold** marks Light
-more than 20 % slower, the threshold for digging in. Sub-millisecond rows
-move by 10 to 20 % between runs.
+3072, 24 heads of 128). Each number is the median of 21 individually
+synchronized calls, best of three runs, for Light and PyTorch 2.11 (TF32
+off: F32 rows are true F32); Candle 4bc89dd (2026-04-16, `--features
+cuda`) is the mean of 10 calls. "Light vs" is Light's time relative to
+the other (negative: Light is faster); **bold** marks Light more than
+20 % slower, the threshold for digging in.
 
     LIGHT_OPBENCH=1 go test ./ops -run TestOpBenchCUDA -v
     .venv/bin/python scripts/verify/opbench_torch.py
     CANDLE_DIR=~/src/candle bash scripts/verify/opbench_candle/run.sh
 
-| Op | Light | rate | PyTorch | Light vs PyTorch | Candle | Light vs Candle |
-|---|---|---|---|---|---|---|
-| GEMM F32 (4096 x 3072) · (3072 x 3072)ᵀ | 5.72 ms | 13.5 TFLOPS | 6.47 ms | -12% | 6.52 ms | -12% |
-| GEMM BF16 in, F32 out (mixed) (4096 x 3072) · (3072 x 3072)ᵀ | 1.96 ms | 39.5 TFLOPS | 2.06 ms | -5% | 2.17 ms | -10% |
-| GEMM BF16 in, BF16 out (4096 x 3072) · (3072 x 3072)ᵀ | 1.63 ms | 47.4 TFLOPS | 1.66 ms | -2% | 1.67 ms | -2% |
-| GEMM F32 x, BF16 weight exact (W16) (4096 x 3072) · (3072 x 3072)ᵀ | 6.75 ms | 11.4 TFLOPS | — | | — | |
-| FP8 weight → BF16 + GEMM (4096 x 3072) · (3072 x 3072)ᵀ | 2.04 ms | 37.9 TFLOPS | 1.74 ms | +17% | — | |
-| GGUF Q8_0 weight, dequant + GEMM (4096 x 3072) · (3072 x 3072)ᵀ | 6.02 ms | 12.8 TFLOPS | — | | — | |
-| GGUF Q4_0 weight, dequant + GEMM (4096 x 3072) · (3072 x 3072)ᵀ | 6.75 ms | 11.4 TFLOPS | — | | — | |
-| GEMM F32 (4096 x 3072) · (12288 x 3072)ᵀ | 20.63 ms | 15.0 TFLOPS | 25.62 ms | -19% | 25.82 ms | -20% |
-| GEMM BF16 in, F32 out (mixed) (4096 x 3072) · (12288 x 3072)ᵀ | 6.81 ms | 45.4 TFLOPS | 7.54 ms | -10% | 7.96 ms | -14% |
-| GEMM BF16 in, BF16 out (4096 x 3072) · (12288 x 3072)ᵀ | 6.54 ms | 47.3 TFLOPS | 6.47 ms | +1% | 6.60 ms | -1% |
-| GEMM F32 x, BF16 weight exact (W16) (4096 x 3072) · (12288 x 3072)ᵀ | 27.33 ms | 11.3 TFLOPS | — | | — | |
-| FP8 weight → BF16 + GEMM (4096 x 3072) · (12288 x 3072)ᵀ | 7.37 ms | 42.0 TFLOPS | 7.00 ms | +5% | — | |
-| Attention F32 (1, 24, 4352, 128) | 33.71 ms | 6.9 TFLOPS | 35.84 ms | -6% | 55.35 ms | -39% |
-| Attention BF16 (1, 24, 4352, 128) | 7.05 ms | 33.0 TFLOPS | 5.71 ms | **+23%** | 25.41 ms | -72% |
-| LayerNorm F32 (1, 4352, 3072) | 0.28 ms | 388 GB/s | 0.29 ms | -3% | 0.40 ms | -30% |
-| RMSNorm F32 (1, 4352, 24, 128) | 0.48 ms | 221 GB/s | 0.33 ms | **+45%** | 0.30 ms | **+60%** |
-| GELU(tanh) F32 (1, 4352, 12288) | 1.17 ms | 366 GB/s | 1.13 ms | +4% | 1.36 ms | -14% |
-| SiLU F32 (1, 4352, 3072) | 0.28 ms | 381 GB/s | 0.29 ms | -3% | 0.35 ms | -20% |
-| Add F32 (1, 4352, 3072) | 0.76 ms | 211 GB/s | 0.28 ms | **+171%** | 0.34 ms | **+124%** |
-| Softmax F32 (24, 1024, 1024) | 0.78 ms | 258 GB/s | 0.53 ms | **+47%** | 6.48 ms | -88% |
-| Conv2d 3x3 F32 (1, 128, 512, 512) → 128 | 11.45 ms | 6.8 TFLOPS | 11.07 ms | +3% | 25.74 ms | -56% |
-| Conv2d 3x3 BF16 (1, 128, 512, 512) → 128 | 3.15 ms | 24.5 TFLOPS | 2.36 ms | **+33%** | 17.55 ms | -82% |
+| Op | Light | PyTorch | Light vs PyTorch | Candle | Light vs Candle |
+|---|---|---|---|---|---|
+| GEMM F32 (4096 x 3072) · (3072 x 3072)ᵀ | 5.92 ms | 6.49 ms | -9% | 6.52 ms | -9% |
+| GEMM BF16 in, F32 out (mixed) (4096 x 3072) · (3072 x 3072)ᵀ | 1.96 ms | 2.00 ms | -2% | 2.17 ms | -10% |
+| GEMM BF16 in, BF16 out (4096 x 3072) · (3072 x 3072)ᵀ | 1.65 ms | 1.65 ms | +0% | 1.67 ms | -1% |
+| GEMM F32 x, BF16 weight exact (W16) (4096 x 3072) · (3072 x 3072)ᵀ | 6.85 ms | — | | — | |
+| FP8 weight → BF16 + GEMM (4096 x 3072) · (3072 x 3072)ᵀ | 2.06 ms | 1.75 ms | +18% | — | |
+| GGUF Q8_0 weight, dequant + GEMM (4096 x 3072) · (3072 x 3072)ᵀ | 6.72 ms | — | | — | |
+| GGUF Q4_0 weight, dequant + GEMM (4096 x 3072) · (3072 x 3072)ᵀ | 6.73 ms | — | | — | |
+| GEMM F32 (4096 x 3072) · (12288 x 3072)ᵀ | 20.79 ms | 25.50 ms | -18% | 25.82 ms | -19% |
+| GEMM BF16 in, F32 out (mixed) (4096 x 3072) · (12288 x 3072)ᵀ | 6.71 ms | 7.47 ms | -10% | 7.96 ms | -16% |
+| GEMM BF16 in, BF16 out (4096 x 3072) · (12288 x 3072)ᵀ | 6.57 ms | 6.51 ms | +1% | 6.60 ms | -0% |
+| GEMM F32 x, BF16 weight exact (W16) (4096 x 3072) · (12288 x 3072)ᵀ | 26.97 ms | — | | — | |
+| FP8 weight → BF16 + GEMM (4096 x 3072) · (12288 x 3072)ᵀ | 7.24 ms | 6.95 ms | +4% | — | |
+| Attention F32 (1, 24, 4352, 128) | 33.26 ms | 34.42 ms | -3% | 55.35 ms | -40% |
+| Attention BF16 (1, 24, 4352, 128) | 6.50 ms | 5.57 ms | +17% | 25.41 ms | -74% |
+| LayerNorm F32 (1, 4352, 3072) | 0.36 ms | 0.29 ms | **+24%** | 0.40 ms | -10% |
+| RMSNorm F32 (1, 4352, 24, 128) | 0.35 ms | 0.34 ms | +3% | 0.30 ms | +17% |
+| GELU(tanh) F32 (1, 4352, 12288) | 1.13 ms | 1.13 ms | +0% | 1.36 ms | -17% |
+| SiLU F32 (1, 4352, 3072) | 0.36 ms | 0.28 ms | **+29%** | 0.35 ms | +3% |
+| Add F32 (1, 4352, 3072) | 0.28 ms | 0.29 ms | -3% | 0.34 ms | -18% |
+| Softmax F32 (24, 1024, 1024) | 0.56 ms | 0.53 ms | +6% | 6.48 ms | -91% |
+| Conv2d 3x3 F32 (1, 128, 512, 512) → 128 | 11.47 ms | 10.92 ms | +5% | 25.74 ms | -55% |
+| Conv2d 3x3 BF16 (1, 128, 512, 512) → 128 | 3.06 ms | 2.38 ms | **+29%** | 17.55 ms | -83% |
 
 Reading it:
 
 - The GEMMs, where a diffusion step spends most of its time, are at
-  parity or ahead: F32 12 to 19 % faster than both (cuBLAS with Light's
-  layout), BF16 tensor-core GEMMs within 3 %.
+  parity or ahead: F32 9 to 19 % faster than both (cuBLAS with Light's
+  layout), BF16 tensor-core GEMMs within 2 %.
 - F32 attention was the outlier at first measurement (82.6 ms: the
   streaming flash kernel at 2.8 TFLOPS, 2.3x slower than PyTorch). It now
   runs as two cuBLAS GEMMs per head around an in-place exp, with the
@@ -134,10 +134,24 @@ Reading it:
   most 512 MB of scores (`ops.AttentionGEMM`): 2.5x faster, ahead of
   PyTorch and Candle, and never slower than the flash kernel down to 64
   tokens. One GEMM per head rather than cuBLAS's strided-batched call is
-  worth 1.5x at this size. The BF16 flash kernel is 13 % behind PyTorch
-  and 4x ahead of Candle, which has no flash attention in its FLUX path.
-- Still to dig into (over 20 %): RMSNorm, BF16 convolution, GELU; SiLU
-  and Add swing between runs at 0.3 ms and need a longer measurement.
+  worth 1.5x at this size.
+- RMSNorm over 128-wide head rows was +39 to +45 %: a 256-thread block
+  per row left half the threads idle and paid two barriers a row. Rows up
+  to 512 wide now take a warp each, eight rows a block, shuffles only:
+  0.46 ms to 0.29-0.35 ms, level with PyTorch.
+- The swings first seen on Add, GELU and Softmax (Add at 0.28, 0.47 and
+  0.76 ms) were the allocator, not the kernels: an output returns to the
+  caching pool only at a garbage collection, so a cold pool misses, and a
+  miss is a cudaMalloc (about 80 µs for a 53 MB block, a quarter of such
+  an op), plus a forced collection (0.4 to 0.9 ms) for every GB of fresh
+  memory. With a warm pool the same calls show no mallocs and match
+  PyTorch to 3 % (`TestAllocJitterCUDA`; `storage.CUDAPoolStats` now
+  counts mallocs and their time). In a pipeline the pool is warm after
+  the first step; the benchmark warms it before timing.
+- Left over 20 %: LayerNorm (+24 %, still a block per row with tree
+  reductions), SiLU (+29 %) and BF16 convolution (+29 %, cuDNN algorithm
+  choice); BF16 attention is 17 % behind PyTorch and 4x ahead of Candle,
+  which has no flash attention in its FLUX path.
 - Candle's softmax (12x slower) and convolutions (2.3x F32, 5.6x BF16)
   are where it loses most against both.
 
