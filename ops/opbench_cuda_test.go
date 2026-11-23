@@ -13,6 +13,7 @@ import (
 	"light/device"
 	"light/dtype"
 	"light/internal/cudart"
+	"light/nn"
 	"light/ops"
 	"light/quant"
 	"light/tensor"
@@ -120,8 +121,18 @@ func TestOpBenchCUDA(t *testing.T) {
 	qb, kb, vb := must(ops.Cast(q, dtype.BF16)), must(ops.Cast(k, dtype.BF16)), must(ops.Cast(v, dtype.BF16))
 	afl := 4 * float64(H) * float64(S) * float64(S) * float64(Dh)
 	atag := fmt.Sprintf("(1, %d, %d, %d)", H, S, Dh)
-	bench("Attention F32 "+atag, afl, 0, func() error { _, err := ops.FlashAttention(q, k, v, false); return err })
+	bench("Attention F32 "+atag, afl, 0, func() error { _, err := nn.SDPA(q, k, v, nil); return err })
+	bench("Attention F32, flash kernel "+atag, afl, 0, func() error { _, err := ops.FlashAttention(q, k, v, false); return err })
 	bench("Attention BF16 "+atag, afl, 0, func() error { _, err := ops.FlashAttentionBF16(qb, kb, vb, false); return err })
+	nn.SDPAFlashF32 = false
+	bench("Attention F32, generic path (nn.SDPA) "+atag, afl, 0, func() error { _, err := nn.SDPA(q, k, v, nil); return err })
+	nn.SDPAFlashF32 = true
+	for _, s2 := range []int{1280, 256, 64} { // 512² image, short sequences
+		q2, k2, v2 := rnd(gpu, 1, H, s2, Dh), rnd(gpu, 1, H, s2, Dh), rnd(gpu, 1, H, s2, Dh)
+		f2 := 4 * float64(H) * float64(s2) * float64(s2) * float64(Dh)
+		bench(fmt.Sprintf("Attention F32 flash (1, %d, %d, %d)", H, s2, Dh), f2, 0, func() error { _, err := ops.FlashAttention(q2, k2, v2, false); return err })
+		bench(fmt.Sprintf("Attention F32 batched GEMM (1, %d, %d, %d)", H, s2, Dh), f2, 0, func() error { _, err := ops.AttentionGEMM(q2, k2, v2); return err })
+	}
 	h := rnd(gpu, 1, S, K)
 	ones, zeros := must(tensor.Ones(dtype.F32, []int{K}, gpu)), must(tensor.Zeros(dtype.F32, []int{K}, gpu))
 	by := float64(S*K) * 4 * 2 // read + write

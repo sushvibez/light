@@ -448,6 +448,37 @@ type BatchedOperand struct {
 	Trans  bool
 }
 
+// SgemmStridedBatched is GemmStridedBatched for F32 with an explicit output
+// slice stride and a scale: C[i] = alpha · A[i] @ B[i], C[i] at c +
+// i·cStride floats (≥ M·N), so results can land inside a larger tensor.
+func SgemmStridedBatched(h *BlasHandle, m, n, k int, a, b BatchedOperand, c uintptr, cStride int, alpha float32, count int) error {
+	tally(&counters.Gemms)
+	span := gpuSpanBegin(fmt.Sprintf("gemm f32 %dx%dx%d", m, n, k))
+	var opA, opB C.cublasOperation_t = C.CUBLAS_OP_N, C.CUBLAS_OP_N
+	if a.Trans {
+		opA = C.CUBLAS_OP_T
+	}
+	if b.Trans {
+		opB = C.CUBLAS_OP_T
+	}
+	al, beta := C.float(alpha), C.float(0.0)
+	rc := C.cublasSgemmStridedBatched(
+		h.handle, opB, opA,
+		C.int(n), C.int(m), C.int(k),
+		&al,
+		(*C.float)(unsafe.Pointer(b.Ptr)), C.int(b.LD), C.longlong(b.Stride),
+		(*C.float)(unsafe.Pointer(a.Ptr)), C.int(a.LD), C.longlong(a.Stride),
+		&beta,
+		(*C.float)(unsafe.Pointer(c)), C.int(n), C.longlong(cStride),
+		C.int(count),
+	)
+	span.end()
+	if rc != C.CUBLAS_STATUS_SUCCESS {
+		return fmt.Errorf("cublasSgemmStridedBatched(transA=%v, transB=%v): status %d", a.Trans, b.Trans, int(rc))
+	}
+	return nil
+}
+
 // GemmStridedBatched computes C[i] = A[i] @ B[i] for `count` row-major
 // slices, A (M, K), B (K, N), C (M, N) contiguous, with each input's
 // leading dimension, slice stride and transposition taken from its

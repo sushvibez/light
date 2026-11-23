@@ -9,7 +9,9 @@ import (
 
 	"light/device"
 	"light/dtype"
+	"light/kernels/cuda"
 	"light/nn"
+	"light/ops"
 	"light/tensor"
 )
 
@@ -60,6 +62,29 @@ func TestSDPAFluxGeometryParity(t *testing.T) {
 	t.Logf("SDPA (%d, %d, %d, %d): CPU vs CUDA max diff %.3g", B, H, S, D, md)
 	if md > 1e-4 {
 		t.Errorf("differ by %.3g", md)
+	}
+	// The batched-GEMM attention, whole and in several query chunks.
+	mk := func(x []float32) *tensor.Tensor {
+		t_, _ := tensor.New(x, []int{B, H, S, D}, gpu)
+		return t_
+	}
+	for _, budget := range []int64{1 << 30, 64 << 20} {
+		restore := cuda.SetAttentionGEMMBudget(budget)
+		o, err := ops.AttentionGEMM(mk(q), mk(k), mk(v))
+		restore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, _ := o.To(device.CPU())
+		g := tensor.MustSlice[float32](c)
+		md := 0.0
+		for i := range a {
+			md = math.Max(md, math.Abs(float64(a[i]-g[i])))
+		}
+		t.Logf("AttentionGEMM (budget %d MB): CPU vs CUDA max diff %.3g", budget>>20, md)
+		if md > 1e-4 {
+			t.Errorf("AttentionGEMM differs by %.3g", md)
+		}
 	}
 }
 

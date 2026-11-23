@@ -1194,3 +1194,50 @@ extern "C" __global__ void rope_partial_f32(
   out[base_off] = (x0 * c - x1 * sn);
   out[base_off + halfRot] = (x0 * sn + x1 * c);
 }
+
+// attn_exp_rows_f32: the first two thirds of a row softmax, in place:
+// a[row, :] = exp(a[row, :] - max(a[row, :])), sums[row] = Σ of them.
+// AttentionGEMMF32 normalises after the value GEMM instead (on (rows, D)
+// outputs rather than (rows, S) probabilities), saving a pass over the
+// score block. One block per row, 256 threads, like softmax_f32.
+extern "C" __global__ void attn_exp_rows_f32(float *a, float *sums, unsigned long rows, unsigned long cols) {
+  extern __shared__ float sdata_ae[];
+  unsigned long row = blockIdx.x;
+  if (row >= rows) return;
+  float *r = a + row * cols;
+  int tid = threadIdx.x, bs = blockDim.x;
+  float tmax = -INFINITY;
+  for (unsigned long j = tid; j < cols; j += bs) tmax = fmaxf(tmax, r[j]);
+  sdata_ae[tid] = tmax;
+  __syncthreads();
+  for (int s = bs / 2; s > 0; s >>= 1) {
+    if (tid < s) sdata_ae[tid] = fmaxf(sdata_ae[tid], sdata_ae[tid + s]);
+    __syncthreads();
+  }
+  float mx = sdata_ae[0];
+  __syncthreads();
+  float tsum = 0.0f;
+  for (unsigned long j = tid; j < cols; j += bs) {
+    float e = expf(r[j] - mx);
+    r[j] = e;
+    tsum += e;
+  }
+  sdata_ae[tid] = tsum;
+  __syncthreads();
+  for (int s = bs / 2; s > 0; s >>= 1) {
+    if (tid < s) sdata_ae[tid] += sdata_ae[tid + s];
+    __syncthreads();
+  }
+  if (tid == 0) sums[row] = sdata_ae[0];
+}
+
+// attn_scale_rows_f32: out[b, r, :] /= sums[b * m + r] for b < bh, r < m,
+// where head b's rows start at out + b * headStride (floats) and are D
+// wide: the deferred softmax normalisation of AttentionGEMMF32.
+extern "C" __global__ void attn_scale_rows_f32(float *out, const float *sums, unsigned long bh, unsigned long m,
+                                               unsigned long D, unsigned long headStride) {
+  unsigned long i = (unsigned long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= bh * m * D) return;
+  unsigned long b = i / (m * D), rem = i % (m * D);
+  out[b * headStride + rem] *= 1.0f / sums[b * m + rem / D];
+}

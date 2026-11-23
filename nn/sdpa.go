@@ -63,7 +63,14 @@ func SDPAScaled(q, k, v, addMask *tensor.Tensor, scale float64) (*tensor.Tensor,
 	// flash-attention kernel streams over the keys instead of materialising
 	// (B·NH, Sq, Sk) score / probability tensors, which at diffusion sequence
 	// lengths fill GPU memory long before the GC frees them.
-	if addMask == nil && scale == 0 && q.Device().Kind() == device.KindCUDA && q.DType() == dtype.F32 && Sq == Sk && D <= 256 {
+	if SDPAFlashF32 && addMask == nil && scale == 0 && q.Device().Kind() == device.KindCUDA && q.DType() == dtype.F32 && Sq == Sk && D <= 256 {
+		// Two cuBLAS GEMMs around an in-place exp, in query chunks of at
+		// most 512 MB of scores: 2.6x the flash kernel at 4352 tokens and
+		// never slower down to 64; the flash kernel remains for builds
+		// without the op.
+		if !q.RequiresGrad() && !k.RequiresGrad() && !v.RequiresGrad() && ops.AttentionGEMMOK(q, k, v) {
+			return ops.AttentionGEMM(q, k, v)
+		}
 		return ops.FlashAttention(q, k, v, false)
 	}
 	// Elsewhere the (B·NH, Sq, Sk) scores are materialised: past
@@ -293,6 +300,11 @@ func scalarLike(v float64, dt dtype.DType, dev device.Device) (*tensor.Tensor, e
 	}
 	return ops.Cast(s, dt)
 }
+
+// SDPAFlashF32 selects the fused CUDA F32 paths (batched-GEMM attention,
+// else the flash kernel) for unmasked self-attention; false runs the
+// generic materialised path (benchmarks).
+var SDPAFlashF32 = true
 
 // sdpaChunkBytes bounds the score matrix SDPA materialises at once (see
 // SDPAScaled); a variable so tests can force chunking.
