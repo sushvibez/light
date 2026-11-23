@@ -253,7 +253,8 @@ for repo, f in [("city96/FLUX.1-schnell-gguf", "flux1-schnell-Q4_K_S.gguf"), ("c
     hf_hub_download(repo, f, local_dir="/content/light-models/checkpoints", token=os.environ.get("HF_TOKEN") or None)
     print("fetched", f)
 PY
-		python3 -c 'import gguf' 2>/dev/null || pip install -q gguf  # diffusers' GGUF loader needs it
+		python3 -c 'import gguf' 2>/dev/null || python3 -m pip install -q gguf  # diffusers' GGUF loader needs it, in this interpreter
+		python3 -c 'import gguf, diffusers, torch; print("gguf ok; diffusers", diffusers.__version__, "torch", torch.__version__)'
 		nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | tee "$LOGS/imagebench/gpu.txt"
 		LIGHT_IMAGE_BENCH=all run imagebench-light ./diffusion 'TestImageBenchCUDA' -timeout 4h
 		grep -E '^\s*image_bench_cuda_test.go:[0-9]+: \|' "$LOGS/$STAMP-imagebench-light.log" | sed 's/.*: //' > "$LOGS/imagebench/light.md"
