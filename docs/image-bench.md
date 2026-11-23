@@ -38,11 +38,50 @@ engine's default on CUDA since 2026-11-21) changes that: schnell FP8 at
 512² goes from 3.1 s to 1.0 s a step and klein FP8 keeps its image
 difference (0.0295 vs 0.029), with 1024² rows measured on Colab below.
 
-Same models with diffusers (PyTorch, BF16 tensor-core compute, model CPU
-offload, FP8 via layerwise casting, GGUF dequantized per matmul) and with
-Candle (its quantized schnell example): measured on a Colab card next to
-Light, tables in this file once the run lands (`scripts/colab/gpu_batch.sh
-imagebench`, `scripts/verify/bench_diffusers.py`).
+## Light, diffusers and Candle on one card (Colab L4, 24 GB)
+
+The same prompt, 1024², each model's own step count, cold start with loads
+included, one process per row, measured 2026-11-21 by
+`scripts/colab/gpu_batch.sh imagebench candlebench`:
+
+- Light: F32 compute (Mixed16 rows pending from the rerun), sequential loads.
+- diffusers 0.37 / torch 2.11: BF16 tensor-core compute, model CPU
+  offload; the FP8 and GGUF rows use the same files as Light (layerwise
+  casting; GGUF dequantized per matmul). Their first attempt failed on the
+  benchmark script (cast order, missing `gguf` package); fixed, rerun pending.
+- Candle (upstream 1a49dc2, 2026-11-19, `--features cuda`): its FLUX
+  example, which covers schnell with its own quantized GGUF
+  (`lmz/candle-flux`, Q8) and BF16 only on a 40 GB card; second run of
+  two counted (downloads and kernels warm).
+
+| Model | Transformer | Steps | Light | Light per step | diffusers | diffusers per step | Candle |
+|---|---|---|---|---|---|---|---|
+| Z-Image-Turbo | BF16 | 8 | 1m49s | | 2m30s | 1.5 s | not ported |
+| FLUX.2 klein 4B | BF16 | 4 | 1m13s | | 0m59s | 0.9 s | not ported |
+| FLUX.2 klein 4B | FP8 | 4 | 41s | | pending | | not ported |
+| FLUX.1 schnell | BF16 streamed | 4 | 3m20s | 37.8 s | | | needs 40 GB |
+| FLUX.1 schnell | FP8 | 4 | 2m00s | 13.1 s | pending | | |
+| FLUX.1 schnell | Q4_K_S GGUF (Light) / Q8 GGUF (Candle) | 4 | 1m53s | 13.4 s | pending | | 2m04s |
+| FLUX.1 dev | FP8 | 28 | 6m45s | 13.0 s | pending | | no quantized dev |
+| FLUX.1 dev | Q4_K_S GGUF | 28 | 6m44s | 13.3 s | pending | | |
+
+What the rows say so far:
+
+- Against Candle, Light's quantized schnell is ahead on the whole
+  generation (1m53s vs 2m04s) with a smaller file (Q4_K_S, 6.8 GB vs
+  Q8, 12 GB) and F32 compute; Candle's example also runs F32-accumulated
+  BF16 kernels, so the per-step gap is in loading and the first step.
+  Candle has no dev quantization, no FP8 path, and neither Z-Image nor
+  FLUX.2.
+- Against diffusers, Light loads faster (Z-Image: 1m49s vs 2m30s for
+  eight steps) but computes slower per step (klein: 0m59s vs 1m13s) while
+  it runs exact F32 matmuls; the Mixed16 path closes that: on the RTX
+  5060 Ti at 512² schnell FP8 goes from 3.1 s to 1.0 s a step, and the
+  1024² Mixed16 rows are in the pending rerun.
+- Light's totals are dominated by loading: the FP8 schnell spends ~1m10s
+  of 2m00s before the first step (the 12 GB file from the VM disk).
+
+`scripts/verify/bench_diffusers.py` reproduces the diffusers rows.
 
 ## Verification against diffusers, 512²
 
