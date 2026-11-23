@@ -108,9 +108,14 @@ columns are the like-for-like pair.
   klein (30 s against 38 s) and Z-Image (1m38s against 2m32s), on loading;
   Light's per-step time for those two pipelines is not reported yet (no
   step callback there), so the per-step comparison is open.
-- The GGUF rows do not move under Mixed16: quantized weights dequantize
-  to F32 and run the F32 GEMM. A BF16 dequantize + tensor-core GEMM is
-  the missing piece (6.7 s a step against 1.1 s for FP8).
+- The GGUF rows did not move under Mixed16 in this run: quantized
+  weights dequantized to F32 and ran the F32 GEMM (6.7 s a step against
+  1.1 s for FP8). Fixed since (`ops.MatMulQMixed`: dequantize, round to
+  BF16, tensor-core GEMM with F32 accumulation): the quantized matmul at
+  FLUX's shape goes from 6.7 ms to 2.2 ms, and schnell Q4_K_S on the RTX
+  5060 Ti at 512² from 2.6 s to 1.1 s a step with the same image
+  difference (0.034 against 0.033); the 1024² row follows with the next
+  Colab run.
 - diffusers' FP8 and GGUF rows still fail in `bench_diffusers.py` (the
   layerwise cast does not reach the offloaded transformer; the GGUF
   single-file load errors), so those cells are open, not a diffusers

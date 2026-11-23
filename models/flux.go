@@ -171,7 +171,9 @@ func newFluxTransformer(cfg FluxConfig, dev device.Device, mode fluxWeightMode) 
 		case fluxWeightsFP8:
 			l, err = fp8Linear(in, out, true, mixed, dev)
 		case fluxWeightsPlaceholder:
-			l, err = nn.NewLinearPlaceholder(in, out, true, dev)
+			if l, err = nn.NewLinearPlaceholder(in, out, true, dev); err == nil {
+				l.Mixed16 = mixed // quantized weights: BF16 GEMM after the dequantize
+			}
 		default:
 			l, err = nn.NewLinearUninit(in, out, true, dtype.F32, dev)
 		}
@@ -244,7 +246,9 @@ func (s *fluxStream) blockBuilders(headDim int, err *error) (func(in, out int) *
 			l, e := nn.NewLinearPlaceholder(in, out, true, s.dev)
 			if e != nil {
 				*err = e
+				return nil
 			}
+			l.Mixed16 = s.mixed
 			return l
 		}
 		dt := s.wdt

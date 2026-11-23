@@ -294,7 +294,11 @@ func (l *Linear) forward(x *tensor.Tensor) (*tensor.Tensor, error) {
 		if err2 != nil {
 			return nil, err2
 		}
-		y, err = ops.MatMulQ(flatC, l.W)
+		if l.Mixed16 {
+			y, err = ops.MatMulQMixed(flatC, l.W) // BF16 tensor-core GEMM on CUDA
+		} else {
+			y, err = ops.MatMulQ(flatC, l.W)
+		}
 	} else if fp8 {
 		// FP8 weight: quantise the activation per-tensor, run the cuBLASLt
 		// FP8 GEMM (CPU reference otherwise) and land at the activation

@@ -128,7 +128,9 @@ func newFlux2Transformer(cfg Flux2Config, dev device.Device, mode fluxWeightMode
 		case fluxWeightsFP8:
 			l, err = fp8Linear(in, out, false, mixed, dev)
 		case fluxWeightsPlaceholder:
-			l, err = nn.NewLinearPlaceholder(in, out, false, dev)
+			if l, err = nn.NewLinearPlaceholder(in, out, false, dev); err == nil {
+				l.Mixed16 = mixed
+			}
 		default:
 			l, err = nn.NewLinearUninit(in, out, false, dtype.F32, dev)
 		}
@@ -191,7 +193,9 @@ func (s *flux2Stream) blockBuilders(headDim int, eps float64, err *error) (func(
 		case fluxWeightsFP8:
 			l, e = fp8Linear(in, out, false, s.mixed, s.dev)
 		case fluxWeightsPlaceholder:
-			l, e = nn.NewLinearPlaceholder(in, out, false, s.dev)
+			if l, e = nn.NewLinearPlaceholder(in, out, false, s.dev); e == nil {
+				l.Mixed16 = s.mixed
+			}
 		default:
 			dt := s.wdt
 			if in%2 != 0 {

@@ -94,6 +94,40 @@ func matMulQFallback(x, w *tensor.Tensor) (*tensor.Tensor, error) {
 	return MatMul(x, wT)
 }
 
+// MatMulQMixed is MatMulQ at 16-bit compute on CUDA: the weight
+// dequantizes, rounds to BF16 and meets the F32 activations (rounded to
+// BF16 inside) in a tensor-core GEMM with F32 accumulation and output, as
+// MatMulMixed does for BF16 weights. A 4- or 8-bit weight carries less
+// than BF16's 8 mantissa bits of its own, so the rounding costs it
+// nothing; the activations take BF16 precision, which is what Mixed16
+// layers accept. Fewer than MatMulQDequantMinRows rows, or another
+// device, run MatMulQ.
+func MatMulQMixed(x, w *tensor.Tensor) (*tensor.Tensor, error) {
+	if !device.IsCUDA(x.Device()) || x.Rank() != 2 || x.Dim(0) < MatMulQDequantMinRows {
+		return MatMulQ(x, w)
+	}
+	if w.Rank() != 2 || !w.DType().IsQuantized() || x.DType() != dtype.F32 || w.Dim(1) != x.Dim(1) {
+		return MatMulQ(x, w) // reports the mismatch
+	}
+	xC, err := ensureContig(x)
+	if err != nil {
+		return nil, err
+	}
+	wf, err := quant.Dequantize(w)
+	if err != nil {
+		return nil, err
+	}
+	wb, err := Cast(wf, dtype.BF16)
+	if err != nil {
+		return nil, err
+	}
+	wT, err := wb.Transpose(0, 1) // the transposed view MatMulMixed takes
+	if err != nil {
+		return nil, err
+	}
+	return MatMulMixed(xC, wT)
+}
+
 // MatMulQFused reports whether a fused dequant-matmul kernel exists on CUDA
 // for the format, i.e. whether a weight in that format can stay quantized
 // at no per-call dequantization cost.

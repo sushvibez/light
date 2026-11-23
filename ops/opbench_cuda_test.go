@@ -135,6 +135,7 @@ func TestOpBenchCUDA(t *testing.T) {
 			for _, q := range []dtype.DType{dtype.Q8_0, dtype.Q4_0} {
 				wq := must(must(quant.Quantize(wc, q)).To(gpu))
 				bench(fmt.Sprintf("GGUF %v weight, dequant + GEMM %s", q, tag), fl, 0, func() error { _, err := ops.MatMulQ(x, wq); return err })
+				bench(fmt.Sprintf("GGUF %v weight, dequant → BF16 + GEMM %s", q, tag), fl, 0, func() error { _, err := ops.MatMulQMixed(x, wq); return err })
 			}
 		}
 	}
