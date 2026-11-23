@@ -182,6 +182,8 @@ func TestOpBenchCUDA(t *testing.T) {
 		f2 := 4 * float64(H) * float64(s2) * float64(s2) * float64(Dh)
 		bench(fmt.Sprintf("Attention F32 flash (1, %d, %d, %d)", H, s2, Dh), f2, 0, func() error { _, err := ops.FlashAttention(q2, k2, v2, false); return err })
 		bench(fmt.Sprintf("Attention F32 batched GEMM (1, %d, %d, %d)", H, s2, Dh), f2, 0, func() error { _, err := ops.AttentionGEMM(q2, k2, v2); return err })
+		qb2, kb2, vb2 := must(ops.Cast(q2, dtype.BF16)), must(ops.Cast(k2, dtype.BF16)), must(ops.Cast(v2, dtype.BF16))
+		bench(fmt.Sprintf("Attention BF16 (1, %d, %d, %d)", H, s2, Dh), f2, 0, func() error { _, err := ops.FlashAttentionBF16(qb2, kb2, vb2, false); return err })
 	}
 	h := rnd(gpu, 1, S, K)
 	ones, zeros := must(tensor.Ones(dtype.F32, []int{K}, gpu)), must(tensor.Zeros(dtype.F32, []int{K}, gpu))

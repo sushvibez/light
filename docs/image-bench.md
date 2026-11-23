@@ -150,7 +150,7 @@ the other (negative: Light is faster); **bold** marks Light more than
 | GEMM F32 x, BF16 weight exact (W16) (4096 x 3072) · (12288 x 3072)ᵀ | 26.97 ms | — | | — | |
 | FP8 weight → BF16 + GEMM (4096 x 3072) · (12288 x 3072)ᵀ | 7.24 ms | 6.95 ms | +4% | — | |
 | Attention F32 (1, 24, 4352, 128) | 33.26 ms | 34.42 ms | -3% | 55.35 ms | -40% |
-| Attention BF16 (1, 24, 4352, 128) | 6.50 ms | 5.57 ms | +17% | 25.41 ms | -74% |
+| Attention BF16 (1, 24, 4352, 128) | 5.38 ms | 5.57 ms | -3% | 25.41 ms | -79% |
 | LayerNorm F32 (1, 4352, 3072) | 0.29 ms | 0.29 ms | +0% | 0.40 ms | -28% |
 | RMSNorm F32 (1, 4352, 24, 128) | 0.28 ms | 0.34 ms | -18% | 0.30 ms | -7% |
 | GELU(tanh) F32 (1, 4352, 12288) | 1.13 ms | 1.13 ms | +0% | 1.36 ms | -17% |
@@ -204,9 +204,16 @@ Reading it:
   every call, 0.28 ms before the device started (0.62 ms for F32): they
   are now cached per shape (0.2 ms). 2.56 ms, 7 % behind PyTorch; F32
   11.26 ms, 2 % behind. Every VAE convolution gets the same saving.
-- Nothing is left over the 20 % line. The largest remaining gap is BF16
-  attention, 17 % behind PyTorch and 4x ahead of Candle, which has no
-  flash attention in its FLUX path.
+- BF16 attention was 17 % behind PyTorch (6.50 ms, 35.8 TFLOPS). The
+  flash kernel at head dim 128 ran 8 warps of 16 query rows over
+  single-buffered 64-key tiles. It now runs 4 warps of 32 rows, so each
+  key / value fragment read from shared memory feeds two tensor-core
+  products, over double-buffered 32-key tiles, the next tile loading
+  under the current one's products: 5.38 ms, 43.3 TFLOPS, 3 % ahead of
+  PyTorch and 4.7x ahead of Candle, which has no flash attention in its
+  FLUX path. 0.63 to 0.52 ms at 1280 tokens. Either change alone was
+  worth 1 to 4 %.
+- Nothing in the table is now more than 7 % behind PyTorch.
 - Candle's softmax (12x slower) and convolutions (2.3x F32, 5.6x BF16)
   are where it loses most against both.
 

@@ -8,7 +8,7 @@
 // own (B, S, H, D) (seq_major 1: a head's rows are H*D apart), so callers
 // need no permute copies either way. A block owns 128 query rows of one
 // batch-head (8 warps x 16 rows, or 4 warps x 32 rows for the F16 kernels)
-// and streams the keys in tiles of FA16_BK = 64 through shared memory.
+// and streams the keys in tiles of BK = 64 (32 at head dim 128) through shared memory.
 // Each warp keeps its query rows' A fragments, the online-softmax state
 // (running max m, denominator l) and an F32 accumulator in registers; S = Q K^T and O += P V are
 // mma.sync.m16n8k16 BF16 products with F32 accumulation. The m16n8k16
@@ -24,7 +24,6 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
-#define FA16_BK 64
 #define FA16_PAD 8                      // bf16 per smem row of padding (bank conflicts)
 
 // Q, K, V are handled as raw 16-bit words (b16) up to the MMA, which reads
@@ -57,13 +56,13 @@ __device__ __forceinline__ unsigned fa16_pack(float lo, float hi) {
   return *reinterpret_cast<unsigned *>(&v);
 }
 
-// Stage rows [row0, row0 + FA16_BK) of a (S, D) BF16 slab into smem
+// Stage rows [row0, row0 + BK) of a (S, D) BF16 slab into smem
 // (D + FA16_PAD stride) with 16-byte cp.async copies, zero-filling rows
 // past S (src-size 0). The caller commits and waits.
-template <int D>
+template <int D, int BK>
 __device__ __forceinline__ void fa16_stage(fa16_b16 *dst, const fa16_b16 *src, int row0, int S, long ld) {
   const int chunks = D / 8; // 16-byte chunks per row
-  for (int c = threadIdx.x; c < FA16_BK * chunks; c += blockDim.x) {
+  for (int c = threadIdx.x; c < BK * chunks; c += blockDim.x) {
     int r = c / chunks, k = (c % chunks) * 8;
     bool in = row0 + r < S;
     const fa16_b16 *g = src + (long)(in ? row0 + r : 0) * ld + k;
@@ -92,19 +91,21 @@ __device__ __forceinline__ void fa16_ldm4t(unsigned *r, const fa16_b16 *p) {
 __device__ __forceinline__ void fa16_store(float *p, float a, float b) { *reinterpret_cast<float2 *>(p) = make_float2(a, b); }
 __device__ __forceinline__ void fa16_store(__half *p, float a, float b) { *reinterpret_cast<__half2 *>(p) = __floats2half2_rn(a, b); }
 
-// STAGES key / value tiles in flight: 2 (double-buffered cp.async) for
-// head dim 64; 1 for 128 (two would pass the 48 KB static smem limit).
+// STAGES key / value tiles of BK keys in flight: 2 is double-buffered
+// cp.async, the next tile loading under this one's products. Two 64-key
+// tiles at head dim 128 would pass the 48 KB static smem limit, so that
+// kernel streams 32-key tiles.
 // WARPS warps of MT m-tiles (16 query rows each): a block owns
 // WARPS * 16 * MT query rows. MT = 2 shares every K / V fragment read
 // from shared memory between two m-tiles (half the ldmatrix traffic per
 // MMA), at twice the accumulator registers.
-template <int D, int STAGES, bool F16, int MT, int WARPS, typename OutT>
+template <int D, int STAGES, bool F16, int MT, int WARPS, int BK, typename OutT>
 __device__ __forceinline__ void fa16_body(const fa16_b16 *Q, const fa16_b16 *K, const fa16_b16 *V, OutT *O,
                      int S, int Sk, int H, int seq_major, float scale, int causal) {
   constexpr int LDS = D + FA16_PAD;
   constexpr int BQ = WARPS * 16 * MT;
-  __shared__ __align__(16) fa16_b16 sK[STAGES][FA16_BK * LDS];
-  __shared__ __align__(16) fa16_b16 sV[STAGES][FA16_BK * LDS];
+  __shared__ __align__(16) fa16_b16 sK[STAGES][BK * LDS];
+  __shared__ __align__(16) fa16_b16 sV[STAGES][BK * LDS];
 
   const int bh = blockIdx.y;
   const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
@@ -125,10 +126,10 @@ __device__ __forceinline__ void fa16_body(const fa16_b16 *Q, const fa16_b16 *K, 
 
   int kEnd = Sk;
   if (causal) kEnd = min(Sk, (int)(blockIdx.x + 1) * BQ);
-  const int nTiles = (kEnd + FA16_BK - 1) / FA16_BK;
+  const int nTiles = (kEnd + BK - 1) / BK;
   // Start the first tile's copies before reading Q.
-  fa16_stage<D>(sK[0], K + kbase, 0, Sk, ld);
-  fa16_stage<D>(sV[0], V + kbase, 0, Sk, ld);
+  fa16_stage<D, BK>(sK[0], K + kbase, 0, Sk, ld);
+  fa16_stage<D, BK>(sV[0], V + kbase, 0, Sk, ld);
   fa16_commit();
 
   // Q A-fragments for the k-steps of 16 over D, straight from global.
@@ -164,19 +165,19 @@ __device__ __forceinline__ void fa16_body(const fa16_b16 *Q, const fa16_b16 *K, 
   const int lm = lane / 8, lr = lane % 8;
 
   for (int it = 0; it < nTiles; it++) {
-    const int k0 = it * FA16_BK;
+    const int k0 = it * BK;
     const int cur = STAGES == 2 ? (it & 1) : 0;
     if (STAGES == 2) {
       if (it + 1 < nTiles) { // prefetch the next tile into the other buffer
-        fa16_stage<D>(sK[cur ^ 1], K + kbase, k0 + FA16_BK, Sk, ld);
-        fa16_stage<D>(sV[cur ^ 1], V + kbase, k0 + FA16_BK, Sk, ld);
+        fa16_stage<D, BK>(sK[cur ^ 1], K + kbase, k0 + BK, Sk, ld);
+        fa16_stage<D, BK>(sV[cur ^ 1], V + kbase, k0 + BK, Sk, ld);
       }
       fa16_commit();
       fa16_wait<1>(); // this tile's group has landed
     } else {
       if (it > 0) {
-        fa16_stage<D>(sK[0], K + kbase, k0, Sk, ld);
-        fa16_stage<D>(sV[0], V + kbase, k0, Sk, ld);
+        fa16_stage<D, BK>(sK[0], K + kbase, k0, Sk, ld);
+        fa16_stage<D, BK>(sV[0], V + kbase, k0, Sk, ld);
         fa16_commit();
       }
       fa16_wait<0>();
@@ -187,9 +188,9 @@ __device__ __forceinline__ void fa16_body(const fa16_b16 *Q, const fa16_b16 *K, 
     // S = Q K^T for this warp's rows x 64 keys: 8 n-tiles of 8 keys.
     // B(k, n) = K[key n][dim k]: matrices (keys n*8.., dims ks*16 + 0 / 8,
     // (ks+1)*16 + 0 / 8) give b0, b1 for two k-steps per ldmatrix.
-    float s[MT][FA16_BK / 8][4];
+    float s[MT][BK / 8][4];
 #pragma unroll
-    for (int n = 0; n < FA16_BK / 8; n++) {
+    for (int n = 0; n < BK / 8; n++) {
 #pragma unroll
       for (int mt = 0; mt < MT; mt++) s[mt][n][0] = s[mt][n][1] = s[mt][n][2] = s[mt][n][3] = 0.f;
 #pragma unroll
@@ -209,7 +210,7 @@ __device__ __forceinline__ void fa16_body(const fa16_b16 *Q, const fa16_b16 *K, 
     // thread's rows (reduced over the 4 lanes that share a row). Scores
     // stay unscaled: the max is taken on them (scale > 0) and the scale
     // folds into exp2's argument as one FMA.
-    const bool full = k0 + FA16_BK <= Sk && (!causal || k0 + FA16_BK - 1 <= q0);
+    const bool full = k0 + BK <= Sk && (!causal || k0 + BK - 1 <= q0);
 #pragma unroll
     for (int mt = 0; mt < MT; mt++) {
 #pragma unroll
@@ -217,7 +218,7 @@ __device__ __forceinline__ void fa16_body(const fa16_b16 *Q, const fa16_b16 *K, 
         const int row = r[mt][h];
         float mx = -INFINITY;
 #pragma unroll
-        for (int n = 0; n < FA16_BK / 8; n++) {
+        for (int n = 0; n < BK / 8; n++) {
 #pragma unroll
           for (int e = 0; e < 2; e++) {
             if (!full) {
@@ -236,7 +237,7 @@ __device__ __forceinline__ void fa16_body(const fa16_b16 *Q, const fa16_b16 *K, 
         m[mt][h] = nm;
         float rs = 0.f;
 #pragma unroll
-        for (int n = 0; n < FA16_BK / 8; n++) {
+        for (int n = 0; n < BK / 8; n++) {
 #pragma unroll
           for (int e = 0; e < 2; e++) {
             s[mt][n][2 * h + e] = exp2f(fmaf(s[mt][n][2 * h + e], sl2, -sub));
@@ -258,7 +259,7 @@ __device__ __forceinline__ void fa16_body(const fa16_b16 *Q, const fa16_b16 *K, 
     // B(k, n) = V[key 16j + k][dim n]: transposed matrices (keys 16j + 0 / 8,
     // dims n*8 and n*8 + 8) give b0, b1 for two n-tiles per ldmatrix.
 #pragma unroll
-    for (int j = 0; j < FA16_BK / 16; j++) {
+    for (int j = 0; j < BK / 16; j++) {
       unsigned pa[MT][4];
 #pragma unroll
       for (int mt = 0; mt < MT; mt++) {
@@ -297,17 +298,21 @@ __device__ __forceinline__ void fa16_body(const fa16_b16 *Q, const fa16_b16 *K, 
 }
 
 // Exported entry points: head dim 64 (Idol) or 128 (Z-Image, FLUX), BF16
-// inputs with an F32 result (8 warps x 16 rows), or F16 inputs with an F16
-// result (flash_attn_f16_d64_h: 4 warps x 32 rows; at head dim 128 that
-// many accumulators spill). kernels/cuda/flash_attn_bf16.go
+// inputs with an F32 result, or F16 inputs with an F16 result. A block is
+// 128 query rows: 8 warps x 16 rows at BF16 head dim 64, 4 warps x 32
+// rows (MT 2) for the others. At head dim 128, MT 2 with double-buffered
+// 32-key tiles measured 5.35 ms on FLUX's 1024² attention (24 heads,
+// 4352 tokens, RTX 5060 Ti) against 6.50 ms for 8 warps x 16 rows over
+// single-buffered 64-key tiles; either change alone gave 1 to 4 %, 8
+// warps x 32 rows 6.2 ms, and 3 or 4 m-tiles per warp spill (9.8, 17.9 ms). kernels/cuda/flash_attn_bf16.go
 // launches each with its block's rows and threads.
-#define FA16_ENTRY(name, D, STAGES, F16, MT, WARPS, OutT) \
+#define FA16_ENTRY(name, D, STAGES, F16, MT, WARPS, BK, OutT) \
   extern "C" __global__ void __launch_bounds__(WARPS * 32) \
   name(const fa16_b16 *Q, const fa16_b16 *K, const fa16_b16 *V, OutT *O, int S, int Sk, int H, int seq_major, \
        float scale, int causal) { \
-    fa16_body<D, STAGES, F16, MT, WARPS>(Q, K, V, O, S, Sk, H, seq_major, scale, causal); \
+    fa16_body<D, STAGES, F16, MT, WARPS, BK>(Q, K, V, O, S, Sk, H, seq_major, scale, causal); \
   }
 
-FA16_ENTRY(flash_attn_bf16_d64, 64, 2, false, 1, 8, float)
-FA16_ENTRY(flash_attn_bf16_d128, 128, 1, false, 1, 8, float)
-FA16_ENTRY(flash_attn_f16_d64_h, 64, 2, true, 2, 4, __half)
+FA16_ENTRY(flash_attn_bf16_d64, 64, 2, false, 1, 8, 64, float)
+FA16_ENTRY(flash_attn_bf16_d128, 128, 2, false, 2, 4, 32, float)
+FA16_ENTRY(flash_attn_f16_d64_h, 64, 2, true, 2, 4, 64, __half)

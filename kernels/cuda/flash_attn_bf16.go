@@ -18,9 +18,9 @@ func init() {
 }
 
 const (
-	flashBF16TileQ   = 128 // query rows per block: 8 warps x 16 (BF16), 4 x 32 (F16)
+	flashBF16TileQ   = 128 // query rows per block: 8 warps x 16 (BF16, head dim 64), 4 x 32 (head dim 128, F16)
 	flashBF16Threads = 256
-	flashF16Threads  = 128
+	flashMT2Threads  = 128
 )
 
 // flashAttnBF16CUDA launches flash_attn_bf16_d128 (BF16 tensor cores,
@@ -62,6 +62,10 @@ func flashAttnBF16CUDA(ctx *registry.Context) error {
 	if q.DType() == dtype.F16 {
 		name = fmt.Sprintf("flash_attn_f16_d%d_h", D) // F16 in and out
 	}
+	threads := uint32(flashBF16Threads)
+	if q.DType() == dtype.F16 || D == 128 {
+		threads = flashMT2Threads // 4 warps x 32 rows
+	}
 	fn, err := GetKernel(name)
 	if err != nil {
 		return err
@@ -74,10 +78,6 @@ func flashAttnBF16CUDA(ctx *registry.Context) error {
 	gridX := uint32((int(S) + flashBF16TileQ - 1) / flashBF16TileQ)
 	if gridX == 0 {
 		return nil
-	}
-	threads := uint32(flashBF16Threads)
-	if q.DType() == dtype.F16 {
-		threads = flashF16Threads
 	}
 	return cudart.LaunchKernel(fn, gridX, uint32(BH), 1, threads, 1, 1, 0, 0, args)
 }
