@@ -83,6 +83,39 @@ What the rows say so far:
 
 `scripts/verify/bench_diffusers.py` reproduces the diffusers rows.
 
+## Same precision: Light Mixed16 against diffusers (Colab A100, 40 GB)
+
+Measured 2026-11-23 (`gpu_batch.sh imagebench`, Light at 8040107, before
+the F32 attention change below). 1024², cold start, loads included.
+"Light exact" computes in F32; "Light Mixed16" computes the transformer
+in BF16 on tensor cores, the precision diffusers runs at, so the last two
+columns are the like-for-like pair.
+
+| Model | Transformer | Steps | Light exact | per step | Light Mixed16 | per step | diffusers BF16 | per step |
+|---|---|---|---|---|---|---|---|---|
+| Z-Image-Turbo | BF16 | 8 | (always Mixed16) | | 1m38s | | 2m32s | 0.4 s |
+| FLUX.2 klein 4B | BF16 | 4 | 1m00s | | 30s | | 38s | 0.2 s |
+| FLUX.2 klein 4B | FP8 | 4 | 28s | | 17s | | script failed | |
+| FLUX.1 schnell | FP8 | 4 | 1m33s | 6.7 s | 45s | 1.1 s | script failed | |
+| FLUX.1 schnell | Q4_K_S GGUF | 4 | 59s | 6.7 s | 58s | 6.7 s | script failed | |
+| FLUX.1 dev | FP8 | 28 | 3m46s | 6.7 s | 1m11s | 1.1 s | script failed | |
+| FLUX.1 dev | Q4_K_S GGUF | 28 | 3m38s | 6.7 s | 3m37s | 6.7 s | script failed | |
+| FLUX.1 schnell | BF16 streamed | 4 | 1m58s | 11.9 s | 1m37s | 6.2 s | | |
+
+- Mixed16 is worth 6x per step on FLUX.1 FP8 (6.7 s to 1.1 s): dev at
+  28 steps in 1m11s from a cold start.
+- Whole generations at the same precision: Light is ahead of diffusers on
+  klein (30 s against 38 s) and Z-Image (1m38s against 2m32s), on loading;
+  Light's per-step time for those two pipelines is not reported yet (no
+  step callback there), so the per-step comparison is open.
+- The GGUF rows do not move under Mixed16: quantized weights dequantize
+  to F32 and run the F32 GEMM. A BF16 dequantize + tensor-core GEMM is
+  the missing piece (6.7 s a step against 1.1 s for FP8).
+- diffusers' FP8 and GGUF rows still fail in `bench_diffusers.py` (the
+  layerwise cast does not reach the offloaded transformer; the GGUF
+  single-file load errors), so those cells are open, not a diffusers
+  limit.
+
 ## Single ops: Light, PyTorch and Candle
 
 RTX 5060 Ti, FLUX.1's 1024² geometry (4096 image + 256 text tokens, width
