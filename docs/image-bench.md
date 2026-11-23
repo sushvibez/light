@@ -151,14 +151,14 @@ the other (negative: Light is faster); **bold** marks Light more than
 | FP8 weight → BF16 + GEMM (4096 x 3072) · (12288 x 3072)ᵀ | 7.24 ms | 6.95 ms | +4% | — | |
 | Attention F32 (1, 24, 4352, 128) | 33.26 ms | 34.42 ms | -3% | 55.35 ms | -40% |
 | Attention BF16 (1, 24, 4352, 128) | 6.50 ms | 5.57 ms | +17% | 25.41 ms | -74% |
-| LayerNorm F32 (1, 4352, 3072) | 0.36 ms | 0.29 ms | **+24%** | 0.40 ms | -10% |
-| RMSNorm F32 (1, 4352, 24, 128) | 0.35 ms | 0.34 ms | +3% | 0.30 ms | +17% |
+| LayerNorm F32 (1, 4352, 3072) | 0.29 ms | 0.29 ms | +0% | 0.40 ms | -28% |
+| RMSNorm F32 (1, 4352, 24, 128) | 0.28 ms | 0.34 ms | -18% | 0.30 ms | -7% |
 | GELU(tanh) F32 (1, 4352, 12288) | 1.13 ms | 1.13 ms | +0% | 1.36 ms | -17% |
-| SiLU F32 (1, 4352, 3072) | 0.36 ms | 0.28 ms | **+29%** | 0.35 ms | +3% |
+| SiLU F32 (1, 4352, 3072) | 0.28 ms | 0.29 ms | -3% | 0.35 ms | -20% |
 | Add F32 (1, 4352, 3072) | 0.28 ms | 0.29 ms | -3% | 0.34 ms | -18% |
 | Softmax F32 (24, 1024, 1024) | 0.56 ms | 0.53 ms | +6% | 6.48 ms | -91% |
-| Conv2d 3x3 F32 (1, 128, 512, 512) → 128 | 11.47 ms | 10.92 ms | +5% | 25.74 ms | -55% |
-| Conv2d 3x3 BF16 (1, 128, 512, 512) → 128 | 3.06 ms | 2.38 ms | **+29%** | 17.55 ms | -83% |
+| Conv2d 3x3 F32 (1, 128, 512, 512) → 128 | 11.26 ms | 11.01 ms | +2% | 25.74 ms | -56% |
+| Conv2d 3x3 BF16 (1, 128, 512, 512) → 128 | 2.56 ms | 2.40 ms | +7% | 17.55 ms | -85% |
 
 Reading it:
 
@@ -186,10 +186,27 @@ Reading it:
   PyTorch to 3 % (`TestAllocJitterCUDA`; `storage.CUDAPoolStats` now
   counts mallocs and their time). In a pipeline the pool is warm after
   the first step; the benchmark warms it before timing.
-- Left over 20 %: LayerNorm (+24 %, still a block per row with tree
-  reductions), SiLU (+29 %) and BF16 convolution (+29 %, cuDNN algorithm
-  choice); BF16 attention is 17 % behind PyTorch and 4x ahead of Candle,
-  which has no flash attention in its FLUX path.
+- LayerNorm and SiLU read +24 % and +29 % in the first table, and that
+  was the benchmark again, not the kernels: the timed calls ran without
+  a collection between them, so depending on what earlier rows had left
+  in the pool, more than half of the 21 calls could miss it and pay a
+  cudaMalloc, which lands on the median. The benchmark now collects
+  outside the timed calls every third one and reports any mallocs inside
+  them; both ops then measure 0.28-0.29 ms on every run, level with
+  PyTorch, with no kernel change.
+- BF16 convolution was +29 % (3.06 ms against 2.38 ms) for two host-side
+  reasons, neither the algorithm (cuDNN's heuristic picks the same
+  implicit-precomputed GEMM PyTorch gets; direct and plain implicit GEMM
+  are 3x slower here). The 128 MB workspace was a cudaMalloc and a
+  cudaFree per call, and cudaFree waits for the device: it now comes
+  from the caching pool and goes straight back (0.3 ms). And the four
+  descriptors, the algorithm query and the workspace-size query ran on
+  every call, 0.28 ms before the device started (0.62 ms for F32): they
+  are now cached per shape (0.2 ms). 2.56 ms, 7 % behind PyTorch; F32
+  11.26 ms, 2 % behind. Every VAE convolution gets the same saving.
+- Nothing is left over the 20 % line. The largest remaining gap is BF16
+  attention, 17 % behind PyTorch and 4x ahead of Candle, which has no
+  flash attention in its FLUX path.
 - Candle's softmax (12x slower) and convolutions (2.3x F32, 5.6x BF16)
   are where it loses most against both.
 

@@ -103,6 +103,17 @@ func init() {
 		}
 		cudaPool.Drain()
 	}
+	// cuDNN workspaces come from the pool and go straight back to it.
+	cudart.ScratchAlloc = func(ord int, bytes uintptr) (uintptr, func(), error) {
+		ptr, class, err := cudaPool.alloc(ord, int(bytes))
+		if err != nil {
+			return 0, nil, err
+		}
+		return ptr, func() {
+			cudaPool.release(ord, ptr, class)
+			cudaPool.handed.Add(-int64(class)) // back already: not garbage for a collection to return
+		}, nil
+	}
 }
 
 // cudaPool is a caching device allocator. cudaMalloc is slow and cudaFree

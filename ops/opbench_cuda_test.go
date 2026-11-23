@@ -58,7 +58,17 @@ func TestOpBenchCUDA(t *testing.T) {
 		return x
 	}
 	var rows []string
+	only := os.Getenv("LIGHT_OPBENCH_ONLY") // comma-separated substrings of row names
 	bench := func(name string, flops, bytes float64, f func() error) {
+		if only != "" {
+			hit := false
+			for _, o := range strings.Split(only, ",") {
+				hit = hit || strings.Contains(name, o)
+			}
+			if !hit {
+				return
+			}
+		}
 		for range 3 {
 			if err := f(); err != nil {
 				t.Errorf("%s: %v", name, err)
@@ -85,14 +95,25 @@ func TestOpBenchCUDA(t *testing.T) {
 		// inside the window otherwise lands on one op's mean).
 		const iters = 21
 		ds := make([]float64, iters)
+		host := make([]float64, iters) // time to the call's return, before the device finishes
+		m0 := storage.CUDAPoolStats().Mallocs
 		for i := range ds {
+			if i%3 == 0 { // return the outputs to the pool outside the timed call
+				runtime.GC()
+				time.Sleep(3 * time.Millisecond)
+				_ = cudart.DeviceSynchronize()
+			}
 			t0 := time.Now()
 			_ = f()
+			host[i] = time.Since(t0).Seconds() * 1e3
 			_ = cudart.DeviceSynchronize()
 			ds[i] = time.Since(t0).Seconds() * 1e3
 		}
 		sort.Float64s(ds)
 		ms := ds[iters/2]
+		if n := storage.CUDAPoolStats().Mallocs - m0; n > iters/4 {
+			t.Logf("%s: %d device mallocs inside the timed calls", name, n)
+		}
 		rate := ""
 		if flops > 0 {
 			rate = fmt.Sprintf("%.1f TFLOPS", flops/(ms*1e-3)/1e12)
@@ -100,6 +121,12 @@ func TestOpBenchCUDA(t *testing.T) {
 			rate = fmt.Sprintf("%.0f GB/s", bytes/(ms*1e-3)/1e9)
 		}
 		row := fmt.Sprintf("| %s | %.2f ms | %s |", name, ms, rate)
+		if os.Getenv("LIGHT_OPBENCH_SPREAD") != "" {
+			st := storage.CUDAPoolStats()
+			sort.Float64s(host)
+			t.Logf("%s: host-side median %.3f ms", name, host[iters/2])
+			t.Logf("%s: min %.2f, median %.2f, max %.2f ms; %d mallocs in the timed calls; pool %+v", name, ds[0], ms, ds[iters-1], st.Mallocs-m0, st)
+		}
 		t.Log(row)
 		rows = append(rows, row)
 	}
