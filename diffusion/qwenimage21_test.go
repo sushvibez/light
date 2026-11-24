@@ -89,7 +89,17 @@ func TestQwenImage21PipelineTinyMatchesDiffusers(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			res, err := p.Generate(QwenImage21Options{Prompt: ref.Prompt, Width: ref.Width, Height: ref.Height, Steps: ref.Steps, Latents: lat})
+			seen := 0
+			res, err := p.Generate(QwenImage21Options{Prompt: ref.Prompt, Width: ref.Width, Height: ref.Height, Steps: ref.Steps, Latents: lat,
+				OnStep: func(step int, x, v *tensor.Tensor) {
+					if x == nil || v == nil || step != seen {
+						t.Errorf("OnStep %d (call %d): latents %v, velocity %v", step, seen, x, v)
+					}
+					seen++
+				}})
+			if seen != ref.Steps {
+				t.Errorf("OnStep ran %d times, want %d", seen, ref.Steps)
+			}
 			if err != nil {
 				t.Fatal(err)
 			}

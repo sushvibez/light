@@ -99,8 +99,18 @@ func TestFlux3PipelineTinyMatchesDiffusers(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			seen := 0
 			res, err := p.Generate(Flux3Options{Prompt: ref.Prompt, Width: ref.Width, Height: ref.Height,
-				Steps: ref.Steps, Layers: ref.Layers, Latents: lat})
+				Steps: ref.Steps, Layers: ref.Layers, Latents: lat,
+				OnStep: func(step int, x, v *tensor.Tensor) {
+					if x == nil || v == nil || step != seen {
+						t.Errorf("OnStep %d (call %d): latents %v, velocity %v", step, seen, x, v)
+					}
+					seen++
+				}})
+			if seen != ref.Steps {
+				t.Errorf("OnStep ran %d times, want %d", seen, ref.Steps)
+			}
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -148,6 +148,9 @@ type Flux3Options struct {
 	// Images are reference images for editing (up to 10). One is kept whole:
 	// the output defaults to its padded canvas and is cropped back to it.
 	Images []image.Image
+	// OnStep, when set, sees the latents after each step and the velocity
+	// the transformer predicted, as FluxOptions.OnStep.
+	OnStep func(step int, x, v *tensor.Tensor)
 }
 
 // Flux3Result is a generated image and what produced it.
@@ -221,10 +224,13 @@ func flux3Sigmas(n int, shift float64) []float32 {
 	return out
 }
 
+// DefaultSteps is the step count Generate uses for Steps 0.
+func (p *Flux3) DefaultSteps() int { return 16 }
+
 // Generate runs text-to-image.
 func (p *Flux3) Generate(o Flux3Options) (*Flux3Result, error) {
 	if o.Steps == 0 {
-		o.Steps = 16
+		o.Steps = p.DefaultSteps()
 	}
 	if o.Shift == 0 {
 		o.Shift = 6.93
@@ -323,11 +329,15 @@ func (p *Flux3) Generate(o Flux3Options) (*Flux3Result, error) {
 			return nil, fmt.Errorf("flux3 step %d: %w", i, err)
 		}
 		dt, _ := tensor.New([]float32{sigmas[i+1] - sigmas[i]}, []int{1}, p.Dev)
+		vel := v
 		if v, err = ops.Mul(v, dt); err != nil {
 			return nil, err
 		}
 		if x, err = ops.Add(x, v); err != nil {
 			return nil, err
+		}
+		if o.OnStep != nil {
+			o.OnStep(i, x, vel)
 		}
 	}
 	if p.opts.Sequential {

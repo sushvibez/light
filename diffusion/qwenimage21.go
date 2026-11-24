@@ -127,6 +127,9 @@ type QwenImage21Options struct {
 	Steps         int // default 40
 	Seed          uint64
 	Latents       *tensor.Tensor // (1, 64, H/16, W/16) initial noise, to match a reference run
+	// OnStep, when set, sees the latents after each step and the velocity
+	// the transformer predicted, as FluxOptions.OnStep.
+	OnStep func(step int, x, v *tensor.Tensor)
 }
 
 // QwenImage21Result is a generated image and what produced it.
@@ -173,10 +176,13 @@ func (p *QwenImage21) encode(prompt string) (*tensor.Tensor, []int64, error) {
 	return e, ids, err
 }
 
+// DefaultSteps is the step count Generate uses for Steps 0.
+func (p *QwenImage21) DefaultSteps() int { return 40 }
+
 // Generate runs text-to-image.
 func (p *QwenImage21) Generate(o QwenImage21Options) (*QwenImage21Result, error) {
 	if o.Steps == 0 {
-		o.Steps = 40
+		o.Steps = p.DefaultSteps()
 	}
 	if o.Width == 0 {
 		o.Width = 1024
@@ -239,11 +245,15 @@ func (p *QwenImage21) Generate(o QwenImage21Options) (*QwenImage21Result, error)
 			return nil, fmt.Errorf("qwen-image 2.1 step %d: %w", i, err)
 		}
 		dt, _ := tensor.New([]float32{sigmas[i+1] - sigmas[i]}, []int{1}, p.Dev)
+		vel := v
 		if v, err = ops.Mul(v, dt); err != nil {
 			return nil, err
 		}
 		if x, err = ops.Add(x, v); err != nil {
 			return nil, err
+		}
+		if o.OnStep != nil {
+			o.OnStep(i, x, vel)
 		}
 	}
 	if p.opts.Sequential {

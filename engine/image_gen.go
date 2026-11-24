@@ -36,8 +36,8 @@ type ImageOptions struct {
 	Device   string // "", "cpu", "gpu", "webgpu": PickDevice
 	F32      bool   // keep F32 weights (default: 16-bit storage, F32 compute)
 	// OnPhase reports coarse progress ("load", "generate", "decode"); OnStep
-	// the denoising steps where the pipeline exposes them (SD 1.5, SDXL,
-	// FLUX.1, FLUX.2, Z-Image): step counts from 1 to total, starting
+	// the denoising steps (SD 1.5, SDXL, FLUX.1, FLUX.2, FLUX 3, Z-Image,
+	// Qwen-Image 2.1): step counts from 1 to total, starting
 	// later for an img2img run that skips the first steps.
 	OnPhase func(phase string)
 	OnStep  func(step, total int)
@@ -236,7 +236,8 @@ func GenerateImage(o ImageOptions) (*ImageResult, error) {
 		}
 		loadS = time.Since(t0).Seconds()
 		phase("generate")
-		res, err := p.Generate(diffusion.Flux3Options{Prompt: o.Prompt, Width: o.Width, Height: o.Height, Steps: o.Steps, Seed: o.Seed, Images: o.Refs})
+		res, err := p.Generate(diffusion.Flux3Options{Prompt: o.Prompt, Width: o.Width, Height: o.Height, Steps: o.Steps, Seed: o.Seed, Images: o.Refs,
+			OnStep: stepProgress(o, p.DefaultSteps())})
 		if err != nil {
 			return nil, err
 		}
@@ -251,7 +252,8 @@ func GenerateImage(o ImageOptions) (*ImageResult, error) {
 		}
 		loadS = time.Since(t0).Seconds()
 		phase("generate")
-		res, err := p.Generate(diffusion.QwenImage21Options{Prompt: o.Prompt, Width: o.Width, Height: o.Height, Steps: o.Steps, Seed: o.Seed})
+		res, err := p.Generate(diffusion.QwenImage21Options{Prompt: o.Prompt, Width: o.Width, Height: o.Height, Steps: o.Steps, Seed: o.Seed,
+			OnStep: stepProgress(o, p.DefaultSteps())})
 		if err != nil {
 			return nil, err
 		}
