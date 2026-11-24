@@ -156,6 +156,18 @@ Light already has. Sizes are BF16 safetensors.
     non-commercial / research only): grounding VLM (detection, referring,
     pointing, layout OCR) on a Qwen2 LM; needs its vision tower and Parallel
     Box Decoding (block-wise multi-token box prediction). BF16, ~8 GB.
+18. **Time-series foundation models** (later, asked 2026-11-23), e.g.
+    Google **TimesFM**: a decoder-only patch transformer; needs a
+    forecasting API (context window in, horizon and quantiles out) rather
+    than chat.
+19. **Mirage** (`Cactus-Compute/mirage`, asked 2026-11-24; Apache-2.0, not
+    gated): a vision model for image understanding and structured
+    extraction (image + text in, text out). The repo ships
+    `mirage.safetensors`, a `mirage.cact` file (Cactus's own format) and a
+    config; the page gives neither architecture nor size, and its runtime
+    is the `cactus-compute` package, so the first step is identifying the
+    architecture from the config and the safetensors header, and a
+    reference may have to come from that runtime.
 
 ## 4. Backends
 
