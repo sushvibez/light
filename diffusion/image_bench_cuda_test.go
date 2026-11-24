@@ -79,8 +79,10 @@ func TestImageBenchCUDA(t *testing.T) {
 		}
 		// Each step ends at a device synchronisation, so a step's time is
 		// its own work and not what the next call happened to wait for.
-		onStep := func(int, *tensor.Tensor, *tensor.Tensor) {
+		pt := newPhaseTimer() // LIGHT_TIMINGS=1: driver calls, pool misses and collections per step
+		onStep := func(i int, _, _ *tensor.Tensor) {
 			_ = cudart.DeviceSynchronize()
+			pt.mark(fmt.Sprintf("step %d", i), nil)
 			now := time.Now()
 			stepTimes = append(stepTimes, now.Sub(last))
 			last = now

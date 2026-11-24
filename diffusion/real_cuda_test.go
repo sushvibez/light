@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"light/device"
+	"light/internal/cudart"
 	"light/models"
 	"light/safetensors"
 	"light/tensor"
@@ -189,11 +190,19 @@ func TestFlux2KleinRealCUDA(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := p.Generate(Flux2Options{Prompt: ref.Prompt, Width: ref.Width, Height: ref.Height, Steps: ref.Steps, Guidance: ref.Guidance, Latents: lat})
+	var marks []time.Time
+	onStep := func(int, *tensor.Tensor, *tensor.Tensor) { // each step ends at a device synchronisation
+		_ = cudart.DeviceSynchronize()
+		marks = append(marks, time.Now())
+	}
+	res, err := p.Generate(Flux2Options{Prompt: ref.Prompt, Width: ref.Width, Height: ref.Height, Steps: ref.Steps, Guidance: ref.Guidance, Latents: lat, OnStep: onStep})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("load + generate: %s", time.Since(t0).Round(100*time.Millisecond))
+	if n := len(marks); n > 1 {
+		t.Logf("per step: %.2f s (mean of the steps after the first)", marks[n-1].Sub(marks[0]).Seconds()/float64(n-1))
+	}
 	compareRealTol(t, res.Image, ref, tol)
 }
 

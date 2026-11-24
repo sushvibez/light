@@ -67,6 +67,8 @@ func (bh *BlasHandle) useStream(s uintptr) error {
 func SgemmRowMajor(h *BlasHandle, m, n, k int, a, b, c uintptr) error {
 	alpha := C.float(1.0)
 	beta := C.float(0.0)
+	span := gpuSpanBegin(fmt.Sprintf("gemm f32 %dx%dx%d", m, n, k))
+	defer span.end()
 	rc := C.cublasSgemm(
 		h.handle,
 		C.CUBLAS_OP_N, C.CUBLAS_OP_N,
@@ -94,6 +96,8 @@ func SgemmRowMajor(h *BlasHandle, m, n, k int, a, b, c uintptr) error {
 func SgemmRowMajorTransB(h *BlasHandle, m, n, k int, a, b, c uintptr) error {
 	alpha := C.float(1.0)
 	beta := C.float(0.0)
+	span := gpuSpanBegin(fmt.Sprintf("gemm f32 ᵀ %dx%dx%d", m, n, k))
+	defer span.end()
 	rc := C.cublasSgemm(
 		h.handle,
 		C.CUBLAS_OP_T, C.CUBLAS_OP_N,

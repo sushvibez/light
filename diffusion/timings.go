@@ -95,6 +95,8 @@ func stepProfile(i int, dev device.Device) func() {
 	if i != gpuProfileStep || os.Getenv("LIGHT_PROFILE_GPU") == "" || !device.IsCUDA(dev) {
 		return func() {}
 	}
+	_ = cudart.DeviceSynchronize()
+	t0 := time.Now()
 	cudart.StartGPUTrace()
 	return func() {
 		t, err := cudart.StopGPUTrace()
@@ -102,7 +104,7 @@ func stepProfile(i int, dev device.Device) func() {
 			fmt.Fprintf(os.Stderr, "gpu trace: %v\n", err)
 			return
 		}
-		fmt.Fprintf(os.Stderr, "gpu trace, step %d:\n%s\n", i, cudart.GPUTraceTop(t, 40))
+		fmt.Fprintf(os.Stderr, "gpu trace, step %d (%.0f ms on the clock):\n%s\n", i, time.Since(t0).Seconds()*1e3, cudart.GPUTraceTop(t, 40))
 	}
 }
 

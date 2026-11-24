@@ -2,7 +2,14 @@
 """Real-weight end-to-end reference of Z-Image-Turbo, FLUX.2 klein 4B or
 FLUX.1 (schnell / dev; diffusers, BF16 on CUDA with CPU offload) for
 diffusion's *RealCUDA tests.
-    .venv/bin/python scripts/verify/ref_real_pipe.py zimage|klein|flux2dev|schnell|flux1dev <out.json> [size] [steps]
+    .venv/bin/python scripts/verify/ref_real_pipe.py zimage|klein|klein-f32|flux2dev|schnell|flux1dev <out.json> [size] [steps]
+klein-f32 is klein at F32 compute from the BF16 weights, as Light runs it
+without Mixed16: every weight stays BF16 on the card and widens to F32
+around its layer's forward (the 14.6 GB of true F32 weights do not fit a
+16 GB card), the VAE is F32, latents and prompt embeddings stay F32.
+Both klein modes load the encoder, encode, free it, then load the
+transformer (7.4 GB of host memory at a time), refuse to start below
+12 GB available, and print the time per step.
 flux2dev (FLUX.2-dev: 32B transformer + Mistral-3 24B encoder, 112 GB) needs
 an 80 GB card with model CPU offload (an H100 on Colab).
 FLUX.1's 12B transformer exceeds a 16 GB card, so it runs with sequential
@@ -15,7 +22,7 @@ writes the prompt, size, steps, guidance, latents and the final image
 (float, (3, H, W) in [0, 1]) to <out.json>. Light runs the same latents on
 the GPU and compares.
 """
-import json, sys
+import json, sys, time
 import torch
 
 which, out_json = sys.argv[1], sys.argv[2]
@@ -39,14 +46,66 @@ if which == "zimage":
     m.randn_tensor = patched_randn
     pipe.enable_model_cpu_offload()
     img = pipe(prompt=prompt, height=size, width=size, num_inference_steps=steps, guidance_scale=guidance, output_type="pt").images
-elif which == "klein":
+elif which in ("klein", "klein-f32"):
+    # One model in host memory at a time: the encoder and the transformer
+    # are 7.4 GB each, and holding both took the host down (2026-11-24).
+    import gc
     from diffusers import Flux2KleinPipeline
+    from diffusers.hooks import apply_layerwise_casting
     import diffusers.pipelines.flux2.pipeline_flux2_klein as m
     repo, guidance = "black-forest-labs/FLUX.2-klein-4B", 0.0
-    pipe = Flux2KleinPipeline.from_pretrained(repo, torch_dtype=torch.bfloat16)
+    bf, f32 = torch.bfloat16, torch.float32
+    wide = which == "klein-f32"
+
+    def host_room(gb):
+        avail = next(int(l.split()[1]) for l in open("/proc/meminfo") if l.startswith("MemAvailable")) / 2**20
+        if avail < gb:
+            sys.exit("host has %.1f GB available, this step needs %d GB: not starting" % (avail, gb))
+
+    def f32_compute(model):
+        """BF16 weights on the card, each widened to F32 around its layer's
+        forward; what has no such hook (norm scales, bare parameters) widens once."""
+        apply_layerwise_casting(model, storage_dtype=bf, compute_dtype=f32, skip_modules_pattern=())
+        for mod in model.modules():
+            reg = getattr(mod, "_diffusers_hook", None)
+            if reg is not None and reg.get_hook("layerwise_casting") is not None:
+                continue
+            for store in (mod._parameters, mod._buffers):
+                for t in store.values():
+                    if t is not None and t.dtype == bf:
+                        t.data = t.data.to(f32)
+
+    host_room(12)
+    enc = Flux2KleinPipeline.from_pretrained(repo, transformer=None, vae=None, torch_dtype=bf)
+    if wide:
+        f32_compute(enc.text_encoder)
+        embed = enc._get_qwen3_prompt_embeds  # it rounds to the encoder's stored dtype otherwise
+        enc._get_qwen3_prompt_embeds = lambda **kw: embed(**{**kw, "dtype": f32})
+    enc.to("cuda")
+    with torch.no_grad():
+        prompt_embeds, _ = enc.encode_prompt(prompt, device="cuda")
+    del enc
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    host_room(12)
+    pipe = Flux2KleinPipeline.from_pretrained(repo, text_encoder=None, tokenizer=None, torch_dtype=bf)
     m.randn_tensor = patched_randn
-    pipe.enable_model_cpu_offload()
-    img = pipe(prompt=prompt, height=size, width=size, num_inference_steps=steps, output_type="pt").images
+    if wide:
+        f32_compute(pipe.transformer)
+        pipe.vae.to(f32)
+    pipe.to("cuda")
+    marks = []
+    def on_step(p, i, t, kw):
+        torch.cuda.synchronize()
+        marks.append(time.time())
+        return {}
+    img = pipe(prompt_embeds=prompt_embeds, height=size, width=size, num_inference_steps=steps, output_type="pt",
+               callback_on_step_end=on_step).images
+    if len(marks) > 1:
+        print("per step: %.2f s (mean of the steps after the first), embeds %s, transformer %s" % (
+            (marks[-1] - marks[0]) / (len(marks) - 1), prompt_embeds.dtype, pipe.transformer.dtype))
+    print("peak card memory: %.1f GB" % (torch.cuda.max_memory_allocated() / 2**30))
 elif which == "flux2dev":
     from diffusers import Flux2Pipeline
     import diffusers.pipelines.flux2.pipeline_flux2 as m
@@ -79,7 +138,7 @@ elif which in ("schnell", "flux1dev"):
                callback_on_step_end_tensor_inputs=["latents"]).images
     extra["sigmas"] = pipe.scheduler.sigmas.float().cpu()
 else:
-    sys.exit("zimage, klein, flux2dev, schnell or flux1dev")
+    sys.exit("zimage, klein, klein-f32, flux2dev, schnell or flux1dev")
 
 lat = captured["latents"]
 img = img[0].float().clamp(0, 1).cpu()

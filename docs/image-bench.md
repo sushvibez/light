@@ -250,6 +250,32 @@ and 1.27 s at F32 compute. Z-Image has no Mixed16 option: its 0.50 s is
 its only path. The totals are dominated by loading and move with the
 page cache (klein FP8 measured 37 s to 96 s across runs).
 
+### Same precision on both sides: klein at F32 compute
+
+The table above compares Light's F32 compute with diffusers at BF16, so
+its Δ is mostly BF16 rounding and its times are not like for like. For
+klein both were run the same way: BF16 weights on the card, widened to F32
+around each layer (true F32 weights are 14.6 GB and do not fit), F32 VAE,
+F32 latents and prompt embeddings (`ref_real_pipe.py klein-f32`, then
+`TestFlux2KleinRealCUDA` on its output). 512², 4 steps, RTX 5060 Ti:
+
+| | Per step | Δ against the other |
+|---|---|---|
+| diffusers 0.37, F32 compute | 1.20 to 1.24 s | |
+| Light, F32 compute | 1.31 s | mean 0.0001, max 0.016 |
+
+- The images agree to 0.0001 mean (0.025 against the BF16 reference): the
+  whole difference in the table above is diffusers' BF16 arithmetic.
+- Light is 6 to 9 % behind per step. One step is 1.17 s of device work,
+  0.88 s of it the linear layers' F32 GEMMs at cuBLAS's rate (12 to 13
+  TFLOPS, the same library PyTorch calls); the rest is widening the
+  weights (64 ms), strided copies (57 ms), attention (110 ms) and about
+  140 ms outside the traced kernels, 60 ms of that in 22 collections the
+  allocator forces to get the widened weights back.
+- Light's figure moved between 1.31 and 1.53 s across runs on this
+  desktop the same afternoon (1.31 s in the last six, the higher ones
+  while the IDE was restarting); diffusers was measured twice.
+
 Tiny-verified only (architecture against diffusers on random weights, no
 real-weight run on this card yet): FLUX 3 image klein, Qwen-Image 2.1,
 SD 1.5, SDXL base, SD3.

@@ -382,6 +382,7 @@ func (p *Flux2) Generate(o Flux2Options) (*Flux2Result, error) {
 	sigmas := p.Scheduler.SigmasMu(o.Steps, flux2EmpiricalMu(h*w, o.Steps))
 	scalar := func(v float32) (*tensor.Tensor, error) { return tensor.New([]float32{v}, []int{1}, p.Dev) }
 	for i := range o.Steps {
+		endProfile := stepProfile(i, p.Dev)
 		t := sigmas[i] * float32(p.Scheduler.NumTrainTimesteps)
 		run := func(txt *tensor.Tensor) (*tensor.Tensor, error) {
 			in, ids := x, imgIDs
@@ -428,6 +429,7 @@ func (p *Flux2) Generate(o Flux2Options) (*Flux2Result, error) {
 		if x, err = ops.Add(x, v); err != nil {
 			return nil, err
 		}
+		endProfile()
 		if o.OnStep != nil {
 			o.OnStep(i, x, vel)
 		}
