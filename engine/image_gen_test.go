@@ -37,3 +37,45 @@ func TestGenerateImageSD15(t *testing.T) {
 	}
 	t.Logf("%s: load %.1f s, generate %.1f s, phases %v", res.Pipeline, res.LoadS, res.GenS, phases)
 }
+
+// Step progress for the flow-matching pipelines: (1..total, total), the
+// pipeline's default total when Steps is 0, and no callback when the
+// caller did not ask.
+func TestStepProgress(t *testing.T) {
+	if stepProgress(ImageOptions{}, 4) != nil {
+		t.Fatal("a callback without OnStep")
+	}
+	for _, c := range []struct{ steps, def, total int }{{0, 8, 8}, {3, 8, 3}} {
+		var got [][2]int
+		f := stepProgress(ImageOptions{Steps: c.steps, OnStep: func(step, total int) { got = append(got, [2]int{step, total}) }}, c.def)
+		for i := range c.total {
+			f(i, nil, nil)
+		}
+		if len(got) != c.total || got[0] != [2]int{1, c.total} || got[c.total-1] != [2]int{c.total, c.total} {
+			t.Errorf("steps %d (default %d): %v", c.steps, c.def, got)
+		}
+	}
+}
+
+// The tiny FluxPipeline through GenerateImage on the CPU reports every step.
+func TestGenerateImageFluxTinySteps(t *testing.T) {
+	repo := "../diffusion/testdata/flux-tiny-pipe"
+	if _, err := os.Stat(repo + "/model_index.json"); err != nil {
+		t.Skip(err)
+	}
+	for _, steps := range []int{0, 3} {
+		var got [][2]int
+		_, err := GenerateImage(ImageOptions{Repo: repo, Prompt: "a red bicycle", Width: 64, Height: 64, Steps: steps, Seed: 1, Device: "cpu",
+			OnStep: func(step, total int) { got = append(got, [2]int{step, total}) }})
+		if err != nil {
+			t.Skipf("tiny flux pipe does not run here: %v", err)
+		}
+		want := steps
+		if want == 0 {
+			want = 4
+		}
+		if len(got) != want || got[0] != [2]int{1, want} || got[want-1] != [2]int{want, want} {
+			t.Errorf("steps %d: progress %v", steps, got)
+		}
+	}
+}

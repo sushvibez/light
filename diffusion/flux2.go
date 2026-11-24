@@ -268,13 +268,19 @@ func (p *Flux2) encode(prompt string, L int, layers []int) (*tensor.Tensor, []in
 	return e, ids, err
 }
 
+// DefaultSteps is the step count Generate uses for Steps 0: 4 for the
+// step-distilled checkpoints, 50 otherwise.
+func (p *Flux2) DefaultSteps() int {
+	if p.Distilled {
+		return 4
+	}
+	return 50
+}
+
 // Generate runs the pipeline.
 func (p *Flux2) Generate(o Flux2Options) (*Flux2Result, error) {
 	if o.Steps == 0 {
-		o.Steps = 50
-		if p.Distilled {
-			o.Steps = 4
-		}
+		o.Steps = p.DefaultSteps()
 	}
 	if o.Guidance == 0 {
 		o.Guidance = 4

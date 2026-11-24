@@ -265,10 +265,13 @@ func (p *Flux) scalar(v float32) (*tensor.Tensor, error) {
 	return tensor.New([]float32{v}, []int{1}, p.Dev)
 }
 
+// DefaultSteps is the step count Generate uses for Steps 0.
+func (p *Flux) DefaultSteps() int { return 4 }
+
 // Generate runs the pipeline.
 func (p *Flux) Generate(o FluxOptions) (*FluxResult, error) {
 	if o.Steps == 0 {
-		o.Steps = 4
+		o.Steps = p.DefaultSteps()
 	}
 	if o.Guidance == 0 {
 		o.Guidance = 3.5

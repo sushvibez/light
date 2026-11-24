@@ -210,10 +210,13 @@ func (p *ZImage) encode(prompt string, maxLen int) (*tensor.Tensor, []int64, err
 	return c, ids, err
 }
 
+// DefaultSteps is the step count Generate uses for Steps 0 (Turbo).
+func (p *ZImage) DefaultSteps() int { return 8 }
+
 // Generate runs the pipeline.
 func (p *ZImage) Generate(o ZImageOptions) (*ZImageResult, error) {
 	if o.Steps == 0 {
-		o.Steps = 8
+		o.Steps = p.DefaultSteps()
 	}
 	if o.MaxSeqLen == 0 {
 		o.MaxSeqLen = 512

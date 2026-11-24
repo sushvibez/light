@@ -36,7 +36,9 @@ type ImageOptions struct {
 	Device   string // "", "cpu", "gpu", "webgpu": PickDevice
 	F32      bool   // keep F32 weights (default: 16-bit storage, F32 compute)
 	// OnPhase reports coarse progress ("load", "generate", "decode"); OnStep
-	// the denoising steps where the pipeline exposes them (SD 1.5, SDXL).
+	// the denoising steps where the pipeline exposes them (SD 1.5, SDXL,
+	// FLUX.1, FLUX.2, Z-Image): step counts from 1 to total, starting
+	// later for an img2img run that skips the first steps.
 	OnPhase func(phase string)
 	OnStep  func(step, total int)
 	// OnDownload reports component files fetched from the Hub before
@@ -151,7 +153,8 @@ func GenerateImage(o ImageOptions) (*ImageResult, error) {
 		}
 		loadS = time.Since(t0).Seconds()
 		phase("generate")
-		res, err := p.Generate(diffusion.Flux2Options{Prompt: o.Prompt, Width: o.Width, Height: o.Height, Steps: o.Steps, Guidance: o.Guidance, Seed: o.Seed, Images: o.Refs})
+		res, err := p.Generate(diffusion.Flux2Options{Prompt: o.Prompt, Width: o.Width, Height: o.Height, Steps: o.Steps, Guidance: o.Guidance, Seed: o.Seed, Images: o.Refs,
+			OnStep: stepProgress(o, p.DefaultSteps())})
 		if err != nil {
 			return nil, err
 		}
@@ -167,7 +170,8 @@ func GenerateImage(o ImageOptions) (*ImageResult, error) {
 		}
 		loadS = time.Since(t0).Seconds()
 		phase("generate")
-		res, err := p.Generate(diffusion.ZImageOptions{Prompt: o.Prompt, Width: o.Width, Height: o.Height, Steps: o.Steps, Guidance: o.Guidance, Seed: o.Seed, Img2Img: i2i})
+		res, err := p.Generate(diffusion.ZImageOptions{Prompt: o.Prompt, Width: o.Width, Height: o.Height, Steps: o.Steps, Guidance: o.Guidance, Seed: o.Seed, Img2Img: i2i,
+			OnStep: stepProgress(o, p.DefaultSteps())})
 		if err != nil {
 			return nil, err
 		}
@@ -219,7 +223,8 @@ func GenerateImage(o ImageOptions) (*ImageResult, error) {
 		}
 		loadS = time.Since(t0).Seconds()
 		phase("generate")
-		res, err := p.Generate(diffusion.FluxOptions{Prompt: o.Prompt, Width: w, Height: h, Steps: o.Steps, Guidance: o.Guidance, Seed: o.Seed, Img2Img: i2i})
+		res, err := p.Generate(diffusion.FluxOptions{Prompt: o.Prompt, Width: w, Height: h, Steps: o.Steps, Guidance: o.Guidance, Seed: o.Seed, Img2Img: i2i,
+			OnStep: stepProgress(o, p.DefaultSteps())})
 		if err != nil {
 			return nil, err
 		}
@@ -380,4 +385,19 @@ func dirBytes(dir, glob string) int64 {
 		}
 	}
 	return n
+}
+
+// stepProgress adapts ImageOptions.OnStep to the flow-matching pipelines'
+// step callback (0-based step, latents, prediction): nil when the caller
+// did not ask, otherwise (step + 1, total) with the pipeline's default
+// when Steps is 0.
+func stepProgress(o ImageOptions, defaultSteps int) func(int, *tensor.Tensor, *tensor.Tensor) {
+	if o.OnStep == nil {
+		return nil
+	}
+	total := o.Steps
+	if total == 0 {
+		total = defaultSteps
+	}
+	return func(step int, _, _ *tensor.Tensor) { o.OnStep(step+1, total) }
 }
