@@ -106,8 +106,11 @@ columns are the like-for-like pair.
   28 steps in 1m11s from a cold start.
 - Whole generations at the same precision: Light is ahead of diffusers on
   klein (30 s against 38 s) and Z-Image (1m38s against 2m32s), on loading;
-  Light's per-step time for those two pipelines is not reported yet (no
-  step callback there), so the per-step comparison is open.
+  Light's per-step time for those two pipelines was not reported in this
+  run (no step callback then). `Flux2Options.OnStep` and
+  `ZImageOptions.OnStep` exist now and the benchmark uses them; the
+  1024² figures need a rerun on Colab, the 512² ones are in the
+  verification table below.
 - The GGUF rows did not move under Mixed16 in this run: quantized
   weights dequantized to F32 and ran the F32 GEMM (6.7 s a step against
   1.1 s for FP8). Fixed since (`ops.MatMulQMixed`: dequantize, round to
@@ -226,9 +229,9 @@ weights; every image shows the same scene, the Q4 dev run redraws the rocks).
 
 | Model | Transformer | Fits how | Per step | Loads + steps | Δ | Steps |
 |---|---|---|---|---|---|---|
-| Z-Image-Turbo 6B | BF16 | resident | ~7 s | 53 s | 0.026 | 4 |
-| FLUX.2 klein 4B | BF16 | resident | ~9 s | 57 s | 0.025 | 4 |
-| FLUX.2 klein 4B | FP8 folder, 3.7 GB | resident | ~5 s | 37 s | 0.029 | 4 |
+| Z-Image-Turbo 6B | BF16 | resident | 0.50 s | 53 s | 0.026 | 4 |
+| FLUX.2 klein 4B | BF16 | resident | 1.31 s | 57 s | 0.025 | 4 |
+| FLUX.2 klein 4B | FP8 folder, 3.7 GB | resident | 1.27 s | 37 s | 0.029 | 4 |
 | FLUX.1 schnell 12B | BF16, 23.8 GB | streamed | 25 s | 3.3 min | 0.018 | 4 |
 | FLUX.1 schnell 12B | FP8, 11.9 GB | resident | 3.1 s | 44 s | 0.024 | 4 |
 | FLUX.1 schnell 12B | Q4_K_S GGUF, 6.8 GB | resident | 2.6 s | 39 s | 0.033 | 4 |
@@ -237,6 +240,15 @@ weights; every image shows the same scene, the Q4 dev run redraws the rocks).
 | FLUX.1 dev 12B | Q4_K_S GGUF, 6.8 GB | resident | 3.2 s | 55 s | 0.066 | 8 |
 | FLUX.2 dev 32B | BF16, 64 GB | Colab A100 40 GB: Mistral-3 24B encoder on the CPU, blocks streamed | ~80 s | 12.1 min | 0.010 | 8 |
 | FLUX.2 dev 32B | FP8 folder, 30.7 GB | Colab A100 40 GB: encoder on the CPU, resident | ~35 s | 6.4 min | 0.018 | 8 |
+
+The Z-Image and klein per-step figures are measured through the step
+callback, each step ended by a device synchronisation, mean over the
+steps after the first (they were estimates from the total before, which
+counted the loads: about 7, 9 and 5 s). With Mixed16, klein is 0.44 s a
+step from the BF16 repo and 0.49 s from the FP8 folder, against 1.31 s
+and 1.27 s at F32 compute. Z-Image has no Mixed16 option: its 0.50 s is
+its only path. The totals are dominated by loading and move with the
+page cache (klein FP8 measured 37 s to 96 s across runs).
 
 Tiny-verified only (architecture against diffusers on random weights, no
 real-weight run on this card yet): FLUX 3 image klein, Qwen-Image 2.1,

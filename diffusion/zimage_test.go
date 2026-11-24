@@ -97,10 +97,26 @@ func TestZImagePipelineTinyMatchesDiffusers(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			var seen []int
 			res, err := p.Generate(ZImageOptions{Prompt: ref.Prompt, Width: ref.Width, Height: ref.Height,
-				Steps: ref.Steps, Guidance: ref.Guidance, MaxSeqLen: ref.MaxSeqLen, Latents: lat})
+				Steps: ref.Steps, Guidance: ref.Guidance, MaxSeqLen: ref.MaxSeqLen, Latents: lat,
+				OnStep: func(step int, x, v *tensor.Tensor) {
+					if x == nil || v == nil || !slices.Equal(x.Shape().Dims(), v.Shape().Dims()) {
+						t.Errorf("OnStep %d: latents %v, prediction %v", step, x, v)
+					}
+					seen = append(seen, step)
+				}})
 			if err != nil {
 				t.Fatal(err)
+			}
+			if len(seen) != ref.Steps {
+				t.Errorf("OnStep ran for steps %v, want 0..%d", seen, ref.Steps-1)
+			}
+			for i, s := range seen {
+				if s != i {
+					t.Errorf("OnStep order %v", seen)
+					break
+				}
 			}
 			if !slices.Equal(res.IDs, ref.IDs) {
 				t.Errorf("ids\n got %v\nwant %v", res.IDs, ref.IDs)

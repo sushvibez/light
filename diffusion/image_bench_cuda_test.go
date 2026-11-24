@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"light/device"
+	"light/internal/cudart"
 	"light/tensor"
 )
 
@@ -73,8 +74,16 @@ func TestImageBenchCUDA(t *testing.T) {
 		var stepTimes []time.Duration
 		last := t0
 		mixed := os.Getenv("LIGHT_FLUX_MIXED16") != ""
-		if mixed {
+		if mixed && kind != "zimage" { // Z-Image has no Mixed16 path
 			variant += " mixed"
+		}
+		// Each step ends at a device synchronisation, so a step's time is
+		// its own work and not what the next call happened to wait for.
+		onStep := func(int, *tensor.Tensor, *tensor.Tensor) {
+			_ = cudart.DeviceSynchronize()
+			now := time.Now()
+			stepTimes = append(stepTimes, now.Sub(last))
+			last = now
 		}
 		var gen func() error
 		switch kind {
@@ -93,11 +102,7 @@ func TestImageBenchCUDA(t *testing.T) {
 					return err
 				}
 				_, err = p.Generate(FluxOptions{Prompt: prompt, Width: size, Height: size, Steps: steps, Guidance: guidance, Seed: 7,
-					OnStep: func(int, *tensor.Tensor, *tensor.Tensor) {
-						now := time.Now()
-						stepTimes = append(stepTimes, now.Sub(last))
-						last = now
-					}})
+					OnStep: onStep})
 				return err
 			}
 		case "flux2":
@@ -111,7 +116,7 @@ func TestImageBenchCUDA(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				_, err = p.Generate(Flux2Options{Prompt: prompt, Width: size, Height: size, Steps: steps, Guidance: guidance, Seed: 7})
+				_, err = p.Generate(Flux2Options{Prompt: prompt, Width: size, Height: size, Steps: steps, Guidance: guidance, Seed: 7, OnStep: onStep})
 				return err
 			}
 		case "zimage":
@@ -120,7 +125,7 @@ func TestImageBenchCUDA(t *testing.T) {
 				if err != nil {
 					return err
 				}
-				_, err = p.Generate(ZImageOptions{Prompt: prompt, Width: size, Height: size, Steps: steps, Guidance: guidance, Seed: 7})
+				_, err = p.Generate(ZImageOptions{Prompt: prompt, Width: size, Height: size, Steps: steps, Guidance: guidance, Seed: 7, OnStep: onStep})
 				return err
 			}
 		default:
@@ -138,7 +143,11 @@ func TestImageBenchCUDA(t *testing.T) {
 			for _, d := range stepTimes[1:] {
 				sum += d
 			}
-			per = fmt.Sprintf("%.1f s", (sum / time.Duration(len(stepTimes)-1)).Seconds())
+			if s := (sum / time.Duration(len(stepTimes)-1)).Seconds(); s < 2 {
+				per = fmt.Sprintf("%.2f s", s)
+			} else {
+				per = fmt.Sprintf("%.1f s", s)
+			}
 		}
 		row := fmt.Sprintf("| %s | %s | %d² | %d | %s | %s |", name, variant, size, steps, per, total.Round(time.Second))
 		t.Log(row)

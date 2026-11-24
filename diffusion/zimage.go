@@ -162,6 +162,10 @@ type ZImageOptions struct {
 	// default to the image's. Noise is the (C, h, w) noise (seeded when nil).
 	Img2Img Img2Img
 	Noise   *tensor.Tensor
+	// OnStep, when set, sees the latents (C, h, w) after each step and the
+	// model's prediction the step used (the negated velocity, after
+	// guidance). step counts from 0, or from the start step for img2img.
+	OnStep func(step int, x, v *tensor.Tensor)
 }
 
 // ZImageResult is a generated image and what produced it.
@@ -317,11 +321,15 @@ func (p *ZImage) Generate(o ZImageOptions) (*ZImageResult, error) {
 		}
 		// The model predicts the negated velocity.
 		dt, _ := scalar(sigmas[i] - sigmas[i+1])
+		pred := v
 		if v, err = ops.Mul(v, dt); err != nil {
 			return nil, err
 		}
 		if x, err = ops.Add(x, v); err != nil {
 			return nil, err
+		}
+		if o.OnStep != nil {
+			o.OnStep(i, x, pred)
 		}
 		endProfile()
 		pt.mark(fmt.Sprintf("step %d", i), x)

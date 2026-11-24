@@ -199,6 +199,9 @@ type Flux2Options struct {
 	// Latents, when set, is the initial noise (1, 4·C, H/2, W/2) before
 	// packing (to match a reference run).
 	Latents *tensor.Tensor
+	// OnStep, when set, sees the packed latents after each step and the
+	// velocity the step used (after guidance), as FluxOptions.OnStep.
+	OnStep func(step int, x, v *tensor.Tensor)
 }
 
 // Flux2Result is a generated image and what produced it.
@@ -412,11 +415,15 @@ func (p *Flux2) Generate(o Flux2Options) (*Flux2Result, error) {
 			}
 		}
 		dt, _ := scalar(sigmas[i+1] - sigmas[i])
+		vel := v
 		if v, err = ops.Mul(v, dt); err != nil {
 			return nil, err
 		}
 		if x, err = ops.Add(x, v); err != nil {
 			return nil, err
+		}
+		if o.OnStep != nil {
+			o.OnStep(i, x, vel)
 		}
 	}
 
