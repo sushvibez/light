@@ -49,12 +49,16 @@ func matmulW16CUDA(ctx *registry.Context) error {
 	if err := cudart.SetDevice(ord); err != nil {
 		return err
 	}
-	scratch, err := storage.NewCUDA(out.Device(), dtype.F32, N*K)
+	// Not zeroed (the cast writes all of it: zeroing was 14.6 GB of memset
+	// a step on FLUX.2 klein) and untracked by the GC: one Acquire / Release
+	// pair returns the block to the pool as soon as the GEMM is queued. It
+	// still counts toward the pool's forced collections: leaving it out cut
+	// them from 22 to 14 a step but the activations then came back too late
+	// (100 pool misses and evictions a step, no faster).
+	scratch, err := storage.NewCUDAUninit(out.Device(), dtype.F32, N*K)
 	if err != nil {
 		return err
 	}
-	// Untracked by the GC: one Acquire / Release pair returns the block to the
-	// pool as soon as the GEMM is queued.
 	scratch.Acquire()
 	defer scratch.Release()
 	if err := launchCast(w.DType(), dtype.F32, w.Storage().CUDAPtr(), scratch.CUDAPtr(), uint64(N*K)); err != nil {

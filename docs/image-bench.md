@@ -262,18 +262,25 @@ F32 latents and prompt embeddings (`ref_real_pipe.py klein-f32`, then
 | | Per step | Δ against the other |
 |---|---|---|
 | diffusers 0.37, F32 compute | 1.20 to 1.24 s | |
-| Light, F32 compute | 1.31 s | mean 0.0001, max 0.016 |
+| Light, F32 compute | 1.29 s | mean 0.0001, max 0.016 |
 
 - The images agree to 0.0001 mean (0.025 against the BF16 reference): the
   whole difference in the table above is diffusers' BF16 arithmetic.
-- Light is 6 to 9 % behind per step. One step is 1.17 s of device work,
+- Light is 4 to 8 % behind per step. One step is 1.17 s of device work,
   0.88 s of it the linear layers' F32 GEMMs at cuBLAS's rate (12 to 13
   TFLOPS, the same library PyTorch calls); the rest is widening the
   weights (64 ms), strided copies (57 ms), attention (110 ms) and about
-  140 ms outside the traced kernels, 60 ms of that in 22 collections the
-  allocator forces to get the widened weights back.
+  120 ms outside the traced kernels, 60 ms of that in 22 collections the
+  allocator forces per step.
+- The widened weight was already handed back to the pool right after its
+  GEMM. Two things were tried on top (2026-11-26): not zeroing that
+  scratch block (it was 14.6 GB of memset a step) took 1.31 s to 1.29 s
+  and stayed; not counting it toward the forced collections cut them to
+  14 a step but the activations then returned too late (about 100 pool
+  misses and device frees a step, 1.30 s), so it was reverted. The
+  collections are what returns the ordinary activations in time.
 - Light's figure moved between 1.31 and 1.53 s across runs on this
-  desktop the same afternoon (1.31 s in the last six, the higher ones
+  desktop the same afternoon (1.31 s in the last six before the change, the higher ones
   while the IDE was restarting); diffusers was measured twice.
 
 Tiny-verified only (architecture against diffusers on random weights, no
