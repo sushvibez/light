@@ -295,6 +295,7 @@ are listed in ROADMAP.md.
 - [x] Chat engine (`engine/`): catalog of HF-cache + GGUF models (chat, STT, embedding, speech, pytorch kinds), chat templates (the model's own Jinja `chat_template`, else built-in ChatML, Llama-3, Phi-3, Phi-4, Mistral, Gemma), streaming generation, diffusion-LM streaming, MTP speculative decoding for greedy requests
 - [x] OpenAI-compatible API: `/v1/models`, `/v1/chat/completions`, `/v1/audio/transcriptions` (Whisper, Qwen3-ASR), `/v1/embeddings` (EmbeddingGemma 2), speech-to-speech `/v1/audio/conversations` (Moshi); speech slot releases the chat model
 - [x] **`light` CLI** (`cmd/light`, replaces `cmd/light-serve`; 2026-11-08): interactive shell with `/` commands (`/model`, `/list`, `/pull`, `/info`, `/rm`, `/clear`, `/system`, `/set temp|top-p|top-k|max-tokens|seed|device|dtype`, `/verbose`, `/serve [addr|stop]`, `/unload`, `/bench`, `/perf`, `/help`, `/exit`; unique prefixes, `"""` multi-line, Ctrl-C stops a reply); subcommands `list` (`-json`), `pull <org/repo> [file ...]`, `run <model> [prompt]` (shell or one-shot / stdin), `info`, `rm`, `serve`, `bench`, `perf`. Device defaults to CUDA when built in, else the CPU (F32 for safetensors ≤ 6 GB); GOGC 25
+- [x] Image step progress: `ImageOptions.OnStep(step, total)` fires once per denoising step for FLUX.1, FLUX.2, FLUX 3, Qwen-Image 2.1 and Z-Image (the pipelines' `OnStep` callbacks and `DefaultSteps()`) — 2026-11-24
 - [x] `light idol <image>`: image of an object → 3DGS `.ply` + input crop + turntable preview (`splat.Render`, CPU EWA splatting) — 2026-11-15
 - [x] Per-host performance table (`~/.cache/light/perf.json`, `$LIGHT_PERF_FILE`): per host (CPU, RAM, OS, GPU names per device kind) and model × device: dtype, load time, host RAM and GPU memory growth, prompt length, prefill and decode tok/s; filled by every load / reply and by `light bench` — 2026-11-08
 - [x] Light Studio (Wails v3 + React desktop app) — moved to its own repository, `light-studio`, on 2026-11-08 (history kept; builds against a sibling checkout of this repo)
@@ -591,6 +592,20 @@ Merged WebGPU backend (no cgo, LLMs incl. quantized) · einsum · cumsum/topk ke
 | Phi-3.5-mini-instruct (BF16) | 10-token chat + decode | 3 821.08 M | 164 ms prefill + 15 tok/s | `examples/35_qwen_inference -repo microsoft/Phi-3.5-mini-instruct -bf16` (7.6 GB GPU) |
 | Qwen2-0.5B-Instruct **GGUF Q8_0 / Q4_K_M** | 15-token chat + decode | 494.03 M | 235 ms prefill + 17 tok/s | `examples/35_qwen_inference -gguf ~/.cache/light/gguf/qwen2-0.5b-instruct-q4_k_m.gguf` (0.4 GB + F32 embedding); logits within 0.05 (Q8_0) / 0.4 (Q4_K_M) of F32 |
 | Llama-3.2-1B-Instruct **GGUF Q4_K_M** | 17-token chat + decode | 1 235.81 M | 501 ms prefill + 14 tok/s | `-gguf ~/.cache/light/gguf/llama-3.2-1b-instruct-q4_k_m.gguf -repo meta-llama/Llama-3.2-1B-Instruct`; same top-3 as F32, greedy identical |
+
+### Image generation against diffusers and PyTorch (RTX 5060 Ti, performance pass closed 2026-11-27)
+
+Tables, method and notes are in `docs/image-bench.md`. Where it ended:
+
+| What | Light | Reference |
+|------|-------|-----------|
+| Single ops at FLUX.1's 1024² geometry (GEMM F32 / BF16, attention F32 / BF16, norms, activations, 3x3 conv F32 / BF16) | at most 7 % behind on any row (BF16 conv 2.56 ms), ahead on most (F32 GEMM 9 to 18 %) | PyTorch 2.11; Candle is behind on every row |
+| FLUX.2 klein 4B, 512², F32 compute from BF16 weights | 1.29 s / step, image within 0.0001 mean of diffusers | diffusers 1.20 to 1.24 s / step |
+| FLUX.2 klein 4B, 512², Mixed16 (BF16 tensor cores) | 0.44 s / step (0.49 s from the FP8 folder) | |
+| Z-Image-Turbo, 512² | 0.50 s / step, Δ 0.026 | |
+| FLUX.1 schnell Q4_K_S GGUF, 512², Mixed16 | 1.11 s / step, Δ 0.033 | |
+
+What the pass changed: F32 attention through batched cuBLAS GEMMs (2.5x the flash kernel), BF16 flash attention retiled (6.50 → 5.38 ms), cuDNN convolution plans cached per shape, GGUF and FP8 weights on the Mixed16 path, the widened-weight scratch not zeroed. Open: the 1024² full-generation tables against diffusers and Candle need a Colab rerun (1024² benchmarks take this host down); the remaining F32 gap is the collections the caching pool forces to get activations back.
 
 ### Laptop: Core Ultra 7 356H CPU and Intel integrated graphics (2026-11-08)
 
